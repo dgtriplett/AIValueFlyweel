@@ -65,14 +65,13 @@ databricks current-user me -p <profile>      # verify
 
 ## Step 1 — Provision Lakebase
 
-The app stores portfolio state in a Lakebase (Autoscaling Postgres) project.
+The app stores portfolio state in a Lakebase **project**.
 
 ```bash
 databricks postgres create-project grid-atlas-db -p <profile>
 ```
 
-Or create it in the UI: **Compute → Lakebase → Create project**, named
-`grid-atlas-db`.
+Or in the UI: **Compute → Lakebase → Create project**, named `grid-atlas-db`.
 
 `scripts/deploy.py` auto-detects the endpoint host once the project exists. To
 find it yourself:
@@ -81,6 +80,60 @@ find it yourself:
 databricks postgres list-endpoints projects/grid-atlas-db/branches/production \
   -p <profile> -o json
 ```
+
+> [!IMPORTANT]
+> **Two Lakebase primitives, and they are not interchangeable.**
+>
+> - `databricks postgres ...` manages **projects**. This app connects to a project
+>   over plain Postgres, using `PGHOST` / `PGUSER` from `app.yaml`.
+> - `databricks database ...` manages **database instances**, which is what an App
+>   `database` resource binds to.
+>
+> Grid Atlas deliberately declares **no** `database` app resource. Binding an
+> instance the app never connects to creates a Postgres role that OAuth token auth
+> then rejects, and the app starts in demo mode with *"External authorization
+> failed"* — which looks like a credentials problem and is not one.
+
+### The service-principal role (the step that silently breaks things)
+
+The app authenticates to Postgres **as its own service principal**, using its
+OAuth token as the password. That only works if the role was created through the
+Lakebase **roles API** with `auth_method=LAKEBASE_OAUTH_V1` and
+`identity_type=SERVICE_PRINCIPAL`.
+
+A role created with a plain SQL `CREATE ROLE ... WITH LOGIN` looks correct in
+`pg_roles` but is **not linked to the workspace identity**, so token auth fails
+with *"password authentication failed"* and the app quietly runs in demo mode.
+
+`scripts/deploy.py` does this for you. To verify or do it by hand:
+
+```bash
+# Check what is registered
+databricks postgres list-roles projects/grid-atlas-db/branches/production \
+  -p <profile> -o json
+
+# Register the app SP (the body needs a `spec` wrapper that the CLI's --json
+# flag strips, so this goes through the REST API)
+curl -X POST "https://<workspace>/api/2.0/postgres/projects/grid-atlas-db/branches/production/roles?role_id=grid-atlas-app-sp" \
+  -H "Authorization: Bearer $(databricks auth token -p <profile> -o json | jq -r .access_token)" \
+  -H 'Content-Type: application/json' \
+  -d '{"spec":{"postgres_role":"<app-sp-client-id>","identity_type":"SERVICE_PRINCIPAL","auth_method":"LAKEBASE_OAUTH_V1","attributes":{"bypassrls":false,"createdb":false,"createrole":false}}}'
+```
+
+Then grant it DML (after seeding, so the grants cover the seeded tables):
+
+```sql
+GRANT CONNECT ON DATABASE "app" TO "<app-sp-client-id>";
+GRANT USAGE ON SCHEMA public TO "<app-sp-client-id>";
+GRANT SELECT, INSERT, UPDATE, DELETE ON ALL TABLES IN SCHEMA public TO "<app-sp-client-id>";
+GRANT USAGE, SELECT ON ALL SEQUENCES IN SCHEMA public TO "<app-sp-client-id>";
+ALTER DEFAULT PRIVILEGES IN SCHEMA public
+  GRANT SELECT, INSERT, UPDATE, DELETE ON TABLES TO "<app-sp-client-id>";
+```
+
+Deliberately **not** ownership: without it the SP cannot run DDL, which is the
+intended least-privilege posture (`app.py`'s `run_migrations()` expects that and
+logs a single benign line).
 
 ---
 
@@ -300,6 +353,29 @@ module requirements, which sets `requires_locked` and restores strict matching.
 
 **Deploy can't auto-detect the Lakebase host.** The project doesn't exist yet — do
 step 1, or pass `--lakebase-host`.
+
+**The app runs in demo mode with real data seeded.** Check the logs:
+
+```bash
+databricks apps logs grid-atlas -p <profile> | grep '\[db\]'
+```
+
+- *"External authorization failed"* — the app is pointed at a Lakebase **instance**
+  rather than a **project**, or a `database` app resource is bound. See step 1.
+- *"password authentication failed for user &lt;uuid&gt;"* — the SP's Postgres role
+  exists but is not identity-linked. See "The service-principal role" in step 1.
+
+**Agents fall back to heuristics on a model that should work.** Endpoints disagree
+about optional parameters and reject unsupported ones with a hard 400 rather than
+ignoring them. `_llm_json` negotiates this automatically (it drops `temperature` or
+`response_format` when the error names them, and floors `max_tokens` so a reasoning
+model has room to answer after its reasoning block). If a *new* endpoint rejects
+something else, the app log line `[agents] LLM call fell back: ...` names it — add
+it to the negotiation in `server/routes/agents.py`.
+
+**`bundle run` says a variable has no value.** `bundle run` needs the same
+`--var` flags as `bundle deploy`; it does not remember them. `scripts/deploy.py`
+passes them for you.
 
 ---
 
