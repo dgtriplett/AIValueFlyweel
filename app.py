@@ -31,6 +31,8 @@ from server.routes import (
     onboarding,
     joint_funding,
     source_recommendations,
+    domains,
+    ingestion,
 )
 
 BASE_DIR = Path(__file__).parent
@@ -87,8 +89,13 @@ app = FastAPI(title="Grid Atlas", version="0.1.0", lifespan=lifespan)
 # --- API routers -----------------------------------------------------------
 for module in (lobs, data_assets, use_cases, dependencies, values, roadmap,
                comments, funding_requests, impact, value_assumptions, genie, agents,
-               analytics, live, onboarding, joint_funding, source_recommendations):
+               analytics, live, onboarding, joint_funding, source_recommendations,
+               domains, ingestion):
     app.include_router(module.router, prefix="/api")
+
+# domains.py also exports a router rooted at /use-cases (a use case's required
+# domains belong under the use case, not under /domains).
+app.include_router(domains.uc_router, prefix="/api")
 
 # --- Demo Mode (ISOLATED feature; gated behind DEMO_MODE env; see DEMO_MODE.md) ---
 # To remove before Marketplace: delete this block + server/routes/demo.py.

@@ -1,0 +1,12 @@
+# Grid Atlas — workspace list for the metadata extractor.
+#
+# One Databricks workspace URL per line. Lines starting with # are ignored.
+# List every workspace whose data you want in the inventory — including the ones
+# the Grid Atlas app itself cannot reach (that is the whole point of this tool).
+#
+# The script reuses a matching ~/.databrickscfg profile when it finds one, and
+# otherwise opens a browser to authenticate. Only metadata is read.
+#
+# Examples (replace with your own):
+# https://my-workspace.cloud.databricks.com
+# https://adb-1234567890123456.7.azuredatabricks.net

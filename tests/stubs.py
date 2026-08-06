@@ -72,10 +72,35 @@ def _openai() -> types.ModuleType:
     return mod
 
 
+def _multipart() -> types.ModuleType:
+    """Satisfy FastAPI's import-time probe for python-multipart.
+
+    FastAPI calls `ensure_multipart_is_installed()` while BUILDING a route that
+    declares `UploadFile`, so a missing package raises at import time — before any
+    request. It is a real runtime dependency (declared in requirements.txt); this
+    stub only lets the route table be constructed so route wiring can be asserted
+    without installing it. FastAPI checks for the `multipart.multipart`
+    submodule and a __version__, so both are provided.
+    """
+    mod = types.ModuleType("multipart")
+    mod.__version__ = "0.0.20"
+    submodule = types.ModuleType("multipart.multipart")
+
+    def parse_options_header(value):  # pragma: no cover - never called in tests
+        raise RuntimeError("python-multipart is stubbed in tests")
+
+    submodule.parse_options_header = parse_options_header
+    mod.multipart = submodule
+    mod.parse_options_header = parse_options_header
+    sys.modules["multipart.multipart"] = submodule
+    return mod
+
+
 def install() -> None:
     _ensure("asyncpg", _asyncpg)
     _ensure("aiohttp", _aiohttp)
     _ensure("openai", _openai)
+    _ensure("multipart", _multipart)
 
 
 install()
