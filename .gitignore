@@ -1,0 +1,52 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.egg-info/
+.eggs/
+.venv/
+venv/
+env/
+.env
+.env.*
+*.log
+uv.lock
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# Node / frontend
+node_modules/
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+.pnpm-debug.log*
+# NOTE: frontend/dist is intentionally COMMITTED — the app serves the pre-built
+# SPA from it and the React source (frontend/src) is not in this repo. Do not
+# ignore it.
+
+# IDE / editors
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+
+# Databricks
+.databricks/
+.bundle/
+
+# Git (excluded from workspace sync)
+.git/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Local QA / screenshot artifacts — never commit or deploy these
+.screenshots/
+.screenshots-*/
+.screenshots2/
+.screenshots3/
+qa_screens/
+*.screenshot.png

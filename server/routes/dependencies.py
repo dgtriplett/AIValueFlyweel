@@ -1,0 +1,118 @@
+"""Dependency edges: UseCase->requires->DataAsset and UseCase->enables->UseCase."""
+from fastapi import APIRouter, HTTPException, Request
+from pydantic import BaseModel
+
+from ..common import current_user, rows_to_list, write_audit
+from ..db import db
+from ..phase import recompute_and_store
+
+router = APIRouter(prefix="/dependencies", tags=["dependencies"])
+
+
+# --- requires edges (use case -> data asset) -------------------------------
+class RequiresIn(BaseModel):
+    use_case_id: int
+    data_asset_id: int
+    criticality: str = "required"
+    manual: bool = False  # hand-edited via the UI override -> locks the UC's mapping
+
+
+@router.get("/requires")
+async def list_requires(use_case_id: int | None = None, data_asset_id: int | None = None):
+    if use_case_id is not None:
+        rows = await db.fetch("SELECT * FROM uc_requires_asset WHERE use_case_id=$1", use_case_id)
+    elif data_asset_id is not None:
+        rows = await db.fetch("SELECT * FROM uc_requires_asset WHERE data_asset_id=$1", data_asset_id)
+    else:
+        rows = await db.fetch("SELECT * FROM uc_requires_asset ORDER BY use_case_id")
+    return rows_to_list(rows)
+
+
+@router.post("/requires")
+async def create_requires(body: RequiresIn, request: Request):
+    if body.criticality not in ("required", "helpful"):
+        raise HTTPException(422, "criticality must be 'required' or 'helpful'")
+    actor = current_user(request)
+    row = await db.fetchrow(
+        """INSERT INTO uc_requires_asset (use_case_id, data_asset_id, criticality, manual)
+           VALUES ($1,$2,$3,$4)
+           ON CONFLICT (use_case_id, data_asset_id)
+           DO UPDATE SET criticality=EXCLUDED.criticality,
+                         manual=(uc_requires_asset.manual OR EXCLUDED.manual) RETURNING *""",
+        body.use_case_id, body.data_asset_id, body.criticality, body.manual,
+    )
+    if row is None:
+        raise HTTPException(503, "Database unavailable")
+    if body.manual:
+        # lock the mapping so deterministic remap / agent auto-apply won't clobber it
+        await db.execute("UPDATE use_cases SET requires_locked=true WHERE id=$1", body.use_case_id)
+    await write_audit("uc_requires_asset", body.use_case_id, "create", actor, body.model_dump())
+    return dict(row)
+
+
+@router.delete("/requires")
+async def delete_requires(use_case_id: int, data_asset_id: int, request: Request,
+                          manual: bool = False):
+    actor = current_user(request)
+    res = await db.execute(
+        "DELETE FROM uc_requires_asset WHERE use_case_id=$1 AND data_asset_id=$2",
+        use_case_id, data_asset_id,
+    )
+    if manual:
+        await db.execute("UPDATE use_cases SET requires_locked=true WHERE id=$1", use_case_id)
+    await write_audit("uc_requires_asset", use_case_id, "delete", actor,
+                      {"data_asset_id": data_asset_id, "manual": manual})
+    return {"deleted": res is not None}
+
+
+# --- enables edges (use case -> use case) ----------------------------------
+class EnablesIn(BaseModel):
+    from_use_case_id: int
+    to_use_case_id: int
+    detected_by_agent: bool = False
+    rationale: str | None = None
+
+
+@router.get("/enables")
+async def list_enables(from_use_case_id: int | None = None, to_use_case_id: int | None = None):
+    if from_use_case_id is not None:
+        rows = await db.fetch("SELECT * FROM uc_enables_uc WHERE from_use_case_id=$1", from_use_case_id)
+    elif to_use_case_id is not None:
+        rows = await db.fetch("SELECT * FROM uc_enables_uc WHERE to_use_case_id=$1", to_use_case_id)
+    else:
+        rows = await db.fetch("SELECT * FROM uc_enables_uc ORDER BY from_use_case_id")
+    return rows_to_list(rows)
+
+
+@router.post("/enables")
+async def create_enables(body: EnablesIn, request: Request):
+    if body.from_use_case_id == body.to_use_case_id:
+        raise HTTPException(422, "A use case cannot enable itself")
+    actor = current_user(request)
+    row = await db.fetchrow(
+        """INSERT INTO uc_enables_uc
+           (from_use_case_id, to_use_case_id, detected_by_agent, rationale)
+           VALUES ($1,$2,$3,$4)
+           ON CONFLICT (from_use_case_id, to_use_case_id)
+           DO UPDATE SET detected_by_agent=EXCLUDED.detected_by_agent,
+                         rationale=EXCLUDED.rationale RETURNING *""",
+        body.from_use_case_id, body.to_use_case_id, body.detected_by_agent, body.rationale,
+    )
+    if row is None:
+        raise HTTPException(503, "Database unavailable")
+    await write_audit("uc_enables_uc", body.from_use_case_id, "create", actor, body.model_dump())
+    await recompute_and_store()  # phase derives from prerequisite depth
+    return dict(row)
+
+
+@router.delete("/enables")
+async def delete_enables(from_use_case_id: int, to_use_case_id: int, request: Request):
+    actor = current_user(request)
+    res = await db.execute(
+        "DELETE FROM uc_enables_uc WHERE from_use_case_id=$1 AND to_use_case_id=$2",
+        from_use_case_id, to_use_case_id,
+    )
+    await write_audit("uc_enables_uc", from_use_case_id, "delete", actor,
+                      {"to_use_case_id": to_use_case_id})
+    await recompute_and_store()  # phase derives from prerequisite depth
+    return {"deleted": res is not None}

@@ -1,0 +1,68 @@
+command:
+  - "python"
+  - "-m"
+  - "uvicorn"
+  - "app:app"
+  - "--host"
+  - "0.0.0.0"
+  - "--port"
+  - "8000"
+
+env:
+  # ---------------------------------------------------------------------------
+  # Lakebase Postgres (app state).
+  # PGHOST / PGUSER are environment-specific. `scripts/deploy.py` fills these in
+  # for you; if you edit by hand, set PGHOST to your Lakebase endpoint host and
+  # PGUSER to the app's service-principal client id (the app authenticates as
+  # itself and uses its OAuth token as the Postgres password — no stored secret).
+  # ---------------------------------------------------------------------------
+  - name: PGHOST
+    value: ""                       # e.g. ep-xxxx.database.us-west-2.cloud.databricks.com
+  - name: PGPORT
+    value: "5432"
+  - name: PGDATABASE
+    value: "app"
+  - name: PGUSER
+    value: ""                       # app service-principal client id (UUID)
+
+  # SQL warehouse for system-table reads, Unity Catalog access, and ai_query()
+  # enrichment. Injected from the bound sql_warehouse resource below.
+  - name: DATABRICKS_WAREHOUSE_ID
+    valueFrom: "sql-warehouse"
+
+  # Foundation Model endpoint for the AI agents (chat-completions compatible).
+  - name: SERVING_ENDPOINT
+    value: "databricks-claude-sonnet-4-5"
+
+  # ---------------------------------------------------------------------------
+  # Discovery layer (Unity Catalog). The app writes workspace-metadata inventory
+  # and ai_query() enrichment staging here. Requires USE_CATALOG + a schema the
+  # app SP can CREATE TABLE / MODIFY / SELECT in — the in-app Setup wizard
+  # (/api/setup/*) probes this and prints the exact GRANT statements if not.
+  # ---------------------------------------------------------------------------
+  - name: ATLAS_CATALOG
+    value: ""                       # e.g. main
+  - name: ATLAS_SCHEMA
+    value: "grid_atlas_discovery"
+
+  # Genie space over the portfolio mirror (optional; set after creating a space).
+  - name: GENIE_SPACE_ID
+    value: ""
+
+  # Unity Catalog target for the Genie mirror of the portfolio.
+  - name: GENIE_MIRROR_CATALOG
+    value: ""                       # e.g. main
+  - name: GENIE_MIRROR_SCHEMA
+    value: "grid_atlas"
+
+  # Demo Mode toggle (ISOLATED, removable feature — see DEMO_MODE.md).
+  # Ship OFF for customer / Marketplace installs.
+  - name: DEMO_MODE
+    value: "off"
+
+resources:
+  - name: "sql-warehouse"
+    description: "Warehouse for system-table reads, UC discovery, and ai_query() enrichment."
+    sql_warehouse:
+      id: ""                        # your warehouse id — deploy.py fills this in
+      permission: "CAN_USE"
