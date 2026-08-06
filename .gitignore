@@ -50,3 +50,6 @@ Thumbs.db
 .screenshots3/
 qa_screens/
 *.screenshot.png
+
+# Deploy script cache — records workspace-specific values; never commit
+.deploy-cache.json

@@ -35,6 +35,7 @@ from server.routes import (
     ingestion,
     generate,
     setup,
+    taxonomy,
 )
 
 BASE_DIR = Path(__file__).parent
@@ -95,7 +96,7 @@ app = FastAPI(title="Grid Atlas", version="0.1.0", lifespan=lifespan)
 for module in (lobs, data_assets, use_cases, dependencies, values, roadmap,
                comments, funding_requests, impact, value_assumptions, genie, agents,
                analytics, live, onboarding, joint_funding, source_recommendations,
-               domains, ingestion, generate, setup):
+               domains, ingestion, generate, setup, taxonomy):
     app.include_router(module.router, prefix="/api")
 
 # Secondary routers whose paths don't sit under their module's own prefix:
