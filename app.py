@@ -34,10 +34,11 @@ from server.routes import (
     domains,
     ingestion,
     generate,
+    setup,
 )
 
 BASE_DIR = Path(__file__).parent
-MIGRATION = BASE_DIR / "server" / "migrations" / "001_init.sql"
+MIGRATIONS_DIR = BASE_DIR / "server" / "migrations"
 FRONTEND_DIST = BASE_DIR / "frontend" / "dist"
 
 
@@ -57,7 +58,10 @@ async def run_migrations() -> None:
         print("[startup] Lakebase not configured - running in demo mode")
         return
     try:
-        sql = MIGRATION.read_text()
+        # Every migration, in lexical order. 002+ ALTER tables that 001 creates,
+        # so the numeric prefix ordering is load-bearing; applying only 001 would
+        # leave the domain, discovery, and agent tables missing.
+        sql = "\n".join(p.read_text() for p in sorted(MIGRATIONS_DIR.glob("*.sql")))
         async with pool.acquire() as conn:
             await conn.execute(sql)
         print("[startup] schema up to date")
@@ -91,7 +95,7 @@ app = FastAPI(title="Grid Atlas", version="0.1.0", lifespan=lifespan)
 for module in (lobs, data_assets, use_cases, dependencies, values, roadmap,
                comments, funding_requests, impact, value_assumptions, genie, agents,
                analytics, live, onboarding, joint_funding, source_recommendations,
-               domains, ingestion, generate):
+               domains, ingestion, generate, setup):
     app.include_router(module.router, prefix="/api")
 
 # Secondary routers whose paths don't sit under their module's own prefix:
