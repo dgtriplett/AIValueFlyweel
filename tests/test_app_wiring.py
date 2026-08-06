@@ -94,6 +94,39 @@ class TestDomainRoutes(unittest.TestCase):
                         order.index("/api/domains/{domain_id}"))
 
 
+class TestGenerationRoutes(unittest.TestCase):
+    def test_generation_and_confirm_registered(self):
+        paths = _paths()
+        for path in ("/api/generate/use-cases",
+                     "/api/generate/use-cases/commit",
+                     "/api/generate/use-cases/{preview_id}",
+                     "/api/generate/research",
+                     "/api/generate/previews",
+                     "/api/generate/cleanup",
+                     "/api/confirm/{token}"):
+            self.assertIn(path, paths, f"{path} not registered")
+
+    def test_confirm_supports_read_and_apply(self):
+        methods = _methods("/api/confirm/{token}")
+        self.assertIn("GET", methods)    # re-read a card after a reload
+        self.assertIn("POST", methods)   # consume it
+
+    def test_commit_is_not_shadowed_by_the_preview_id_route(self):
+        """`/use-cases/commit` and `/use-cases/{preview_id}` overlap textually.
+        They coexist today only because the parameterized route is GET-only. If
+        someone adds a GET to commit, or declares {preview_id} first for POST,
+        commit silently becomes a preview lookup — so pin both facts."""
+        order = [r.path for r in app.routes if hasattr(r, "path")]
+        commit_methods = _methods("/api/generate/use-cases/commit")
+        preview_methods = _methods("/api/generate/use-cases/{preview_id}")
+        self.assertEqual(commit_methods & preview_methods, set(),
+                         "commit and {preview_id} now share an HTTP method; declare "
+                         "the literal path before the parameterized one")
+        if commit_methods & preview_methods:
+            self.assertLess(order.index("/api/generate/use-cases/commit"),
+                            order.index("/api/generate/use-cases/{preview_id}"))
+
+
 class TestIngestionRoutes(unittest.TestCase):
     def test_pipeline_stages_registered(self):
         paths = _paths()

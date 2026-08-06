@@ -123,22 +123,58 @@ async def detect_dependencies(body: DetectIn):
 # ---------------------------------------------------------------------------
 # Shared LLM JSON helper
 # ---------------------------------------------------------------------------
-async def _llm_json(prompt: str, max_tokens: int = 1600):
+async def _llm_json(prompt: str, max_tokens: int = 1600, response_schema: dict | None = None):
     """Call the Foundation Model and parse a JSON object from the reply.
+
     Returns (parsed|None, used_llm, note). `note` is a short reason when we fall
-    back so the UI can show 'AI temporarily unavailable — showing heuristic'."""
-    try:
-        from ..llm import get_llm_client
+    back so the UI can show 'AI temporarily unavailable — showing heuristic'.
+
+    When `response_schema` is given, the endpoint is asked to enforce it
+    server-side, which is far more reliable than scraping braces out of prose. Not
+    every serving endpoint supports `response_format`, so a failure that looks
+    like an unsupported-parameter error is retried once without it rather than
+    losing the call entirely.
+    """
+    from ..llm import get_llm_client
+
+    async def _call(with_schema: bool):
         client = get_llm_client()
-        resp = await client.chat.completions.create(
-            model=SERVING_ENDPOINT,
-            messages=[{"role": "user", "content": prompt}],
-            max_tokens=max_tokens, temperature=0.2,
-        )
-        content = resp.choices[0].message.content
-        start, end = content.find("{"), content.rfind("}")
-        return json.loads(content[start:end + 1]), True, None
+        kwargs = {
+            "model": SERVING_ENDPOINT,
+            "messages": [{"role": "user", "content": prompt}],
+            "max_tokens": max_tokens,
+            "temperature": 0.2,
+        }
+        if with_schema and response_schema:
+            kwargs["response_format"] = response_schema
+        resp = await client.chat.completions.create(**kwargs)
+        return resp.choices[0].message.content
+
+    def _extract(content: str):
+        """Parse the reply, tolerating a code fence or surrounding prose."""
+        if not content:
+            raise ValueError("empty response")
+        text = content.strip()
+        if text.startswith("```"):
+            text = text.split("```", 2)[1] if text.count("```") >= 2 else text
+            text = text.split("\n", 1)[1] if "\n" in text else text
+        start, end = text.find("{"), text.rfind("}")
+        if start == -1 or end <= start:
+            raise ValueError("no JSON object in response")
+        return json.loads(text[start:end + 1])
+
+    try:
+        return _extract(await _call(with_schema=True)), True, None
     except Exception as exc:  # noqa: BLE001
+        message = str(exc).lower()
+        schema_unsupported = response_schema is not None and any(
+            token in message for token in
+            ("response_format", "unsupported", "unexpected keyword", "invalid_request"))
+        if schema_unsupported:
+            try:
+                return _extract(await _call(with_schema=False)), True, None
+            except Exception as retry_exc:  # noqa: BLE001
+                exc = retry_exc
         note = f"AI temporarily unavailable — showing heuristic ranking. ({type(exc).__name__})"
         print(f"[agents] LLM call fell back: {exc}")
         return None, False, note
