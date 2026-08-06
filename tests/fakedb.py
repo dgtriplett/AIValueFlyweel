@@ -31,13 +31,23 @@ class FakeDB:
         db.on("FROM use_cases uc", [Row(...)])
     """
 
-    def __init__(self) -> None:
+    def __init__(self, *, has_pool: bool = False) -> None:
         self._routes: list[tuple[str, list]] = []
         self.queries: list[str] = []
+        # `has_pool=True` makes the fake claim a live connection, which is what
+        # code paths gated on "is Lakebase reachable" check. Left False by default
+        # so unit tests see the demo-mode branch unless they opt in.
+        self._has_pool = has_pool
+        self.is_demo_mode = not has_pool
 
     def on(self, substring: str, rows: list) -> "FakeDB":
         self._routes.append((substring, rows))
         return self
+
+    async def get_pool(self):
+        """Stand in for the asyncpg pool. Returns a truthy sentinel, or None to
+        mimic an unconfigured Lakebase."""
+        return object() if self._has_pool else None
 
     # -- interface used by the app -----------------------------------------
     async def fetch(self, sql: str, *args):

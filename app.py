@@ -41,6 +41,10 @@ from server.routes import (
 BASE_DIR = Path(__file__).parent
 MIGRATIONS_DIR = BASE_DIR / "server" / "migrations"
 FRONTEND_DIST = BASE_DIR / "frontend" / "dist"
+# Operator console: a dependency-free page for the discovery/agent workflows.
+# Separate from the SPA because the SPA's TypeScript source isn't in this repo
+# (see README) — this way the new screens ship without touching the built bundle.
+CONSOLE_DIR = BASE_DIR / "frontend" / "console"
 
 
 async def run_migrations() -> None:
@@ -136,6 +140,14 @@ async def health():
     }
 
 
+# --- Operator console ------------------------------------------------------
+# Mounted BEFORE the SPA's catch-all, which matches every path and would
+# otherwise return index.html for /console.
+if CONSOLE_DIR.exists():
+    app.mount("/console", StaticFiles(directory=str(CONSOLE_DIR), html=True),
+              name="console")
+
+
 # --- Static SPA ------------------------------------------------------------
 if FRONTEND_DIST.exists():
     assets_dir = FRONTEND_DIST / "assets"
@@ -153,4 +165,5 @@ if FRONTEND_DIST.exists():
 else:
     @app.get("/")
     async def root():
-        return {"message": "Grid Atlas API. Frontend build not found.", "docs": "/docs"}
+        return {"message": "Grid Atlas API. Frontend build not found.",
+                "console": "/console", "docs": "/docs"}

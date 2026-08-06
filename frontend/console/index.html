@@ -1,0 +1,187 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Grid Atlas — Setup &amp; Discovery Console</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <link
+      href="https://fonts.googleapis.com/css2?family=DM+Sans:wght@400;500;600;700&family=DM+Mono:wght@400;500&display=swap"
+      rel="stylesheet"
+    />
+    <!--
+      WHY THIS PAGE IS PLAIN HTML/JS AND NOT PART OF THE REACT SPA
+      ============================================================
+      The SPA's TypeScript source is not in this repository — only its built
+      bundle is (see README, "A note on the frontend source"). Adding screens to
+      it would mean reverse-engineering a minified bundle, and a mistake there
+      breaks the portfolio UI that already works.
+
+      So the operator-facing console ships as one dependency-free page instead:
+      no build step, nothing to bundle, and no way for it to affect the SPA. It
+      covers the workflows added by the discovery/agent layers, which are
+      admin-shaped anyway (run a pipeline, review a mapping, approve a proposal)
+      and belong beside a status page rather than inside the portfolio views.
+
+      Styling mirrors frontend/tailwind.config.js — the Databricks Blueprint
+      dark palette — so it reads as the same product.
+    -->
+    <style>
+      :root {
+        --navy-900: #0b2026; --navy-800: #1b3139; --navy-700: #143d4a;
+        --navy-600: #2a4a56; --navy-500: #618794; --navy-400: #90a5b1;
+        --navy-300: #c4ccd6;
+        --lava: #ff3621; --lava-400: #ff9e94; --lava-700: #bd2b26;
+        --success: #00a972; --success-300: #9ed6c4;
+        --warning: #ffab00; --warning-300: #ffdb96;
+        --info: #2272b4; --info-400: #8acaff;
+        --oat: #f9f7f4;
+      }
+      * { box-sizing: border-box; }
+      body {
+        margin: 0; background: var(--navy-900); color: var(--oat);
+        font-family: "DM Sans", system-ui, sans-serif; font-size: 14px;
+        line-height: 1.5; -webkit-font-smoothing: antialiased;
+      }
+      code, pre, .mono { font-family: "DM Mono", ui-monospace, monospace; }
+      a { color: var(--info-400); }
+
+      header {
+        background: var(--navy-800); border-bottom: 1px solid var(--navy-600);
+        padding: 14px 24px; display: flex; align-items: center; gap: 16px;
+        position: sticky; top: 0; z-index: 10;
+      }
+      header .mark { width: 10px; height: 22px; background: var(--lava); border-radius: 2px; }
+      header h1 { font-size: 16px; font-weight: 600; margin: 0; letter-spacing: -0.01em; }
+      header .sub { color: var(--navy-400); font-size: 12px; }
+      header .spacer { flex: 1; }
+      .layout { display: flex; min-height: calc(100vh - 55px); }
+      nav {
+        width: 210px; flex-shrink: 0; background: var(--navy-800);
+        border-right: 1px solid var(--navy-600); padding: 14px 0;
+      }
+      nav button {
+        display: block; width: 100%; text-align: left; background: none;
+        border: none; border-left: 3px solid transparent; color: var(--navy-300);
+        padding: 9px 20px; font: inherit; cursor: pointer;
+      }
+      nav button:hover { background: var(--navy-700); color: var(--oat); }
+      nav button[aria-current="page"] {
+        border-left-color: var(--lava); color: var(--oat);
+        background: var(--navy-700); font-weight: 500;
+      }
+      main { flex: 1; padding: 24px 28px; max-width: 1100px; }
+      h2 { font-size: 20px; margin: 0 0 4px; font-weight: 600; letter-spacing: -0.01em; }
+      .lede { color: var(--navy-400); margin: 0 0 20px; max-width: 70ch; }
+      section { margin-bottom: 28px; }
+
+      .card {
+        background: var(--navy-800); border: 1px solid var(--navy-600);
+        border-radius: 8px; padding: 16px 18px; margin-bottom: 14px;
+      }
+      .card h3 { font-size: 14px; margin: 0 0 10px; font-weight: 600; }
+      .row { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
+      .grow { flex: 1; }
+
+      button.action {
+        background: var(--lava); color: #fff; border: none; border-radius: 4px;
+        padding: 8px 14px; font: inherit; font-weight: 500; cursor: pointer;
+      }
+      button.action:hover:not(:disabled) { background: var(--lava-700); }
+      button.action.secondary {
+        background: transparent; border: 1px solid var(--navy-500);
+        color: var(--navy-300);
+      }
+      button.action.secondary:hover:not(:disabled) {
+        border-color: var(--navy-400); color: var(--oat);
+      }
+      button.action:disabled { opacity: 0.45; cursor: not-allowed; }
+
+      input, select, textarea {
+        background: var(--navy-900); color: var(--oat);
+        border: 1px solid var(--navy-600); border-radius: 4px;
+        padding: 7px 10px; font: inherit;
+      }
+      input:focus, select:focus { outline: 2px solid var(--info); outline-offset: -1px; }
+      label { color: var(--navy-300); font-size: 12px; display: block; margin-bottom: 4px; }
+      .field { margin-bottom: 12px; }
+
+      .pills { display: flex; flex-wrap: wrap; gap: 8px; margin-bottom: 16px; }
+      .pill {
+        display: inline-flex; align-items: center; gap: 6px; padding: 5px 11px;
+        border-radius: 999px; font-size: 12px; font-weight: 500;
+        border: 1px solid transparent; cursor: default;
+      }
+      .pill.ok { background: rgba(0,169,114,0.14); color: var(--success-300);
+                 border-color: rgba(0,169,114,0.4); }
+      .pill.bad { background: rgba(255,54,33,0.14); color: var(--lava-400);
+                  border-color: rgba(255,54,33,0.45); }
+      .pill.warn { background: rgba(255,171,0,0.13); color: var(--warning-300);
+                   border-color: rgba(255,171,0,0.4); }
+      .dot { width: 7px; height: 7px; border-radius: 50%; background: currentColor; }
+
+      table { width: 100%; border-collapse: collapse; font-size: 13px; }
+      th, td { text-align: left; padding: 8px 10px; border-bottom: 1px solid var(--navy-700); }
+      th { color: var(--navy-400); font-weight: 500; font-size: 11px;
+           text-transform: uppercase; letter-spacing: 0.04em; }
+      tbody tr:hover { background: var(--navy-700); }
+      .num { text-align: right; font-family: "DM Mono", monospace; }
+
+      pre.sql {
+        background: var(--navy-900); border: 1px solid var(--navy-600);
+        border-radius: 4px; padding: 12px; overflow-x: auto; font-size: 12px;
+        margin: 10px 0 0; white-space: pre; color: var(--navy-300);
+      }
+      .muted { color: var(--navy-400); }
+      .small { font-size: 12px; }
+      .stat { display: flex; gap: 26px; flex-wrap: wrap; }
+      .stat div span { display: block; }
+      .stat .k { color: var(--navy-400); font-size: 11px; text-transform: uppercase;
+                 letter-spacing: 0.04em; }
+      .stat .v { font-size: 22px; font-weight: 600; font-family: "DM Mono", monospace; }
+
+      .banner { border-radius: 6px; padding: 11px 14px; margin-bottom: 16px; font-size: 13px; }
+      .banner.err { background: rgba(255,54,33,0.12); border: 1px solid rgba(255,54,33,0.4);
+                    color: var(--lava-400); }
+      .banner.ok { background: rgba(0,169,114,0.12); border: 1px solid rgba(0,169,114,0.4);
+                   color: var(--success-300); }
+      .banner.info { background: rgba(34,114,180,0.12); border: 1px solid rgba(34,114,180,0.4);
+                     color: var(--info-400); }
+      .spin { display: inline-block; width: 12px; height: 12px; border: 2px solid var(--navy-500);
+              border-top-color: var(--lava); border-radius: 50%; animation: spin 0.7s linear infinite; }
+      @keyframes spin { to { transform: rotate(360deg); } }
+      .hidden { display: none !important; }
+      ul.tight { margin: 6px 0 0; padding-left: 20px; }
+      ul.tight li { margin-bottom: 3px; }
+    </style>
+  </head>
+  <body>
+    <header>
+      <div class="mark" aria-hidden="true"></div>
+      <div>
+        <h1>Grid Atlas</h1>
+        <div class="sub">Setup &amp; Discovery Console</div>
+      </div>
+      <div class="spacer"></div>
+      <span id="env" class="sub mono"></span>
+      <a href="/" class="small">&larr; Portfolio</a>
+    </header>
+
+    <div class="layout">
+      <nav id="nav" aria-label="Console sections">
+        <button data-view="setup" aria-current="page">Setup &amp; health</button>
+        <button data-view="discovery">Discovery</button>
+        <button data-view="aliases">Source mapping</button>
+        <button data-view="domains">Data domains</button>
+        <button data-view="taxonomy">Taxonomy</button>
+        <button data-view="generate">Generate use cases</button>
+      </nav>
+      <main id="main" aria-live="polite">
+        <p class="muted"><span class="spin"></span> Loading…</p>
+      </main>
+    </div>
+
+    <script src="./console.js"></script>
+  </body>
+</html>
