@@ -18,6 +18,12 @@ from ..db import db
 
 router = APIRouter(prefix="/agents", tags=["agents"])
 
+# Floor for max_tokens on every LLM call. Reasoning models emit a private
+# reasoning block before the answer, and a budget sized only for the answer gets
+# consumed by the reasoning — the reply then arrives finish_reason=length with
+# nothing usable in it. 6000 leaves room for both on the prompts here.
+MIN_OUTPUT_TOKENS = 6000
+
 
 class DetectIn(BaseModel):
     use_case_id: int
@@ -73,11 +79,13 @@ async def detect_dependencies(body: DetectIn):
 
     req, ena = await _heuristic_detect(uc, assets, ucs, body.max_assets, body.max_enables)
 
-    # Try to refine ranking/rationale with the Foundation Model; fall back silently.
+    # Refine ranking/rationale with the Foundation Model; fall back silently.
+    # Routed through _llm_json rather than calling the client directly, so this
+    # inherits the optional-parameter negotiation and content-block handling —
+    # a second hand-rolled call site is exactly how the sonnet-5 `temperature`
+    # rejection kept breaking this endpoint after the shared helper was fixed.
     used_llm = False
     try:
-        from ..llm import get_llm_client
-        client = get_llm_client()
         shortlist_assets = [{"id": r["data_asset_id"], "label": r["label"]} for r in req]
         shortlist_ucs = [{"id": e["to_use_case_id"], "label": e["label"]} for e in ena]
         prompt = (
@@ -89,14 +97,9 @@ async def detect_dependencies(body: DetectIn):
             f"CANDIDATE ASSETS: {json.dumps(shortlist_assets)}\n"
             f"CANDIDATE DOWNSTREAM USE CASES: {json.dumps(shortlist_ucs)}\n"
         )
-        resp = await client.chat.completions.create(
-            model=SERVING_ENDPOINT,
-            messages=[{"role": "user", "content": prompt}],
-            max_tokens=1200, temperature=0.2,
-        )
-        content = resp.choices[0].message.content
-        start, end = content.find("{"), content.rfind("}")
-        parsed = json.loads(content[start:end + 1])
+        parsed, used_llm, _note = await _llm_json(prompt, max_tokens=1200)
+        if not parsed:
+            raise ValueError("no parseable response")
         asset_label = {r["data_asset_id"]: r["label"] for r in req}
         uc_label = {e["to_use_case_id"]: e["label"] for e in ena}
         if parsed.get("requires"):
@@ -107,7 +110,6 @@ async def detect_dependencies(body: DetectIn):
             ena = [{"to_use_case_id": e["to_use_case_id"], "label": uc_label.get(e["to_use_case_id"], ""),
                     "rationale": e.get("rationale", "")}
                    for e in parsed["enables"] if e.get("to_use_case_id") in uc_label]
-        used_llm = True
     except Exception as exc:  # noqa: BLE001
         print(f"[agents] LLM detect fell back to heuristic: {exc}")
 
@@ -130,31 +132,83 @@ async def _llm_json(prompt: str, max_tokens: int = 1600, response_schema: dict |
     back so the UI can show 'AI temporarily unavailable — showing heuristic'.
 
     When `response_schema` is given, the endpoint is asked to enforce it
-    server-side, which is far more reliable than scraping braces out of prose. Not
-    every serving endpoint supports `response_format`, so a failure that looks
-    like an unsupported-parameter error is retried once without it rather than
-    losing the call entirely.
+    server-side, which is far more reliable than scraping braces out of prose.
+
+    OPTIONAL-PARAMETER NEGOTIATION
+    ------------------------------
+    Endpoints disagree about which optional parameters they accept, and they
+    reject an unsupported one with a hard 400 rather than ignoring it. Observed in
+    practice: `databricks-claude-sonnet-5` refuses `temperature` outright
+    ("Model us.anthropic.claude-sonnet-5 does not support the temperature
+    parameter"), while other endpoints refuse `response_format`.
+
+    So the call is retried with progressively fewer optional parameters, dropping
+    whichever one the error names. A newer model must never silently degrade the
+    agents to heuristics just because it tightened its parameter validation.
     """
     from ..llm import get_llm_client
 
-    async def _call(with_schema: bool):
+    # Reasoning models (claude-sonnet-5 and later) spend output tokens on a
+    # private reasoning block BEFORE emitting the answer. Observed live: a
+    # 1400-token budget was entirely consumed by reasoning, so the reply came
+    # back finish_reason=length with an empty answer and every value estimate
+    # silently fell back to a heuristic. Floor the budget so there is always room
+    # for the answer itself.
+    effective_max_tokens = max(max_tokens, MIN_OUTPUT_TOKENS)
+
+    async def _call(*, with_schema: bool, with_temperature: bool):
         client = get_llm_client()
         kwargs = {
             "model": SERVING_ENDPOINT,
             "messages": [{"role": "user", "content": prompt}],
-            "max_tokens": max_tokens,
-            "temperature": 0.2,
+            "max_tokens": effective_max_tokens,
         }
+        if with_temperature:
+            # Low temperature for parseable, repeatable structured output.
+            kwargs["temperature"] = 0.2
         if with_schema and response_schema:
             kwargs["response_format"] = response_schema
         resp = await client.chat.completions.create(**kwargs)
         return resp.choices[0].message.content
 
-    def _extract(content: str):
-        """Parse the reply, tolerating a code fence or surrounding prose."""
-        if not content:
+    def _as_text(content) -> str:
+        """Flatten a reply into answer text.
+
+        Newer endpoints (observed on `databricks-claude-sonnet-5`) return
+        `content` as a LIST of typed blocks rather than a string, which made
+        `.strip()` raise "'list' object has no attribute 'strip'" and dropped the
+        agents to heuristics even though the model had answered.
+
+        Blocks of type `reasoning` are SKIPPED. On a reasoning model those carry
+        the private thinking trace, not the answer; including them means the JSON
+        extractor scrapes braces out of the reasoning and parses garbage.
+        """
+        if content is None:
+            return ""
+        if isinstance(content, str):
+            return content
+        if isinstance(content, list):
+            parts = []
+            for block in content:
+                if isinstance(block, str):
+                    parts.append(block)
+                elif isinstance(block, dict):
+                    if block.get("type") in ("reasoning", "thinking"):
+                        continue
+                    parts.append(str(block.get("text") or block.get("content") or ""))
+                else:
+                    if getattr(block, "type", None) in ("reasoning", "thinking"):
+                        continue
+                    parts.append(str(getattr(block, "text", "") or ""))
+            return "".join(parts)
+        return str(content)
+
+    def _extract(content):
+        """Parse the reply, tolerating content blocks, a code fence, or prose."""
+        text = _as_text(content)
+        if not text.strip():
             raise ValueError("empty response")
-        text = content.strip()
+        text = text.strip()
         if text.startswith("```"):
             text = text.split("```", 2)[1] if text.count("```") >= 2 else text
             text = text.split("\n", 1)[1] if "\n" in text else text
@@ -163,21 +217,57 @@ async def _llm_json(prompt: str, max_tokens: int = 1600, response_schema: dict |
             raise ValueError("no JSON object in response")
         return json.loads(text[start:end + 1])
 
-    try:
-        return _extract(await _call(with_schema=True)), True, None
-    except Exception as exc:  # noqa: BLE001
-        message = str(exc).lower()
-        schema_unsupported = response_schema is not None and any(
-            token in message for token in
-            ("response_format", "unsupported", "unexpected keyword", "invalid_request"))
-        if schema_unsupported:
-            try:
-                return _extract(await _call(with_schema=False)), True, None
-            except Exception as retry_exc:  # noqa: BLE001
-                exc = retry_exc
-        note = f"AI temporarily unavailable — showing heuristic ranking. ({type(exc).__name__})"
-        print(f"[agents] LLM call fell back: {exc}")
-        return None, False, note
+    # Most capable first, then drop whichever optional parameter the error names.
+    # The last attempt sends only model/messages/max_tokens, which every
+    # chat-completions endpoint accepts.
+    attempts = [
+        {"with_schema": True, "with_temperature": True},
+        {"with_schema": True, "with_temperature": False},
+        {"with_schema": False, "with_temperature": True},
+        {"with_schema": False, "with_temperature": False},
+    ]
+    last_exc: Exception | None = None
+    tried: set[tuple] = set()
+
+    for _ in range(len(attempts)):
+        # Pick the best remaining option that is still consistent with what the
+        # errors so far have told us is unsupported.
+        options = [
+            a for a in attempts
+            if tuple(sorted(a.items())) not in tried
+            and not (a["with_schema"] and _schema_rejected(last_exc))
+            and not (a["with_temperature"] and _temperature_rejected(last_exc))
+        ]
+        if not options:
+            break
+        choice = options[0]
+        tried.add(tuple(sorted(choice.items())))
+        try:
+            return _extract(await _call(**choice)), True, None
+        except Exception as exc:  # noqa: BLE001
+            last_exc = exc
+            # A failure that isn't about an unsupported parameter (auth, quota,
+            # a genuinely unparseable reply) won't be fixed by retrying with
+            # fewer parameters, so stop rather than burning three more calls.
+            if not (_schema_rejected(exc) or _temperature_rejected(exc)):
+                break
+
+    note = ("AI temporarily unavailable — showing heuristic ranking. "
+            f"({type(last_exc).__name__})")
+    print(f"[agents] LLM call fell back: {last_exc}")
+    return None, False, note
+
+
+def _temperature_rejected(exc: Exception | None) -> bool:
+    return exc is not None and "temperature" in str(exc).lower()
+
+
+def _schema_rejected(exc: Exception | None) -> bool:
+    if exc is None:
+        return False
+    message = str(exc).lower()
+    return any(token in message for token in
+               ("response_format", "responseformat", "json_schema"))
 
 
 async def _portfolio_context():

@@ -9,6 +9,7 @@ specific failures would be corrosive:
     entire basis of the recommendation, so it is recomputed from real satisfaction
     state rather than trusted.
 """
+import json
 import os
 import sys
 import unittest
@@ -272,7 +273,6 @@ class TestMalformedPayloads(unittest.TestCase):
 
     def test_stringified_array_recovered(self):
         """A strict schema mostly prevents this, but it still happens."""
-        import json
         candidates, _ = gen.validate_candidates(
             {"use_cases": json.dumps([_candidate()])},
             lob_name="Distribution", requested_lens="both",
@@ -334,3 +334,67 @@ class TestSummarize(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestUnwrapList(unittest.TestCase):
+    """Regression: the live endpoint returned a DOUBLY-nested payload.
+
+    `databricks-claude-sonnet-5` with a strict response_format replied with
+        {"use_cases": "{\"use_cases\": [ {...} ]}"}
+    — the array JSON-encoded as a string, wrapped in another copy of the envelope.
+    A single json.loads retry recovers a dict where a list belongs, so perfectly
+    good candidates were silently discarded. Found only by deploying.
+    """
+
+    def test_plain_list(self):
+        self.assertEqual(gen.unwrap_list({"use_cases": [1, 2]}, "use_cases"), [1, 2])
+
+    def test_single_stringified(self):
+        self.assertEqual(gen.unwrap_list({"use_cases": "[1, 2]"}, "use_cases"), [1, 2])
+
+    def test_doubly_nested_envelope(self):
+        """The exact shape observed in production."""
+        payload = {"use_cases": json.dumps({"use_cases": [{"title": "A"}]})}
+        self.assertEqual(gen.unwrap_list(payload, "use_cases"), [{"title": "A"}])
+
+    def test_triply_nested(self):
+        inner = json.dumps({"use_cases": [{"title": "A"}]})
+        payload = {"use_cases": json.dumps({"use_cases": inner})}
+        self.assertEqual(gen.unwrap_list(payload, "use_cases"), [{"title": "A"}])
+
+    def test_envelope_with_a_lone_differently_named_list(self):
+        payload = {"use_cases": {"items": [{"title": "A"}]}}
+        self.assertEqual(gen.unwrap_list(payload, "use_cases"), [{"title": "A"}])
+
+    def test_ambiguous_envelope_returns_none(self):
+        """Two candidate lists and no matching key — guessing would be wrong."""
+        payload = {"use_cases": {"a": [1], "b": [2]}}
+        self.assertIsNone(gen.unwrap_list(payload, "use_cases"))
+
+    def test_unparseable_string(self):
+        self.assertIsNone(gen.unwrap_list({"use_cases": "not json"}, "use_cases"))
+
+    def test_missing_key_and_empty_payload(self):
+        self.assertIsNone(gen.unwrap_list({"other": [1]}, "use_cases"))
+        self.assertIsNone(gen.unwrap_list({}, "use_cases"))
+        self.assertIsNone(gen.unwrap_list(None, "use_cases"))
+
+    def test_depth_is_bounded(self):
+        """A deeply self-referential reply must terminate rather than loop."""
+        payload = {"use_cases": json.dumps({"use_cases": json.dumps(
+            {"use_cases": [{"title": "deep"}]})})}
+        # Each nesting level costs two iterations (parse, then descend), so a
+        # tight budget gives up rather than spinning...
+        self.assertIsNone(gen.unwrap_list(payload, "use_cases", max_depth=2))
+        # ...while the default budget recovers it.
+        self.assertEqual(gen.unwrap_list(payload, "use_cases"), [{"title": "deep"}])
+
+    def test_validate_candidates_accepts_the_nested_shape(self):
+        """End to end: the production payload must yield usable candidates."""
+        nested = {"use_cases": json.dumps({"use_cases": [_candidate()]})}
+        candidates, _ = gen.validate_candidates(
+            nested, lob_name="Distribution", requested_lens="both",
+            domain_index=DOMAIN_INDEX, satisfied_names=SATISFIED,
+            existing_titles=[], limit=5)
+        self.assertEqual(len(candidates), 1)
+        self.assertEqual(candidates[0]["title"], "Predictive Transformer Failure")

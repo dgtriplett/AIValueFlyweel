@@ -40,8 +40,11 @@ variables:
     description: "Schema for the Genie mirror tables."
     default: grid_atlas
   lakebase_project:
-    description: "Lakebase (Autoscaling Postgres) project id holding app state."
+    description: "Lakebase (Autoscaling Postgres) PROJECT id holding app state (see the note in resources)."
     default: grid-atlas-db
+  pg_database:
+    description: "Database inside the Lakebase project."
+    default: app
   demo_mode:
     description: "Enables the removable Demo Mode toggle + /api/demo/* endpoints. Ship 'off' to customers."
     default: "off"
@@ -58,14 +61,19 @@ resources:
           sql_warehouse:
             id: ${var.warehouse_id}
             permission: CAN_USE
-        - name: database
-          description: "Lakebase Postgres for app state."
-          database:
-            # Point this at your provisioned Lakebase (Autoscaling) database.
-            # scripts/deploy.py provisions it for you; see INSTALL.md step 1 to
-            # do it by hand.
-            database_name: app
-            permission: CAN_CONNECT
+        # NOTE: there is deliberately NO `database` app resource here.
+        #
+        # Lakebase exposes two related primitives that are not interchangeable:
+        # a `database` app-resource binds to a database INSTANCE (the
+        # `databricks database ...` API), whereas this app connects over plain
+        # Postgres to a PROJECT (`databricks postgres ...`) using PGHOST/PGUSER
+        # from app.yaml. Binding an instance we never connect to created a
+        # Postgres role that OAuth token auth then rejected — the app came up in
+        # demo mode with "External authorization failed".
+        #
+        # What the app actually needs is a role registered on the project branch
+        # with auth_method=LAKEBASE_OAUTH_V1 and identity_type=SERVICE_PRINCIPAL,
+        # which `scripts/deploy.py` creates. See INSTALL.md step 1.
         - name: serving-endpoint
           description: "Foundation Model endpoint backing the AI agents."
           serving_endpoint:

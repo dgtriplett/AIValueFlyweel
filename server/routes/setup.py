@@ -253,7 +253,7 @@ async def _probe_system_tables() -> dict:
 async def _probe_genie(sp: str) -> dict:
     if not config.GENIE_SPACE_ID:
         return _check(
-            "genie", False, "Genie space", "No config.GENIE_SPACE_ID set.",
+            "genie", False, "Genie space", "GENIE_SPACE_ID is not set.",
             fix="Optional. Create a Genie space over the portfolio mirror and set "
                 "config.GENIE_SPACE_ID. See INSTALL.md.")
     mirror = f"`{config.GENIE_MIRROR_CATALOG}`.`{config.GENIE_MIRROR_SCHEMA}`"

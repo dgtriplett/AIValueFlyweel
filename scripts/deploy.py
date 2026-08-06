@@ -295,6 +295,7 @@ def bundle_deploy(profile: str, target: str, settings: dict) -> None:
          f"--var=genie_mirror_catalog={settings['genie_mirror_catalog']}",
          f"--var=genie_mirror_schema={settings['genie_mirror_schema']}",
          f"--var=lakebase_project={settings['lakebase_project']}",
+         f"--var=pg_database={settings['pg_database']}",
          f"--var=demo_mode={settings['demo_mode']}"])
     print(f"  {green('ok')} bundle deployed")
 
@@ -320,6 +321,123 @@ def app_service_principal(app: dict) -> str | None:
         if value:
             return str(value)
     return None
+
+
+def register_lakebase_role(profile: str, project: str, sp: str) -> bool:
+    """Register the app's service principal as a Lakebase Postgres role.
+
+    THIS IS THE STEP THAT IS EASY TO GET WRONG AND HARD TO DIAGNOSE.
+
+    The app authenticates to Postgres as its own service principal, using its
+    OAuth token as the password. That only works if the role was created through
+    the Lakebase roles API with `auth_method=LAKEBASE_OAUTH_V1` and
+    `identity_type=SERVICE_PRINCIPAL`. A role created with a plain SQL
+    `CREATE ROLE ... WITH LOGIN` looks correct in `pg_roles` but is not linked to
+    the workspace identity, so token auth fails and the app silently starts in
+    demo mode with "password authentication failed".
+
+    The request body needs a `spec` wrapper, which the CLI's `--json` flag
+    strips, so this goes through the REST API directly.
+    """
+    branch = f"projects/{project}/branches/production"
+    payload = {"spec": {
+        "postgres_role": sp,
+        "identity_type": "SERVICE_PRINCIPAL",
+        "auth_method": "LAKEBASE_OAUTH_V1",
+        "attributes": {"bypassrls": False, "createdb": False, "createrole": False},
+    }}
+
+    existing = run_json(["databricks", "postgres", "list-roles", branch,
+                         "-p", profile, "-o", "json"], check=False) or []
+    for role in existing:
+        status = role.get("status") or {}
+        if status.get("postgres_role") == sp:
+            if status.get("identity_type") == "SERVICE_PRINCIPAL":
+                print(f"  {green('ok')} Lakebase role already registered for the app SP")
+                return True
+            # A role exists but is not identity-linked (e.g. created by hand, or
+            # by an earlier failed run). It must be replaced or auth will fail.
+            print(f"  {yellow('replacing')} a Lakebase role that is not "
+                  f"identity-linked ({status.get('identity_type')})")
+            run(["databricks", "postgres", "delete-role", role["name"],
+                 "-p", profile], check=False, quiet=True)
+
+    result = run(["databricks", "api", "post",
+                  f"/api/2.0/postgres/{branch}/roles?role_id=grid-atlas-app-sp",
+                  "-p", profile, "--json", json.dumps(payload)],
+                 capture=True, check=False, quiet=True)
+    if result.returncode == 0:
+        print(f"  {green('ok')} registered the app SP as a Lakebase role "
+              "(LAKEBASE_OAUTH_V1)")
+        return True
+    print(f"  {yellow('could not register the Lakebase role')} — the app will start "
+          "in demo mode until it exists.")
+    print(f"    {dim((result.stderr or result.stdout or '').strip()[:200])}")
+    return False
+
+
+def grant_lakebase_dml(profile: str, project: str, database: str, sp: str) -> None:
+    """Grant the app SP DML on the seeded schema.
+
+    Deliberately NOT ownership: without it the SP cannot run DDL, which is the
+    intended least-privilege posture (app.py's run_migrations() expects and
+    tolerates that). Requires psycopg2, which the seed scripts already need.
+    """
+    try:
+        import psycopg2
+    except ImportError:
+        print(f"  {yellow('psycopg2 not installed')} — skipping the Postgres GRANTs. "
+              "Install it and re-run, or grant DML by hand.")
+        return
+
+    branch = f"projects/{project}/branches/production"
+    endpoints = run_json(["databricks", "postgres", "list-endpoints", branch,
+                          "-p", profile, "-o", "json"], check=False)
+    token = run_json(["databricks", "postgres", "generate-database-credential",
+                      f"{branch}/endpoints/primary", "-p", profile, "-o", "json"],
+                     check=False)
+    me = run_json(["databricks", "current-user", "me", "-p", profile, "-o", "json"],
+                  check=False)
+    if not (endpoints and token and me):
+        print(f"  {yellow('could not reach Lakebase')} — skipping the Postgres GRANTs.")
+        return
+    try:
+        host = endpoints[0]["status"]["hosts"]["host"]
+    except (KeyError, IndexError, TypeError):
+        print(f"  {yellow('could not resolve the Lakebase host')} — skipping GRANTs.")
+        return
+
+    statements = [
+        f'GRANT CONNECT ON DATABASE "{database}" TO "{sp}"',
+        f'GRANT USAGE ON SCHEMA public TO "{sp}"',
+        f'GRANT SELECT, INSERT, UPDATE, DELETE ON ALL TABLES IN SCHEMA public TO "{sp}"',
+        f'GRANT USAGE, SELECT ON ALL SEQUENCES IN SCHEMA public TO "{sp}"',
+        f'ALTER DEFAULT PRIVILEGES IN SCHEMA public '
+        f'GRANT SELECT, INSERT, UPDATE, DELETE ON TABLES TO "{sp}"',
+        f'ALTER DEFAULT PRIVILEGES IN SCHEMA public '
+        f'GRANT USAGE, SELECT ON SEQUENCES TO "{sp}"',
+    ]
+    try:
+        conn = psycopg2.connect(host=host, port=5432, dbname=database,
+                                user=me["userName"], password=token["token"],
+                                sslmode="require")
+        conn.autocommit = True
+        cursor = conn.cursor()
+        failed = 0
+        for statement in statements:
+            try:
+                cursor.execute(statement)
+            except Exception:  # noqa: BLE001 - report at the end, keep going
+                failed += 1
+        cursor.close()
+        conn.close()
+        if failed:
+            print(f"  {yellow('some Postgres GRANTs failed')} ({failed}/"
+                  f"{len(statements)}) — the app may not be able to read its tables.")
+        else:
+            print(f"  {green('ok')} granted the app SP DML on `{database}`.public")
+    except Exception as exc:  # noqa: BLE001
+        print(f"  {yellow('Postgres GRANTs skipped')}: {exc}")
 
 
 def run_grants(profile: str, warehouse_id: str, settings: dict, sp: str) -> None:
@@ -371,11 +489,25 @@ def run_grants(profile: str, warehouse_id: str, settings: dict, sp: str) -> None
 # ---------------------------------------------------------------------------
 # Step 7 — Lakebase
 # ---------------------------------------------------------------------------
-def lakebase_host(profile: str, project: str, branch: str = "production",
+def lakebase_host(profile: str, instance: str, branch: str = "production",
                   endpoint: str = "primary") -> str | None:
+    """Resolve the Postgres host for a Lakebase database instance.
+
+    Lakebase exposes two related primitives and they are NOT interchangeable:
+    `databricks database ...` manages **database instances**, which is what an App
+    `database` resource binds to, while `databricks postgres ...` manages
+    **projects**. A project alone will make `bundle deploy` fail with "Database
+    instance <name> does not exist". So the instance API is authoritative here,
+    with the project API kept as a fallback for older workspaces.
+    """
+    info = run_json(["databricks", "database", "get-database-instance", instance,
+                     "-p", profile, "-o", "json"], check=False)
+    if info and info.get("read_write_dns"):
+        return info["read_write_dns"]
+
     endpoints = run_json(
         ["databricks", "postgres", "list-endpoints",
-         f"projects/{project}/branches/{branch}", "-p", profile, "-o", "json"],
+         f"projects/{instance}/branches/{branch}", "-p", profile, "-o", "json"],
         check=False)
     if not endpoints:
         return None
@@ -550,6 +682,9 @@ def main() -> None:
         print(f"  {dim('grants skipped (--skip-grants)')}")
     elif sp:
         run_grants(profile, warehouse_id, settings, sp)
+        # The app authenticates to Postgres AS this SP, so the role must exist and
+        # be identity-linked before it can read its own tables.
+        register_lakebase_role(profile, lakebase_project, sp)
     else:
         print(f"  {dim('grants skipped — no service principal resolved')}")
 
@@ -563,6 +698,10 @@ def main() -> None:
               f"--project {lakebase_project} --db {pg_database}")
     else:
         seed(profile, lakebase_project, pg_database, args.seed_demo)
+        # DML must be granted AFTER the seed, because the grants target the tables
+        # the seed creates (and the ALTER DEFAULT PRIVILEGES covers later ones).
+        if sp and not args.skip_grants:
+            grant_lakebase_dml(profile, lakebase_project, pg_database, sp)
 
     # -- 8. start --
     step(8, total, "Start the app")

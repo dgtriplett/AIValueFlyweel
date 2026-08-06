@@ -210,13 +210,12 @@ def parse_classifications(parsed: dict | None, valid_ids: set[int]) -> tuple[lis
     if not parsed:
         return [], ["The model returned no parseable classifications."]
 
-    items = parsed.get("classifications")
-    if isinstance(items, str):
-        try:
-            items = json.loads(items)
-        except (ValueError, TypeError):
-            items = None
-    if not isinstance(items, list) or not items:
+    # Shares generation.unwrap_list because the same endpoint can return a
+    # stringified or doubly-nested array here too.
+    from .generation import unwrap_list
+
+    items = unwrap_list(parsed, "classifications")
+    if not items:
         return [], ["The model returned no classifications."]
 
     rows: list[dict] = []
