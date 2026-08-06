@@ -115,7 +115,16 @@ async def mirror_to_uc() -> dict:
     Reads from Lakebase (this app's DB), writes to MIRROR_CATALOG.MIRROR_SCHEMA
     via the warehouse. Uses a wide, human-readable use_cases table + assets/lobs.
     """
-    fq = f"{MIRROR_CATALOG}.{MIRROR_SCHEMA}"
+    # Backtick-quoted via the shared validator, so a catalog or schema name with a
+    # hyphen or reserved word still parses, and an embedded backtick is rejected
+    # rather than allowed to terminate its own quoting.
+    from .enrichment import _ident
+
+    try:
+        fq = f"{_ident(MIRROR_CATALOG)}.{_ident(MIRROR_SCHEMA)}"
+    except ValueError as exc:
+        return {"ok": False, "error": f"invalid Genie mirror target: {exc}",
+                "catalog": MIRROR_CATALOG, "schema": MIRROR_SCHEMA, "created": []}
     created = []
 
     # pull denormalized rows from Lakebase
@@ -146,7 +155,7 @@ async def mirror_to_uc() -> dict:
         hint = ""
         if "PERMISSION_DENIED" in (r["error"] or "") or "USE CATALOG" in (r["error"] or ""):
             hint = (f" — the app's service principal needs UC access. In your workspace run: "
-                    f"GRANT USE CATALOG ON CATALOG {MIRROR_CATALOG} TO `<app-service-principal>`; "
+                    f"GRANT USE CATALOG ON CATALOG {_ident(MIRROR_CATALOG)} TO `<app-service-principal>`; "
                     f"GRANT USE SCHEMA, CREATE TABLE, MODIFY, SELECT ON SCHEMA {fq} TO `<app-service-principal>`; "
                     f"(or set GENIE_MIRROR_CATALOG to a catalog the app can write).")
         return {"ok": False, "error": f"schema create failed: {r['error']}{hint}",
