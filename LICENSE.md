@@ -1,4 +1,4 @@
-# License & Terms — Value Flywheel
+# License & Terms — Grid Atlas
 
 **Powered by Databricks.** This is a Databricks Field Engineering reference application.
 
@@ -7,7 +7,7 @@ The application code (frontend, backend, scripts, bundle) is provided by Databri
 for evaluation and internal planning use, **as is, without warranty of any kind**.
 
 ## Reference library (Databricks IP)
-The bundled **reference library** — the curated 198 Power & Utilities use-case
+The bundled **reference library** — the curated 240 Power & Utilities use-case
 catalog, the module-level data-source catalog, the value-model templates, and the
 `benchmark_library` value ranges — is the **intellectual property of Databricks**,
 provided under license for use within this application. It is **directional guidance**:

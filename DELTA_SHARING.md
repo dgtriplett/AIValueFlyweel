@@ -1,6 +1,6 @@
 # Reference-library distribution via Delta Sharing (IP model)
 
-The **reference library** (curated 198-UC P&U catalog, module-level data-source
+The **reference library** (curated 240-UC P&U catalog, module-level data-source
 catalog, value-model templates, `benchmark_library`) is Databricks IP. Rather than
 copying it into each customer instance, the intended distribution is a **grantable,
 revocable, tracked Delta Share** — a live product Databricks maintains and versions.
