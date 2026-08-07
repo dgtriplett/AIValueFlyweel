@@ -1912,10 +1912,13 @@
     catalog: viewCatalog,
     generate: viewGenerate,
     admin: viewAdmin,
-    // Back-compat: these were separate top-level tabs before the catalog views
-    // were consolidated. Old links land on the right sub-tab rather than nowhere.
+    // Deep links straight to a catalog sub-tab. These double as the back-compat
+    // targets for the era when each was its own top-level tab, so an old bookmark
+    // still lands on the right sub-tab rather than the catalog's default.
     aliases: () => { catalogTab = "mapping"; return viewCatalog(); },
+    mapping: () => { catalogTab = "mapping"; return viewCatalog(); },
     domains: () => { catalogTab = "needs"; return viewCatalog(); },
+    needs: () => { catalogTab = "needs"; return viewCatalog(); },
     taxonomy: () => { catalogTab = "taxonomy"; return viewCatalog(); },
     glossary: () => { catalogTab = "glossary"; return viewCatalog(); },
     artifacts: () => { catalogTab = "artifacts"; return viewCatalog(); },
@@ -1928,12 +1931,188 @@
     discovery: viewStart,
   };
 
+  // ---------------------------------------------------------------------
+  // Navigation model
+  // ---------------------------------------------------------------------
+  /*
+   * Grouped by WORKFLOW STAGE, not by feature taxonomy: a user arrives knowing
+   * what they are trying to do ("get my data in", "work out what it's worth"),
+   * not which module owns a screen.
+   *
+   * Every item carries a one-line hint. Names like "Coverage" or "Flow" do not
+   * tell a first-time user what they do, and a tooltip is invisible until you
+   * already suspect you want it.
+   *
+   * This is the single source of truth for the menu — index.html renders an empty
+   * <nav> and this fills it, so adding a view means adding one entry here rather
+   * than editing markup in two files and hoping they stay in sync.
+   */
+  const NAV_GROUPS = [
+    {
+      id: "discover",
+      label: "Discover",
+      hint: "Connect sources and find what you have",
+      items: [
+        ["start", "Get started",
+         "Connect Lakebase, check permissions, bulk-import via Excel"],
+        ["needs", "Data needs & gaps",
+         "63 semantic domains, with gaps ranked by the value they block"],
+        ["mapping", "Source mapping",
+         "Correct the source labels the normalizer wasn't sure about"],
+        ["rules", "Naming rules",
+         "Classify assets by naming convention, first match wins"],
+      ],
+    },
+    {
+      id: "analyze",
+      label: "Analyze",
+      hint: "Understand the portfolio and what it's worth",
+      items: [
+        ["ask", "Ask",
+         "Chat over the portfolio — reads answer, writes need confirmation"],
+        ["coverage", "Coverage & readiness",
+         "Which use cases are shovel-ready, and what's blocking the rest"],
+        ["flow", "Value flow",
+         "Sankey from source → domain → use case → line of business"],
+        ["research", "Company research",
+         "Research a utility and recalibrate all 34 value assumptions"],
+      ],
+    },
+    {
+      id: "build",
+      label: "Build",
+      hint: "Create and document new work",
+      items: [
+        ["generate", "Generate use cases",
+         "Author use cases grounded in the data you actually have"],
+        ["artifacts", "What's built",
+         "Jobs, pipelines, models and dashboards found in your workspace"],
+        ["taxonomy", "Taxonomy",
+         "Integration pattern, criticality and vendor type — effective-dated"],
+        ["glossary", "Glossary",
+         "Business terms, with data domains projected as derived terms"],
+      ],
+    },
+  ];
+
+  // Sits apart from the groups: settings, not a workflow stage.
+  const NAV_ADMIN = [
+    ["admin", "Admin & audit",
+     "Audit log, schema state, rate limits and health"],
+    ["branding", "Branding",
+     "Customer name, subtitle, accent colour and logo"],
+  ];
+
+  /** Which group (if any) contains a view id. */
+  function groupOf(view) {
+    for (const group of NAV_GROUPS) {
+      if (group.items.some(([id]) => id === view)) return group.id;
+    }
+    return NAV_ADMIN.some(([id]) => id === view) ? "admin" : null;
+  }
+
+  function menuItem([id, label, hint]) {
+    return `<button data-view="${text(id)}" role="menuitem">
+      <span class="item-label">${text(label)}</span>
+      <span class="item-hint">${text(hint)}</span>
+    </button>`;
+  }
+
+  function renderNav() {
+    const nav = $("#nav");
+    if (!nav) return;
+    nav.innerHTML = `
+      <!-- A real link out to the SPA, and the only one: the SPA has no URL
+           routing, so separate per-tab links could not work. -->
+      <a href="/" title="Back to the portfolio app">Portfolio <span
+        aria-hidden="true" style="opacity:.55;font-size:11px">&#8599;</span></a>
+      <div class="divider" aria-hidden="true"></div>
+      ${NAV_GROUPS.map((group) => `
+        <div class="navgroup" data-group="${text(group.id)}">
+          <button type="button" aria-expanded="false" aria-haspopup="menu"
+                  title="${text(group.hint)}">
+            ${text(group.label)} <span class="caret" aria-hidden="true">&#9662;</span>
+          </button>
+          <div class="navmenu" role="menu" data-open="false">
+            <div class="menu-heading">${text(group.hint)}</div>
+            ${group.items.map(menuItem).join("")}
+          </div>
+        </div>`).join("")}
+      <div class="spacer"></div>
+      <div class="navgroup align-end" data-group="admin">
+        <button type="button" aria-expanded="false" aria-haspopup="menu"
+                title="Settings, audit and health">
+          Settings <span class="caret" aria-hidden="true">&#9662;</span>
+        </button>
+        <div class="navmenu" role="menu" data-open="false">
+          ${NAV_ADMIN.map(menuItem).join("")}
+        </div>
+      </div>`;
+
+    nav.querySelectorAll(".navgroup").forEach((group) => {
+      const trigger = group.querySelector(":scope > button");
+      const menu = group.querySelector(".navmenu");
+      trigger.addEventListener("click", () => {
+        // Read the state BEFORE closing, so a second click on the same trigger
+        // toggles shut rather than reopening.
+        const wasOpen = menu.dataset.open === "true";
+        closeMenus();
+        if (!wasOpen) {
+          menu.dataset.open = "true";
+          trigger.setAttribute("aria-expanded", "true");
+        }
+      });
+      menu.querySelectorAll("[data-view]").forEach((item) => {
+        item.addEventListener("click", () => {
+          closeMenus();
+          show(item.dataset.view);
+        });
+      });
+    });
+  }
+
+  function closeMenus() {
+    document.querySelectorAll(".navmenu[data-open='true']").forEach((menu) => {
+      menu.dataset.open = "false";
+    });
+    document.querySelectorAll(".navgroup > button[aria-expanded='true']")
+      .forEach((trigger) => trigger.setAttribute("aria-expanded", "false"));
+  }
+
+  // Clicking anywhere else, or pressing Escape, dismisses an open menu — the two
+  // things people try when a panel is in the way.
+  //
+  // Scoped by TARGET rather than by stopPropagation(). Relying on the trigger's
+  // handler to stop the event from reaching this one is order-dependent and it
+  // broke in the browser: the menu opened and closed within the same click, so
+  // nothing appeared to happen. Asking "was the click inside a nav group?" is
+  // independent of which listener runs first.
+  document.addEventListener("click", (event) => {
+    if (!event.target.closest(".navgroup")) closeMenus();
+  });
+  document.addEventListener("keydown", (event) => {
+    if (event.key === "Escape") closeMenus();
+  });
+
   async function show(name) {
     const render = VIEWS[name] || viewStart;
-    document.querySelectorAll("#nav button").forEach((button) => {
+
+    // Mark the current item, and underline the group containing it so the top row
+    // still answers "where am I" with every menu closed.
+    const activeGroup = groupOf(name);
+    document.querySelectorAll("#nav [data-view]").forEach((button) => {
       if (button.dataset.view === name) button.setAttribute("aria-current", "page");
       else button.removeAttribute("aria-current");
     });
+    document.querySelectorAll("#nav .navgroup").forEach((group) => {
+      const trigger = group.querySelector(":scope > button");
+      if (group.dataset.group === activeGroup) {
+        trigger.setAttribute("aria-current", "page");
+      } else {
+        trigger.removeAttribute("aria-current");
+      }
+    });
+
     // The hash is the source of truth so a view survives a reload and can be
     // linked to — useful when handing a colleague "the GRANTs page".
     if (location.hash.slice(1) !== name) location.hash = name;
@@ -1944,9 +2123,7 @@
     }
   }
 
-  document.querySelectorAll("#nav button").forEach((button) => {
-    button.addEventListener("click", () => show(button.dataset.view));
-  });
+  renderNav();
   window.addEventListener("hashchange", () => show(location.hash.slice(1) || "start"));
 
   show(location.hash.slice(1) || "start");

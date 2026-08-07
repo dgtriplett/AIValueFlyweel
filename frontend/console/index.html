@@ -55,8 +55,15 @@
          are always one click away. */
       header {
         background: var(--navy-800); border-bottom: 1px solid var(--navy-600);
-        position: sticky; top: 0; z-index: 30;
-        backdrop-filter: blur(8px);
+        /* z-index must beat every positioned element in <main>, because the nav
+           dropdowns overhang the header and z-index only orders siblings WITHIN a
+           stacking context. At 30 the menus were painted over by page content
+           (measured: a .banner won the hit test mid-panel), which looked exactly
+           like the panel being translucent and sent me hunting a CSS opacity bug
+           that did not exist. */
+        position: sticky; top: 0; z-index: 200;
+        /* No backdrop-filter: the background is fully opaque, so a blur had nothing
+           to blur, and it needlessly created a containing block. */
       }
       header .inner { max-width: 1440px; margin: 0 auto; padding: 0 24px; }
       header .top {
@@ -84,9 +91,13 @@
         padding: 3px 10px; color: var(--navy-300); font-family: "DM Mono", monospace;
       }
 
-      /* One continuous tab row: portfolio tabs (links into the SPA) then console
-         tabs. The divider marks the boundary without breaking the line. */
-      nav.tabs { display: flex; gap: 2px; overflow-x: auto; }
+      /* One continuous tab row: the Portfolio link, then the grouped menus.
+         overflow MUST stay visible — `overflow-x: auto` was needed when this row
+         held twelve tabs that could scroll, but it establishes a clipping box, and
+         an absolutely positioned dropdown inside it is silently cut off at the
+         row's 43px height. The menu rendered at full size and was invisible.
+         Five grouped items fit without scrolling, so the tradeoff is gone. */
+      nav.tabs { display: flex; gap: 2px; overflow: visible; }
       nav.tabs a, nav.tabs button {
         appearance: none; background: none; border: none;
         border-bottom: 2px solid transparent; color: var(--navy-400);
@@ -104,6 +115,75 @@
       nav.tabs .group-label {
         font-size: 10px; text-transform: uppercase; letter-spacing: 0.08em;
         color: var(--navy-500); align-self: center; padding: 0 8px 0 2px;
+      }
+      nav.tabs .spacer { flex: 1; }
+
+      /* --- Grouped dropdown menus -------------------------------------------
+         A group's trigger shows the active underline when any view inside it is
+         current, so the row still answers "where am I" without opening anything. */
+      .navgroup { position: relative; display: flex; }
+      .navgroup > button .caret {
+        font-size: 9px; opacity: 0.6; transition: transform 0.12s ease;
+      }
+      .navgroup > button[aria-expanded="true"] .caret { transform: rotate(180deg); }
+      .navgroup > button[aria-expanded="true"] { color: var(--oat); }
+
+      .navmenu {
+        position: absolute; top: calc(100% + 4px); left: 0; z-index: 50;
+        /* Fixed width, not min-width: the hints are full sentences, and letting the
+           panel size to its content produced a 531px box with each hint running
+           inline beside its label instead of beneath it. */
+        width: 320px; padding: 6px;
+        /* Opaque, and one step lighter than the page so it reads as floating above
+           it. The content behind is dense (status pills, cards) and shows through
+           anything translucent. */
+        background: var(--navy-800);
+        border: 1px solid var(--navy-500);
+        border-radius: 10px; box-shadow: 0 18px 44px rgba(0, 0, 0, 0.62);
+        display: none; flex-direction: column; gap: 1px;
+      }
+      .navmenu[data-open="true"] { display: flex; }
+      /* Right-align the last group's menu so it cannot overflow the viewport. */
+      .navgroup.align-end .navmenu { left: auto; right: 0; }
+
+      .navmenu button {
+        display: block; width: 100%; text-align: left;
+        background: none; border: none; border-radius: 7px;
+        padding: 8px 10px; font: inherit; cursor: pointer; color: var(--navy-200);
+      }
+      .navmenu button:hover, .navmenu button:focus-visible {
+        background: var(--navy-700); color: var(--oat); outline: none;
+      }
+      .navmenu button[aria-current="page"] {
+        background: rgba(255, 54, 33, 0.09); color: var(--lava-400);
+      }
+      /* `display: block`, not flex: the label and its hint are stacked lines, and
+         a flex label let the hint sit inline beside it on a wide panel. */
+      .navmenu .item-label {
+        display: block; font-size: 13.5px; font-weight: 500; color: var(--oat);
+      }
+      .navmenu button[aria-current="page"] .item-label { color: var(--lava-400); }
+      /* The one-line "what is this for" under each item. Present because a name
+         like "Coverage" or "Flow" does not tell a first-time user what it does,
+         and a tooltip is invisible until you already suspect you want it. */
+      .navmenu .item-hint {
+        display: block; font-size: 11.5px; color: var(--navy-400);
+        margin-top: 2px; line-height: 1.35;
+      }
+      .navmenu button[aria-current="page"] .item-hint { color: var(--navy-300); }
+      .navmenu .menu-heading {
+        font-size: 10px; text-transform: uppercase; letter-spacing: 0.08em;
+        color: var(--navy-500); padding: 8px 10px 4px;
+      }
+      .navmenu hr {
+        border: none; border-top: 1px solid var(--navy-600); margin: 5px 2px;
+      }
+
+      @media (max-width: 720px) {
+        /* Full-width sheets on a phone: a 268px panel anchored to a button that is
+           itself near the right edge would hang off-screen. */
+        .navmenu { position: fixed; left: 12px; right: 12px; min-width: 0; }
+        .navgroup.align-end .navmenu { left: 12px; right: 12px; }
       }
       .layout { max-width: 1440px; margin: 0 auto; padding: 0 24px; }
       main { padding: 24px 0 60px; max-width: 1100px; }
@@ -283,30 +363,28 @@
             <span>Powered by Databricks</span>
           </div>
         </div>
-        <nav class="tabs" id="nav" aria-label="Sections">
-          <a href="/">Portfolio</a>
-          <a href="/">Data Assets</a>
-          <a href="/">Dashboards</a>
-          <a href="/">Roadmap</a>
-          <div class="divider" aria-hidden="true"></div>
-          <span class="group-label">Setup</span>
-          <!--
-            ONE onboarding surface. The SPA used to have a "Get Started" tab (Excel
-            bulk-populate + auto-populate from system tables) while the console had
-            separate "Setup & health" and "Discovery" views — three places answering
-            "how do I get my data in?". Merged into the guided flow below, keeping
-            the best of each: health probes with copy-pastable GRANTs, the Excel
-            round-trip, and the multi-workspace sweep + AI enrichment.
-          -->
-          <button data-view="start" aria-current="page">Get started</button>
-          <button data-view="ask">Ask</button>
-          <button data-view="research">Research</button>
-          <button data-view="coverage">Coverage &amp; gaps</button>
-          <button data-view="flow">Value flow</button>
-          <button data-view="catalog">Catalog</button>
-          <button data-view="generate">Generate use cases</button>
-          <button data-view="admin">Admin</button>
-        </nav>
+        <!--
+          NAV: five top-level items, not twelve.
+
+          It grew to twelve buttons plus seven catalog sub-tabs, at which point the
+          row scrolled horizontally and no item was findable by scanning. Grouped
+          into three task-shaped menus — Discover (get data in), Analyze
+          (understand it), Build (act on it) — plus the Portfolio link and Admin.
+
+          The groups are workflow stages rather than a taxonomy of features,
+          because the question a user arrives with is "what am I trying to do",
+          not "which module owns this screen".
+
+          ONE Portfolio link, not four. It previously showed Portfolio / Data
+          Assets / Dashboards / Roadmap, all with href="/" — the SPA keeps its tab
+          state in React with no URL routing, so every one of them silently landed
+          on the default view. Four tabs that go to the same place is worse than
+          one honest link.
+
+          The menu is built by console.js from NAV_GROUPS so that adding a view
+          means adding one entry, not editing markup in two files.
+        -->
+        <nav class="tabs" id="nav" aria-label="Sections"></nav>
       </div>
     </header>
 
