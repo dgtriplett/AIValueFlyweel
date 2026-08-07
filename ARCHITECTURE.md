@@ -93,6 +93,15 @@ written back to Lakebase, which stays the portfolio's system of record.
 - **Chat tools** (`chat_tools.py`) — 12 typed tools. Read tools execute; write
   tools return a `_propose` descriptor and never write.
 - **Rules** (`rules.py`) — classification rules, first-match-wins per dimension.
+- **Knowledge** (`knowledge.py`) — slugs (reserved-word aware, so an article cannot
+  shadow a route), materialized folder paths, attachment validation against the
+  actual bytes rather than the declared type, and the search-SQL builder.
+- **Proposals** (`proposals.py`) — the eight-section prompt built from real instance
+  state, plus output validation. A section that is missing, thin, or stubbed with
+  TODO is rejected rather than stored: a half-written document in the knowledge base
+  is indistinguishable from a finished one once the generation context is gone. There
+  is no heuristic fallback, because a template-filled proposal would read as authored
+  and say nothing.
 - **Taxonomy** (`taxonomy.py`) — 3 dimensions, effective-dated.
 - **Confirm** (`confirm.py`) — single-use tokens gating agent writes.
 - **Live integration** (`lineage.py`, `live.py`) — Statement Execution API over

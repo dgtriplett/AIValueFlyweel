@@ -65,6 +65,8 @@ catalog, 63 data domains, 34 value assumptions** — so day one is populated.
 | **Taxonomy** | AI classification across integration pattern, criticality, and vendor type. Effective-dated, so history survives a reclassification. |
 | **Generate use cases** | Author new use cases grounded in real data availability, with a `ready` / `gap` lens. Preview → approve → create; nothing is written without an explicit yes. |
 | **Branding** | Set the customer's name, subtitle, accent colour, and logo, so the app reads as theirs in a workshop. Falls back to the researched company name automatically. |
+| **Knowledge base** | Markdown articles in folders, full-text search, version history with restore, and binary documents (PDF/Word/Excel/PowerPoint) attached to the use cases, sources and domains they explain. Deleting a folder never deletes its articles. |
+| **Write a proposal** | An eight-section proposal for one use case, grounded in *this instance's* data — the researched company, the computed value and the assumptions behind it, the real data gaps. Filed in the knowledge base, attached to the use case, versioned, and confirm-gated. |
 | **Admin** | Audit log, schema state, and the operational surface below. |
 
 ### Operations

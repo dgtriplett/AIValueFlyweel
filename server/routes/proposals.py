@@ -183,9 +183,27 @@ async def proposal_context(use_case_id: int):
 
 def _context_warnings(context: dict) -> list[str]:
     warnings = []
-    if (context.get("value") or {}).get("mid") is None:
+    value = context.get("value") or {}
+    if value.get("mid") is None:
         warnings.append("This use case has no value model, so the proposal cannot "
                         "state a figure. Quantify it first for a stronger document.")
+    elif value.get("mid") == 0:
+        # Found in production: a generation use case evaluated to $0.0M for a
+        # wires-only utility because research had correctly set generation fleet
+        # capacity to 0. The data was right and the proposal would have been a
+        # confident business case for something worth nothing to this customer.
+        # A zero is either "does not apply here" or a mis-set assumption, and both
+        # are worth stopping for.
+        zeroed = [a for a in context.get("assumptions") or [] if "= 0 " in a]
+        detail = (f" The following are set to zero: "
+                  f"{'; '.join(zeroed)}." if zeroed else "")
+        warnings.append(
+            "This use case computes to $0M with the current assumptions, so the "
+            "proposal would argue for something worth nothing to this customer."
+            + detail
+            + " That usually means the use case does not apply to this utility "
+              "(a generation use case at a wires-only company, say) — check "
+              "before generating.")
     if not context.get("company"):
         warnings.append("No company research has been run, so the proposal will be "
                         "generic. Run Company research first.")

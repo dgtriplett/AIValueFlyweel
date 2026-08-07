@@ -306,6 +306,53 @@ class TestSummary(unittest.TestCase):
         self.assertIn("no data gaps", summary)
 
 
+class TestContextWarnings(unittest.TestCase):
+    """Warnings shown before a generation is paid for."""
+
+    def setUp(self):
+        from server.routes.proposals import _context_warnings
+        self.warn = _context_warnings
+
+    def test_no_value_model_warns(self):
+        text = " ".join(self.warn({**CONTEXT, "value": {}}))
+        self.assertIn("no value model", text)
+
+    def test_zero_value_warns(self):
+        """FOUND IN PRODUCTION on the live instance.
+
+        A generation use case computed to $0.0M for Eversource because company
+        research had correctly set generation fleet capacity to 0 — they are
+        wires-only. The data was right, and the proposal would have been a
+        confident business case for something worth nothing to that customer.
+        The original warning list only checked for a MISSING value, so this
+        passed silently.
+        """
+        zero = {**CONTEXT,
+                "value": {"low": 0.0, "mid": 0.0, "high": 0.0},
+                "assumptions": ["Generation fleet capacity = 0 MW [high confidence]"]}
+        text = " ".join(self.warn(zero))
+        self.assertIn("$0M", text)
+        self.assertIn("Generation fleet capacity = 0 MW", text,
+                      "the warning should name which assumption zeroed it")
+
+    def test_a_real_value_does_not_warn_about_value(self):
+        text = " ".join(self.warn(CONTEXT))
+        self.assertNotIn("$0M", text)
+        self.assertNotIn("no value model", text)
+
+    def test_missing_company_research_warns(self):
+        text = " ".join(self.warn({**CONTEXT, "company": {}}))
+        self.assertIn("No company research", text)
+
+    def test_no_sources_warns(self):
+        text = " ".join(self.warn({**CONTEXT, "sources": []}))
+        self.assertIn("No source systems", text)
+
+    def test_uncalibrated_assumptions_warn(self):
+        text = " ".join(self.warn(CONTEXT))
+        self.assertIn("uncalibrated", text)
+
+
 class TestRouteWiring(unittest.TestCase):
     def test_intent_is_registered(self):
         from server import confirm as cf
