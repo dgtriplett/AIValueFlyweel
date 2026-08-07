@@ -194,7 +194,7 @@ async def _apply(conn, data, clean: bool) -> None:
     for idx, a in enumerate(data["data_assets"]):
         if len(a["benefiting_lobs"]) >= 2 and n_fund < 3:
             req_lob = a["benefiting_lobs"][0]
-            co = [lob_id[l] for l in a["benefiting_lobs"][1:] if l in lob_id]
+            co = [lob_id[lob] for lob in a["benefiting_lobs"][1:] if lob in lob_id]
             await conn.execute(
                 "INSERT INTO funding_requests (data_asset_id, requesting_lob_id, co_funding_lobs, combined_value, status) "
                 "VALUES ($1,$2,$3,$4,'proposed')",

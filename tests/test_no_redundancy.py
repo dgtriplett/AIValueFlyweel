@@ -8,7 +8,6 @@ catch a re-divergence.
 Each test corresponds to a real duplication that existed and was fixed.
 """
 import inspect
-import os
 import pathlib
 import re
 import sys
@@ -51,7 +50,14 @@ class TestOneValueEngine(unittest.TestCase):
         for module in (joint_funding, source_recommendations):
             self.assertIs(module.use_case_value, ve.use_case_value, module.__name__)
             self.assertIs(module.asset_cost, ve.asset_cost, module.__name__)
-            self.assertIs(module.EFFORT_COST, ve.EFFORT_COST, module.__name__)
+
+        # EFFORT_COST is only referenced directly by joint_funding (for a use
+        # case's own effort); source_recommendations reaches it through
+        # asset_cost(). Asserting on both would force a dead import — which is
+        # exactly what it did until ruff removed it. The invariant that actually
+        # matters, that nobody keeps a private copy of the table, is
+        # test_no_module_redefines_the_effort_cost_table below.
+        self.assertIs(joint_funding.EFFORT_COST, ve.EFFORT_COST)
 
     def test_no_module_redefines_the_effort_cost_table(self):
         """Both recommenders rank by value-per-cost; divergent tables would rank

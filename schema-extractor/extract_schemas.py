@@ -338,7 +338,7 @@ def main() -> None:
     print(f"schemas:    {len(totals['schemas'])}")
     print(f"tables:     {len(totals['tables'])}")
     print(f"columns:    {len(totals['columns'])}")
-    print(f"\nUpload these to Grid Atlas → Setup → Data Sources:")
+    print("\nUpload these to Grid Atlas → Setup → Data Sources:")
     for key in ("schemas", "tables", "columns"):
         if totals[key]:
             print(f"  {OUTPUT_DIR / f'all_{key}.csv'}")

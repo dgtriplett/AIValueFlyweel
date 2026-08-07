@@ -13,7 +13,7 @@ from pydantic import BaseModel
 
 from ..common import current_user, write_audit
 from ..db import db
-from ..value_engine import compute_value_range, load_assumptions, EFFORT_COST, asset_cost, use_case_value
+from ..value_engine import load_assumptions, EFFORT_COST, asset_cost, use_case_value
 # Import the readiness rule rather than restating it: a local copy would let
 # this module silently disagree with how readiness is actually computed.
 from ..readiness import READY_STATUSES as READY
@@ -28,7 +28,7 @@ async def _context():
     # Joint-funding value totals are portfolio-scoped (confirmed use cases only).
     ucs = {u["id"]: dict(u) for u in await db.fetch(
         "SELECT * FROM use_cases WHERE in_portfolio = true")}
-    lobs = {l["id"]: l["name"] for l in await db.fetch("SELECT id, name FROM lobs")}
+    lobs = {lob["id"]: lob["name"] for lob in await db.fetch("SELECT id, name FROM lobs")}
     requires = await db.fetch("SELECT use_case_id, data_asset_id, criticality FROM uc_requires_asset")
     # asset -> list of (uc_id, criticality)
     by_asset: dict[int, list] = {}
@@ -171,7 +171,7 @@ async def opportunities():
         case = _build_case(a, assumptions, ucs, lobs, by_asset, req_by_uc, status_map, prereqs_built)
         if case["lob_count"] >= 2 and case["uc_count"] >= 1:
             # one-line pitch — enablement framing (attributed annual value)
-            top_lobs = ", ".join(l["name"] for l in case["benefiting_lobs"][:3])
+            top_lobs = ", ".join(lob["name"] for lob in case["benefiting_lobs"][:3])
             case["pitch"] = (f"Landing {a.get('source_category')} · {a['module']} enables "
                              f"{case['uc_count']} use cases (~${case['combined_value_mm']:.0f}M/yr attributed value) across "
                              f"{case['lob_count']} LOBs — {top_lobs}"
@@ -204,8 +204,10 @@ async def brief(body: BriefIn):
         raise HTTPException(404, "Data asset not found")
     case = _build_case(asset, assumptions, ucs, lobs, by_asset, req_by_uc, _asset_status_map(assets), prereqs_built)
 
-    lob_lines = "; ".join(f"{l['name']}: ${l['value_mm']:.1f}M/yr (share ${case['cost_share'].get(str(l['id']),0):,.0f})"
-                          for l in case["benefiting_lobs"])
+    lob_lines = "; ".join(
+        f"{lob['name']}: ${lob['value_mm']:.1f}M/yr "
+        f"(share ${case['cost_share'].get(str(lob['id']), 0):,.0f})"
+        for lob in case["benefiting_lobs"])
     top_ucs = "; ".join(f"{u['title']} (${u['value_mm']:.1f}M{', becomes shovel-ready' if u['becomes_ready'] else ''})"
                         for u in case["unlocked"][:8])
     facts = (

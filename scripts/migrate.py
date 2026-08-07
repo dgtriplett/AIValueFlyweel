@@ -16,7 +16,6 @@ pool, so this works from a laptop without the app's runtime dependencies.
 from __future__ import annotations
 
 import argparse
-import hashlib
 import json
 import subprocess
 import sys

@@ -4,7 +4,6 @@ Serves the REST API under /api/* and the built React SPA from frontend/dist.
 """
 import asyncio
 import logging
-import os
 from contextlib import asynccontextmanager
 from pathlib import Path
 

@@ -24,7 +24,7 @@ path would drift from the endpoints and the tests that cover them.
 """
 from __future__ import annotations
 
-from typing import Any, Awaitable, Callable
+from typing import Awaitable, Callable
 
 from .db import db
 

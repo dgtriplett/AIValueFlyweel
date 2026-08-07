@@ -10,7 +10,9 @@ CAREFUL DISTINCTION: "Value Flywheel" is BOTH the old product name AND the name 
 a real feature (the Flywheel tab, the blast-radius view). Only product-name uses
 are rebranded; the feature keeps its name.
 """
-import glob, os, re, shutil, sys
+import glob
+import os
+import sys
 
 ASSETS = "frontend/dist/assets"
 INDEX = "frontend/dist/index.html"

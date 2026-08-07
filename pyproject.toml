@@ -1,3 +1,35 @@
+[tool.ruff]
+# Match the runtime: Databricks Apps serves this on 3.12 (.python-version).
+target-version = "py312"
+line-length = 100
+exclude = ["frontend", ".databricks"]
+
+[tool.ruff.lint]
+# Deliberately a narrow set: the errors that indicate a BUG (undefined name,
+# unused variable hiding a typo, an f-string that forgot its placeholder) plus
+# basic hygiene. Not a style crusade — reformatting 40 files would bury the real
+# findings and make every future diff unreviewable.
+select = ["E4", "E7", "E9", "F", "W"]
+ignore = [
+    # Long lines are left alone: the SQL strings and the LLM prompts in this
+    # codebase read better unwrapped than folded to fit a column limit.
+    "E501",
+]
+
+[tool.ruff.lint.per-file-ignores]
+# tests/stubs.py must be imported for its side effects before any server.*
+# import, so the import is "unused" by definition and cannot move.
+"tests/*" = ["E402"]
+# Routers import their dependencies at the bottom in a couple of places to avoid
+# an import cycle; the alternative is a lazy import inside every handler.
+"app.py" = ["E402"]
+# One-off operator scripts, not the served application. `x = f(); n += 1` on one
+# line reads fine in a seeding loop, and these files are run by hand with their
+# output watched — the value of enforcing statement layout here is lower than the
+# churn of rewriting generated seed logic. The rules that catch actual bugs
+# (F821 undefined name, F-series) still apply.
+"scripts/*" = ["E702", "E741", "F841", "E402"]
+
 [project]
 name = "grid-atlas"
 version = "0.1.0"

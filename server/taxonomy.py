@@ -33,7 +33,6 @@ unique index enforces one current value per (asset, dimension).
 """
 from __future__ import annotations
 
-import json
 
 DIMENSIONS = ("integration_pattern", "criticality", "vendor_type")
 

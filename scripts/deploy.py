@@ -715,8 +715,8 @@ def main() -> None:
     print(f"\n{green(bold('Done.'))}")
     if url:
         print(f"  App:   {url}")
-    print(f"  Check: open the app and go to Setup — every dependency is probed "
-          f"there,\n         with the exact GRANT statements for anything missing.")
+    print("  Check: open the app and go to Setup — every dependency is probed "
+          "there,\n         with the exact GRANT statements for anything missing.")
     if DRY_RUN:
         print(f"\n{yellow('That was a dry run; nothing was changed.')}")
 

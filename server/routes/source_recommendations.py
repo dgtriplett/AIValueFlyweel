@@ -13,7 +13,7 @@ effort/cost estimate, and a short AI rationale ("Land these next").
 from fastapi import APIRouter
 
 from ..db import db
-from ..value_engine import compute_value_range, load_assumptions, EFFORT_COST, asset_cost, use_case_value
+from ..value_engine import load_assumptions, asset_cost, use_case_value
 # Import the readiness rule rather than restating it: a local copy would let
 # this module silently disagree with how readiness is actually computed.
 from ..readiness import READY_STATUSES as READY
@@ -28,7 +28,7 @@ async def _context():
     assumptions = await load_assumptions()
     assets = [dict(a) for a in await db.fetch("SELECT * FROM data_assets ORDER BY id")]
     ucs = {u["id"]: dict(u) for u in await db.fetch("SELECT * FROM use_cases")}
-    lobs = {l["id"]: l["name"] for l in await db.fetch("SELECT id, name FROM lobs")}
+    lobs = {lob["id"]: lob["name"] for lob in await db.fetch("SELECT id, name FROM lobs")}
     requires = await db.fetch(
         "SELECT use_case_id, data_asset_id, criticality FROM uc_requires_asset")
     # asset -> [uc_id, ...] (any criticality)

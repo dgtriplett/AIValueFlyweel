@@ -331,7 +331,7 @@ async def _portfolio_context():
     # Portfolio-scoped: roadmap + next-best recommender operate on the confirmed set.
     ucs = [dict(u) for u in await db.fetch(
         "SELECT * FROM use_cases WHERE in_portfolio = true ORDER BY id")]
-    lobs = {l["id"]: l["name"] for l in await db.fetch("SELECT id, name FROM lobs")}
+    lobs = {lob["id"]: lob["name"] for lob in await db.fetch("SELECT id, name FROM lobs")}
     rmap = await readiness_map()
     assumptions = await load_assumptions()
     for u in ucs:
@@ -432,7 +432,7 @@ async def recommend_catalog(top_n: int = 8):
     recommender (which closes the loop on the customer's own confirmed set)."""
     from ..readiness import readiness_map
     from ..value_engine import compute_value_range, load_assumptions
-    lobs = {l["id"]: l["name"] for l in await db.fetch("SELECT id, name FROM lobs")}
+    lobs = {lob["id"]: lob["name"] for lob in await db.fetch("SELECT id, name FROM lobs")}
     rmap = await readiness_map()
     assumptions = await load_assumptions()
     rows = await db.fetch(

@@ -11,7 +11,6 @@ result, asserting both that the intended value changed and that nothing else did
 import importlib.util
 import os
 import re
-import sys
 import unittest
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))

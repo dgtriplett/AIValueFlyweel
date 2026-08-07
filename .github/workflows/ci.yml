@@ -1,0 +1,72 @@
+name: CI
+
+# Every gate here is defined in scripts/check.py, which runs identically on a
+# laptop. The workflow deliberately contains no check logic of its own: a gate
+# that exists only in YAML gets first executed after a push, and "fix CI" becomes
+# a series of blind commits.
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  # A newer push supersedes an in-flight run on the same ref.
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        # 3.12 is what Databricks Apps serves (.python-version); 3.11 is the
+        # floor declared in pyproject. Testing both keeps the floor honest — it is
+        # otherwise a claim nobody verifies until a customer builds on 3.11.
+        python-version: ["3.11", "3.12"]
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+          cache: pip
+
+      - name: Install runtime dependencies
+        # The real dependency set, not the test stubs — this is what makes the
+        # "app imports cleanly" gate meaningful rather than skipped.
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+          pip install ruff
+
+      - uses: actions/setup-node@v4
+        # Only to syntax-check the hand-written operator console. There is no
+        # build step and no npm dependencies.
+        with:
+          node-version: "20"
+
+      - name: Run all gates
+        run: python3 scripts/check.py
+
+  deploy-safety:
+    # Separated so a failure here is unmistakable: it means a secret or a
+    # workspace-specific value reached a tracked file, which is the one failure
+    # class that is worse after merge than before.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: app.yaml ships with no deployment values
+        # This guard has caught a real regression: a Lakebase host, a service
+        # principal id, and DEMO_MODE=on were once committed into app.yaml.
+        run: python3 -m unittest tests.test_deploy -v
+
+      - name: No committed secrets or workspace hostnames
+        run: python3 scripts/check_no_secrets.py

@@ -49,7 +49,7 @@ class TestDomainVocabulary(unittest.TestCase):
     def test_labels_unique(self):
         """Duplicate labels would make the UI ambiguous even if keys differ."""
         labels = [d[1] for d in DOMAINS]
-        dupes = {l for l in labels if labels.count(l) > 1}
+        dupes = {label for label in labels if labels.count(label) > 1}
         self.assertEqual(dupes, set(), f"duplicate labels: {dupes}")
 
 

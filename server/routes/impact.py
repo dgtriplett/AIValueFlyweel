@@ -5,7 +5,7 @@ Given a focal node (data asset or use case), traverse the dependency graph
 downstream impact, grouped by LOB, with hypothesized value and how many use
 cases would become shovel-ready.
 """
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter
 
 from ..db import db
 from ..readiness import READY_STATUSES

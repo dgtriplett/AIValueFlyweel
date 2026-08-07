@@ -17,7 +17,9 @@ WHAT IS CHANGED
 
 Every edit is asserted present-once before writing; the script refuses to guess.
 """
-import glob, os, sys
+import glob
+import os
+import sys
 
 ASSETS = "frontend/dist/assets"
 

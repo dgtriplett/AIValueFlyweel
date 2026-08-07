@@ -278,7 +278,6 @@ class TestNoUnnegotiatedCallSites(unittest.TestCase):
         # this module and each negotiates optional params, so several literal calls
         # here are expected. What must NOT exist is a call in any OTHER module,
         # which is asserted by test_no_redundancy.py::test_one_llm_call_site.
-        source = inspect.getsource(agents)
         for entry in ("_llm_json", "llm_text"):
             self.assertTrue(hasattr(agents, entry), f"{entry} missing")
         # Every call must sit inside one of the two negotiating helpers.

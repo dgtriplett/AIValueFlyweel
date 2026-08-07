@@ -83,18 +83,30 @@ async def list_use_cases(
     if scope not in ("portfolio", "catalog", "all"):
         raise HTTPException(422, "scope must be portfolio|catalog|all")
     where, params = [], []
+
+    def add_filter(column: str, value) -> None:
+        """Append an equality predicate bound to the next positional parameter.
+
+        The placeholder number must be read AFTER the append, since asyncpg's $n is
+        1-based and positional. Doing both in one helper makes that ordering
+        structural instead of a convention a future edit can quietly break by
+        inserting a line between the two halves.
+        """
+        params.append(value)
+        where.append(f"{column} = ${len(params)}")
+
     if scope == "portfolio":
         where.append("in_portfolio = true")
     elif scope == "catalog":
         where.append("origin = 'catalog'")
     if lob_id is not None:
-        params.append(lob_id); where.append(f"lob_id = ${len(params)}")
+        add_filter("lob_id", lob_id)
     if sub_vertical:
-        params.append(sub_vertical); where.append(f"sub_vertical = ${len(params)}")
+        add_filter("sub_vertical", sub_vertical)
     if phase is not None:
-        params.append(phase); where.append(f"phase = ${len(params)}")
+        add_filter("phase", phase)
     if status:
-        params.append(status); where.append(f"status = ${len(params)}")
+        add_filter("status", status)
     sql = "SELECT * FROM use_cases"
     if where:
         sql += " WHERE " + " AND ".join(where)

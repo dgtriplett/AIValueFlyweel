@@ -3,7 +3,6 @@
 Uses the Statement Execution API (service principal in-app, CLI profile locally).
 Everything degrades gracefully if system tables / the warehouse aren't reachable.
 """
-import os
 
 import aiohttp
 

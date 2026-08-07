@@ -18,7 +18,7 @@ async def dashboard():
     # Portfolio-scoped: dashboards reflect the customer's confirmed set only.
     ucs = [dict(u) for u in await db.fetch(
         "SELECT * FROM use_cases WHERE in_portfolio = true ORDER BY id")]
-    lobs = {l["id"]: l["name"] for l in await db.fetch("SELECT id, name FROM lobs")}
+    lobs = {lob["id"]: lob["name"] for lob in await db.fetch("SELECT id, name FROM lobs")}
     rmap = await readiness_map()
 
     # per-UC value

@@ -57,27 +57,27 @@ async def reconcile(apply: bool = True) -> dict:
     linked = await db.fetch(
         "SELECT la.use_case_id, la.asset_type, la.asset_id, la.asset_name, uc.status "
         "FROM linked_databricks_assets la JOIN use_cases uc ON uc.id = la.use_case_id")
-    for l in linked:
+    for link in linked:
         active = False
         # job_id is BIGINT; only run the check for a numeric asset_id.
-        if l["asset_type"] in ("job", "pipeline") and avail.get("lakeflow_jobs") and str(l["asset_id"] or "").isdigit():
+        if link["asset_type"] in ("job", "pipeline") and avail.get("lakeflow_jobs") and str(link["asset_id"] or "").isdigit():
             # Data-relative window: "active" = has run activity in the trailing
             # 90 days of whatever data the historian holds (demo-safe).
             r = await run_sql(
                 "SELECT count(*) FROM system.lakeflow.job_run_timeline "
-                f"WHERE job_id = {int(l['asset_id'])} "
+                f"WHERE job_id = {int(link['asset_id'])} "
                 "AND period_start_time > (SELECT max(period_start_time) - INTERVAL 90 DAYS "
-                "FROM system.lakeflow.job_run_timeline WHERE job_id = " + str(int(l['asset_id'])) + ")")
+                "FROM system.lakeflow.job_run_timeline WHERE job_id = " + str(int(link['asset_id'])) + ")")
             active = r["ok"] and r["rows"] and int(r["rows"][0][0]) > 0
-        elif l["asset_type"] == "model" and avail.get("serving"):
-            name = str(l["asset_name"] or "").replace("'", "''")
+        elif link["asset_type"] == "model" and avail.get("serving"):
+            name = str(link["asset_name"] or "").replace("'", "''")
             r = await run_sql(
                 "SELECT count(*) FROM system.serving.endpoint_usage "
                 f"WHERE served_entity_name = '{name}' LIMIT 1")
             active = r["ok"] and r["rows"] and int(r["rows"][0][0]) > 0
-        if active and l["status"] not in ("live", "value_realized"):
-            uc_changes.append({"use_case_id": l["use_case_id"], "asset": l["asset_name"],
-                               "from": l["status"], "to": "live"})
+        if active and link["status"] not in ("live", "value_realized"):
+            uc_changes.append({"use_case_id": link["use_case_id"], "asset": link["asset_name"],
+                               "from": link["status"], "to": "live"})
 
     # apply
     if apply:

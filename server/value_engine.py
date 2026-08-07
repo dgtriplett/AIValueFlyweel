@@ -26,9 +26,16 @@ from .db import db
 
 
 def _as_dict(formula):
+    """Coerce a formula (dict or jsonb string) to a dict, or None if it isn't one.
+
+    The type check has to happen AFTER parsing, not just on the dict path: a jsonb
+    column holding a valid JSON array parses fine and then fails on `.get`. Because
+    computed_value_map() maps over every use case, that turned one malformed row
+    into a 500 for the whole portfolio list instead of a single blank badge.
+    """
     if isinstance(formula, str):
         try:
-            return json.loads(formula)
+            formula = json.loads(formula)
         except (ValueError, TypeError):
             return None
     return formula if isinstance(formula, dict) else None
