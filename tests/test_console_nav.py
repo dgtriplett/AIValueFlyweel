@@ -67,14 +67,36 @@ class TestEveryMenuItemRoutes(unittest.TestCase):
                          f"the same view appears in more than one menu, so the "
                          f"active-group underline would be ambiguous: {duplicates}")
 
-    def test_every_item_has_a_hint(self):
-        """Names like "Coverage" or "Flow" do not say what they do."""
+    def test_items_are_labels_only(self):
+        """No per-item description text.
+
+        The first version put an explanatory sentence under every item. Inside a
+        dropdown those wrapped and clipped, making the menu harder to scan than the
+        overloaded tab row it replaced. Context now lives on the GROUP, where the
+        panel heading and the trigger tooltip have room for it.
+        """
         block = JS[JS.index("const NAV_GROUPS"):JS.index("/** Which group")]
-        entries = re.findall(r'\["[a-z_]+",\s*"([^"]+)",\s*\n?\s*"([^"]+)"\]', block)
-        self.assertGreaterEqual(len(entries), 10, "hint parsing found too few items")
-        for label, hint in entries:
-            self.assertGreater(len(hint), 15,
-                               f"{label!r} has no useful hint: {hint!r}")
+        # A third string in an item tuple would be a per-item hint coming back.
+        three_part = re.findall(r'\["[a-z_]+",\s*"[^"]+",\s*\n?\s*"[^"]+"\]', block)
+        self.assertEqual(three_part, [],
+                         "menu items carry description text again; it clips inside "
+                         f"the panel: {three_part}")
+        self.assertNotIn("item-hint", JS,
+                         "the per-item hint element is back")
+
+    def test_every_group_explains_itself(self):
+        """Context moved to the group, so each group must still have a hint."""
+        hints = re.findall(r'^\s+hint: "([^"]+)"', JS, re.M)
+        self.assertGreaterEqual(len(hints), 3, "a group is missing its hint")
+        for hint in hints:
+            self.assertGreater(len(hint), 15, f"unhelpful group hint: {hint!r}")
+
+    def test_labels_never_wrap(self):
+        """A wrapped label in a menu is the bug that prompted this change."""
+        match = re.search(r"\.navmenu button\s*\{([^}]*)\}", HTML)
+        self.assertIsNotNone(match, ".navmenu button rule not found")
+        self.assertIn("white-space: nowrap", match.group(1),
+                      "menu labels must not wrap")
 
     def test_no_view_is_unreachable(self):
         """Every top-level view should be in a menu.
@@ -156,7 +178,7 @@ class TestAccessibility(unittest.TestCase):
     def test_labels_are_escaped(self):
         """Menu labels go through text() like everything else on this page."""
         self.assertIn("text(label)", JS)
-        self.assertIn("text(hint)", JS)
+        self.assertIn("text(group.hint)", JS)
 
 
 class TestClickOutsideIsOrderIndependent(unittest.TestCase):
@@ -216,17 +238,15 @@ class TestCssInvariants(unittest.TestCase):
         match = re.search(r"\.navmenu\s*\{([^}]*)\}", HTML)
         self.assertIn("z-index", match.group(1))
 
-    def test_menu_has_a_fixed_width(self):
-        """Sizing to content produced a 531px panel with hints running inline."""
-        match = re.search(r"\.navmenu\s*\{([^}]*)\}", HTML)
-        self.assertRegex(match.group(1), r"width:\s*\d+px",
-                         "give the panel a fixed width so hints wrap beneath "
-                         "their labels")
+    def test_menu_width_fits_the_longest_label(self):
+        """Wide enough that no label needs to wrap, narrow enough to scan.
 
-    def test_label_and_hint_stack(self):
-        match = re.search(r"\.navmenu \.item-label\s*\{([^}]*)\}", HTML)
-        self.assertIn("display: block", match.group(1),
-                      "a flex label let the hint sit inline beside it")
+        Replaces an earlier assertion about stacking a label above its hint — the
+        hints are gone, since inside a dropdown they wrapped and clipped.
+        """
+        match = re.search(r"\.navmenu\s*\{([^}]*)\}", HTML)
+        self.assertRegex(match.group(1), r"min-width:\s*\d+px",
+                         "the panel needs a min-width so labels never wrap")
 
     def test_mobile_breakpoint_keeps_menus_on_screen(self):
         self.assertIn("@media (max-width: 720px)", HTML)

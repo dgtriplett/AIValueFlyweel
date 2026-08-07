@@ -1939,9 +1939,11 @@
    * what they are trying to do ("get my data in", "work out what it's worth"),
    * not which module owns a screen.
    *
-   * Every item carries a one-line hint. Names like "Coverage" or "Flow" do not
-   * tell a first-time user what they do, and a tooltip is invisible until you
-   * already suspect you want it.
+   * Items are LABELS ONLY. An earlier version put an explanatory sentence under
+   * each one; inside a dropdown those wrapped and clipped, which made the menu
+   * harder to scan than the overloaded tab row it replaced. The group's own
+   * `hint` carries the "what is this for" context — it becomes the trigger's
+   * tooltip and the heading inside the panel, where there is room for it.
    *
    * This is the single source of truth for the menu — index.html renders an empty
    * <nav> and this fills it, so adding a view means adding one entry here rather
@@ -1953,14 +1955,10 @@
       label: "Discover",
       hint: "Connect sources and find what you have",
       items: [
-        ["start", "Get started",
-         "Connect Lakebase, check permissions, bulk-import via Excel"],
-        ["needs", "Data needs & gaps",
-         "63 semantic domains, with gaps ranked by the value they block"],
-        ["mapping", "Source mapping",
-         "Correct the source labels the normalizer wasn't sure about"],
-        ["rules", "Naming rules",
-         "Classify assets by naming convention, first match wins"],
+        ["start", "Get started"],
+        ["needs", "Data needs & gaps"],
+        ["mapping", "Source mapping"],
+        ["rules", "Naming rules"],
       ],
     },
     {
@@ -1968,14 +1966,10 @@
       label: "Analyze",
       hint: "Understand the portfolio and what it's worth",
       items: [
-        ["ask", "Ask",
-         "Chat over the portfolio — reads answer, writes need confirmation"],
-        ["coverage", "Coverage & readiness",
-         "Which use cases are shovel-ready, and what's blocking the rest"],
-        ["flow", "Value flow",
-         "Sankey from source → domain → use case → line of business"],
-        ["research", "Company research",
-         "Research a utility and recalibrate all 34 value assumptions"],
+        ["ask", "Ask"],
+        ["coverage", "Coverage & readiness"],
+        ["flow", "Value flow"],
+        ["research", "Company research"],
       ],
     },
     {
@@ -1983,24 +1977,18 @@
       label: "Build",
       hint: "Create and document new work",
       items: [
-        ["generate", "Generate use cases",
-         "Author use cases grounded in the data you actually have"],
-        ["artifacts", "What's built",
-         "Jobs, pipelines, models and dashboards found in your workspace"],
-        ["taxonomy", "Taxonomy",
-         "Integration pattern, criticality and vendor type — effective-dated"],
-        ["glossary", "Glossary",
-         "Business terms, with data domains projected as derived terms"],
+        ["generate", "Generate use cases"],
+        ["artifacts", "What's built"],
+        ["taxonomy", "Taxonomy"],
+        ["glossary", "Glossary"],
       ],
     },
   ];
 
   // Sits apart from the groups: settings, not a workflow stage.
   const NAV_ADMIN = [
-    ["admin", "Admin & audit",
-     "Audit log, schema state, rate limits and health"],
-    ["branding", "Branding",
-     "Customer name, subtitle, accent colour and logo"],
+    ["admin", "Admin & audit"],
+    ["branding", "Branding"],
   ];
 
   /** Which group (if any) contains a view id. */
@@ -2011,11 +1999,8 @@
     return NAV_ADMIN.some(([id]) => id === view) ? "admin" : null;
   }
 
-  function menuItem([id, label, hint]) {
-    return `<button data-view="${text(id)}" role="menuitem">
-      <span class="item-label">${text(label)}</span>
-      <span class="item-hint">${text(hint)}</span>
-    </button>`;
+  function menuItem([id, label]) {
+    return `<button data-view="${text(id)}" role="menuitem">${text(label)}</button>`;
   }
 
   function renderNav() {
