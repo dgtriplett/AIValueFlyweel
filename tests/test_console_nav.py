@@ -429,10 +429,27 @@ class TestSpaGroupedNav(unittest.TestCase):
         self.assertIn("/console/#proposals/", self.bundle,
                       "the drawer link must carry the use case id across")
 
+    def test_the_drawer_link_uses_the_id_prop(self):
+        """It must read the ID PROP, not the edit-form draft.
+
+        The first version used `m`, which is the edit draft and is only populated
+        while the drawer is in edit mode — so the condition was false on a normal
+        open and the link never rendered at all. It deployed and looked like the
+        patch had silently failed; the bundle was correct and the binding was wrong.
+        `e` is the id, which the adjacent header confirms by rendering
+        `"Use Case #", e`.
+        """
+        self.assertIn("proposals/${e}", self.bundle,
+                      "the drawer link must interpolate the id prop `e`")
+        self.assertNotIn("proposals/${m.id}", self.bundle,
+                         "`m` is the edit-form draft; the link would not render")
+
     def test_the_drawer_link_guards_a_missing_id(self):
-        """The drawer renders briefly before its data arrives; a link built then
-        would read #proposals/undefined and open the console on nothing."""
-        self.assertIn("m&&m.id?", self.bundle)
+        """The drawer renders before its data arrives; a link built then would read
+        #proposals/undefined and open the console pointed at nothing."""
+        index = self.bundle.index("gaProposalBtn")
+        self.assertIn("e?a.jsx", self.bundle[index - 40:index],
+                      "the link is not guarded on the id being present")
 
     def test_the_patch_script_is_idempotent_and_checkable(self):
         source = (ROOT / "scripts" / "patch_spa_grouped_nav.py").read_text()

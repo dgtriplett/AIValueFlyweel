@@ -55,16 +55,19 @@ ANCHOR = (
 
 # The new anchor element, inserted between Edit and Close.
 #
-# `m` is the use case bound in this scope (the same variable the Save handler uses),
-# so the link always points at the record on screen. Guarded with `m&&m.id` because
-# the drawer renders briefly before its data arrives, and an href of
-# "#proposals/undefined" would open the console on nothing.
+# `e` is the use-case ID prop, not `m`. That distinction cost a deploy: `m` is the
+# EDIT-FORM DRAFT and is only populated while the drawer is in edit mode, so
+# `m&&m.id` was false on a normal open and the link never rendered. The header
+# alongside reads `"Use Case #", e`, which is what identified the right binding.
+#
+# Guarded anyway, because the drawer renders before its data arrives and an href of
+# "#proposals/undefined" would open the console pointed at nothing.
 REPLACEMENT = (
     'a.jsxs("button",{className:"text-navy-400 hover:text-lava-300 flex '
     'items-center gap-1 text-sm",onClick:()=>f(!0),children:[a.jsx(gp,'
     '{className:"w-4 h-4"})," Edit"]}),'
-    f'm&&m.id?a.jsx("a",{{"data-{MARKER}":"1",'
-    'href:`/console/#proposals/${m.id}`,'
+    f'e?a.jsx("a",{{"data-{MARKER}":"1",'
+    'href:`/console/#proposals/${e}`,'
     'title:"Generate an eight-section proposal for this use case, grounded in its '
     'computed value, its real data gaps and this instance\\u2019s company profile",'
     'className:"text-navy-400 hover:text-lava-300 flex items-center gap-1 text-sm",'
