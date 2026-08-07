@@ -39,6 +39,7 @@ that has never talked to Databricks.
 | `test_docs.py` | Docs make no claim the code contradicts: links resolve, documented flags exist, every setting the code reads is documented, and nothing still says migrations apply on startup. |
 | `test_console_nav.py` | Every menu item routes somewhere real, no view is orphaned, menus carry the right ARIA roles, and the two CSS invariants that made the dropdowns invisible (nav clipping, header z-index) stay fixed. |
 | `test_knowledge.py` | KB slugs (reserved-word and collision handling), folder paths (subtree matching, LIKE escaping, circular moves), **attachment validation against forged MIME types and path traversal**, the search SQL's parameter binding across all 32 filter combinations, and the two new migrations' DDL. |
+| `test_proposals.py` | The proposal agent: the prompt actually carries real instance values (company, computed value, domain gaps, prerequisite build state), and output that is missing, thin, or stubbed with TODO is rejected rather than stored. |
 | `test_no_redundancy.py` | One definition per rule: no module restates `READY_STATUSES`, copies the cost table, or evaluates value models outside `value_engine`. |
 | `test_app_wiring.py` | Every router is mounted, and no literal route is shadowed by a parameterized one declared before it. |
 | `test_llm_negotiation.py` | Optional-parameter negotiation (`temperature` / `response_format` rejection) and that every model call goes through a negotiating helper. |

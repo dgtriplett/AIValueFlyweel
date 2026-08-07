@@ -1901,6 +1901,564 @@
   }
 
   // ---------------------------------------------------------------------
+  // Knowledge base
+  // ---------------------------------------------------------------------
+  /*
+   * Three states in one view: browse (folders + list), search results, and a single
+   * article. One view rather than three because it is one task — you land, you look
+   * for something, you read it — and separate views would lose your place at every
+   * step.
+   *
+   * State is module-level EXCEPT the article slug, which goes in the hash: an
+   * article is the thing people send each other links to, so #kb/<slug> has to
+   * work. A search term is not worth a URL.
+   */
+  let kbFolderPath = null;
+  let kbQuery = "";
+  let kbSlug = null;
+
+  async function viewKnowledge() {
+    if (kbSlug) return viewKbArticle(kbSlug);
+
+    main.innerHTML = `
+      <h2>Knowledge base</h2>
+      <p class="lede">The reasoning behind the portfolio — standards, proposals,
+        studies and runbooks, attached to the use cases and sources they explain.</p>
+      <div class="row" style="gap:8px;margin-bottom:16px">
+        <input id="kb-q" placeholder="Search titles and content…"
+               value="${text(kbQuery)}" style="flex:1;min-width:220px">
+        <button class="action" data-act="search">Search</button>
+        <button class="action secondary" data-act="new">New article</button>
+      </div>
+      <div id="kb-body"><p class="muted"><span class="spin"></span> Loading…</p></div>
+      <div id="result"></div>`;
+
+    onActions(main, {
+      search: () => { kbQuery = $("#kb-q").value.trim(); return viewKnowledge(); },
+      new: kbCreate,
+    });
+    $("#kb-q").addEventListener("keydown", (event) => {
+      if (event.key === "Enter") {
+        kbQuery = $("#kb-q").value.trim();
+        viewKnowledge();
+      }
+    });
+
+    const body = $("#kb-body");
+    try {
+      const query = new URLSearchParams({ limit: "50" });
+      if (kbQuery) query.set("q", kbQuery);
+      if (kbFolderPath) query.set("folder_path", kbFolderPath);
+      const [tree, list] = await Promise.all([
+        api("/kb/tree"),
+        api(`/kb/articles?${query}`),
+      ]);
+      const totals = tree.totals || {};
+
+      body.innerHTML = `
+        <div class="stat" style="margin-bottom:18px">
+          <div><span class="k">Articles</span><span class="v">${num(totals.articles)}</span></div>
+          <div><span class="k">Published</span><span class="v">${num(totals.published)}</span></div>
+          <div><span class="k">Generated</span><span class="v">${num(totals.generated)}</span></div>
+          <div><span class="k">Unfiled</span><span class="v">${num(tree.unfiled_count)}</span></div>
+        </div>
+        <div class="row" style="gap:6px;flex-wrap:wrap;margin-bottom:16px">
+          <button class="action ${kbFolderPath ? "secondary" : ""}"
+                  data-folder="">All</button>
+          ${(tree.folders || []).map((folder) => `
+            <button class="action ${kbFolderPath === folder.path ? "" : "secondary"}"
+                    data-folder="${text(folder.path)}">${text(folder.name)}
+              (${num(folder.article_count)})</button>`).join("")}
+        </div>
+        <div id="kb-list"></div>`;
+
+      body.querySelectorAll("[data-folder]").forEach((button) => {
+        button.addEventListener("click", () => {
+          kbFolderPath = button.dataset.folder || null;
+          viewKnowledge();
+        });
+      });
+
+      const items = list.items || [];
+      $("#kb-list").innerHTML = items.length === 0
+        ? banner("info", kbQuery
+            ? `Nothing matched "${text(kbQuery)}".`
+            : "No articles yet. Create one, or generate a proposal for a use case.")
+        : `<table>
+            <thead><tr><th>Title</th><th>Folder</th><th>Status</th>
+              <th class="num">Attached</th><th>Updated</th></tr></thead>
+            <tbody>${items.map((article) => `
+              <tr>
+                <td><a href="#kb/${text(article.slug)}"
+                       data-slug="${text(article.slug)}">${text(article.title)}</a>
+                  ${article.generated_by ? " <em class=\"small muted\">generated</em>" : ""}
+                  ${kbExcerpt(article)}</td>
+                <td class="muted small">${text(article.folder_name || "unfiled")}</td>
+                <td class="small">${text(article.status)}</td>
+                <td class="num small muted">${num(article.link_count)} link ·
+                  ${num(article.attachment_count)} file</td>
+                <td class="muted small">${text((article.updated_at || "").slice(0, 10))}</td>
+              </tr>`).join("")}
+            </tbody></table>`;
+
+      kbWireSlugLinks($("#kb-list"));
+    } catch (error) {
+      body.innerHTML = banner("err", error.message);
+    }
+  }
+
+  /** Search excerpt, with the server's <<match>> markers turned into a highlight.
+   *  The markers are chosen so they survive text() escaping as &lt;&lt;. */
+  function kbExcerpt(article) {
+    if (article.excerpt) {
+      return `<div class="small muted" style="margin-top:3px">${
+        text(article.excerpt)
+          .replace(/&lt;&lt;/g, "<mark>")
+          .replace(/&gt;&gt;/g, "</mark>")}</div>`;
+    }
+    return article.summary
+      ? `<div class="small muted" style="margin-top:3px">${text(article.summary)}</div>`
+      : "";
+  }
+
+  function kbWireSlugLinks(container) {
+    container.querySelectorAll("[data-slug]").forEach((link) => {
+      link.addEventListener("click", (event) => {
+        event.preventDefault();
+        kbSlug = link.dataset.slug;
+        location.hash = `kb/${kbSlug}`;
+      });
+    });
+  }
+
+  async function kbCreate() {
+    const title = prompt("Title for the new article:");
+    if (!title || !title.trim()) return;
+    const created = await api("/kb/articles", {
+      method: "POST",
+      body: JSON.stringify({ title: title.trim(), body_md: "", status: "draft" }),
+    });
+    kbSlug = created.slug;
+    location.hash = `kb/${created.slug}`;
+  }
+
+  async function viewKbArticle(slug) {
+    main.innerHTML = `<p class="muted"><span class="spin"></span> Loading…</p>`;
+    let article;
+    try {
+      article = await api(`/kb/articles/${encodeURIComponent(slug)}`);
+    } catch (error) {
+      main.innerHTML = banner("err", error.message)
+        + `<button class="action secondary" data-act="back">← Knowledge base</button>`;
+      onActions(main, { back: kbBack });
+      return;
+    }
+
+    main.innerHTML = `
+      <div class="row" style="margin-bottom:12px">
+        <button class="action secondary" data-act="back">← Knowledge base</button>
+      </div>
+      <h2>${text(article.title)}</h2>
+      <p class="lede">${text(article.summary || "")}</p>
+      <p class="small muted">${text(article.folder_path || "unfiled")} ·
+        v${num(article.version)} · ${text(article.status)} ·
+        updated ${text((article.updated_at || "").slice(0, 10))}
+        ${article.updated_by ? ` by ${text(article.updated_by)}` : ""}
+        ${(article.tags || []).length
+          ? " · " + (article.tags || []).map(text).join(", ") : ""}</p>
+      ${article.generated_by
+        ? banner("info", `Generated by the ${text(article.generated_by)}. Its `
+            + "figures come from the portfolio, but review it before sharing.")
+        : ""}
+      <div class="row" style="gap:6px;margin:14px 0">
+        <button class="action secondary" data-act="edit">Edit</button>
+        <button class="action secondary" data-act="publish">${
+          article.status === "published" ? "Move to draft" : "Publish"}</button>
+        <button class="action secondary" data-act="archive">Archive</button>
+      </div>
+      <div class="card" id="kb-content" style="padding:16px 20px"></div>
+      <div id="kb-meta" style="margin-top:22px"></div>
+      <div id="result"></div>`;
+
+    $("#kb-content").innerHTML = renderMarkdown(article.body_md || "*Empty.*");
+    kbRenderMeta(article);
+
+    onActions(main, {
+      back: kbBack,
+      edit: () => kbEdit(article),
+      publish: () => kbSave(slug, {
+        status: article.status === "published" ? "draft" : "published" }),
+      archive: async () => {
+        if (!confirm("Archive this article? It stays in the record but drops out "
+                     + "of search.")) return;
+        await api(`/kb/articles/${encodeURIComponent(slug)}`, { method: "DELETE" });
+        kbBack();
+      },
+    });
+  }
+
+  function kbRenderMeta(article) {
+    const links = article.links || [];
+    const files = article.attachments || [];
+    const versions = article.versions || [];
+    const references = article.references || [];
+    const slug = article.slug;
+
+    $("#kb-meta").innerHTML = `
+      <section>
+        <h3 class="small muted">Attached to</h3>
+        ${links.length === 0
+          ? `<p class="small muted">Not attached to anything yet. Attaching an
+              article to a use case is what makes it show up when someone opens
+              that use case.</p>`
+          : `<table><tbody>${links.map((link) => `
+              <tr><td class="small">${text(link.relation)}</td>
+                  <td class="small muted">${text(link.entity_type.replace(/_/g, " "))}</td>
+                  <td class="small">${text(link.label || "#" + link.entity_id)}</td>
+                  <td class="num"><button class="action secondary"
+                      data-act="unlink" data-id="${link.id}">Detach</button></td>
+              </tr>`).join("")}</tbody></table>`}
+        <div class="row" style="gap:6px;margin-top:10px">
+          <select id="kb-etype">
+            <option value="use_case">Use case</option>
+            <option value="data_asset">Data source</option>
+            <option value="data_domain">Data domain</option>
+            <option value="lob">Line of business</option>
+          </select>
+          <select id="kb-relation">
+            <option value="standard">is the standard for</option>
+            <option value="explains">explains</option>
+            <option value="proposal">is the proposal for</option>
+            <option value="evidence">is evidence for</option>
+            <option value="related">relates to</option>
+          </select>
+          <input id="kb-eid" type="number" min="1" placeholder="id" style="width:88px">
+          <button class="action" data-act="link">Attach</button>
+        </div>
+      </section>
+
+      <section>
+        <h3 class="small muted">Documents</h3>
+        ${files.length === 0
+          ? `<p class="small muted">No files attached.</p>`
+          : `<table><tbody>${files.map((file) => `
+              <tr><td class="small"><a href="/api/kb/attachments/${file.id}"
+                     >${text(file.filename)}</a></td>
+                  <td class="small muted">${Math.round((file.size_bytes || 0) / 1024)} KB</td>
+                  <td class="small muted">${text(file.storage)}</td>
+                  <td class="num"><button class="action secondary"
+                      data-act="delfile" data-id="${file.id}">Remove</button></td>
+              </tr>`).join("")}</tbody></table>`}
+        <div class="row" style="gap:6px;margin-top:10px">
+          <input type="file" id="kb-file">
+          <button class="action" data-act="upload" data-busy="Uploading…">Upload</button>
+        </div>
+        <p class="small muted">PDF, Word, Excel, PowerPoint, CSV, text, images. Up
+          to 25MB — enough for an interconnection study.</p>
+      </section>
+
+      ${references.length ? `
+        <section>
+          <h3 class="small muted">References</h3>
+          <p class="small">${references.map((reference) => reference.exists
+            ? `<a href="#kb/${text(reference.slug)}" data-slug="${text(reference.slug)}"
+                 >${text(reference.title)}</a>`
+            : `<span class="muted">${text(reference.slug)} — not written yet</span>`
+          ).join(" · ")}</p>
+        </section>` : ""}
+
+      ${versions.length ? `
+        <section>
+          <h3 class="small muted">History</h3>
+          <table><tbody>${versions.map((version) => `
+            <tr><td class="small">v${num(version.version)}</td>
+                <td class="small muted">${text(version.change_note || "—")}</td>
+                <td class="small muted">${text(version.edited_by || "")}</td>
+                <td class="small muted">${text((version.edited_at || "").slice(0, 10))}</td>
+                <td class="num"><button class="action secondary"
+                    data-act="restore" data-v="${version.version}">Restore</button></td>
+            </tr>`).join("")}</tbody></table>
+        </section>` : ""}`;
+
+    kbWireSlugLinks($("#kb-meta"));
+    onActions($("#kb-meta"), {
+      link: async () => {
+        const entityId = parseInt($("#kb-eid").value, 10);
+        if (!entityId) throw new Error("Enter the id of the thing to attach to.");
+        await api(`/kb/articles/${encodeURIComponent(slug)}/links`, {
+          method: "POST",
+          body: JSON.stringify({
+            entity_type: $("#kb-etype").value,
+            entity_id: entityId,
+            relation: $("#kb-relation").value,
+          }),
+        });
+        viewKbArticle(slug);
+      },
+      unlink: async (button) => {
+        await api(`/kb/links/${button.dataset.id}`, { method: "DELETE" });
+        viewKbArticle(slug);
+      },
+      delfile: async (button) => {
+        await api(`/kb/attachments/${button.dataset.id}`, { method: "DELETE" });
+        viewKbArticle(slug);
+      },
+      restore: async (button) => {
+        if (!confirm(`Restore version ${button.dataset.v}? The current text is kept `
+                     + "as a version, so this is undoable.")) return;
+        await api(`/kb/articles/${encodeURIComponent(slug)}/restore/${
+          button.dataset.v}`, { method: "POST" });
+        viewKbArticle(slug);
+      },
+      upload: async () => {
+        const input = $("#kb-file");
+        if (!input.files || !input.files[0]) throw new Error("Choose a file first.");
+        const form = new FormData();
+        form.append("file", input.files[0]);
+        // FormData, so api() must not set a JSON content type — it checks for this.
+        await api(`/kb/articles/${encodeURIComponent(slug)}/attachments`,
+                  { method: "POST", body: form });
+        viewKbArticle(slug);
+      },
+    });
+  }
+
+  function kbBack() {
+    kbSlug = null;
+    location.hash = "kb";
+  }
+
+  async function kbSave(slug, patch) {
+    await api(`/kb/articles/${encodeURIComponent(slug)}`, {
+      method: "PUT", body: JSON.stringify(patch),
+    });
+    return viewKbArticle(slug);
+  }
+
+  function kbEdit(article) {
+    main.innerHTML = `
+      <div class="row" style="margin-bottom:12px">
+        <button class="action secondary" data-act="cancel">← Cancel</button>
+      </div>
+      <h2>Editing: ${text(article.title)}</h2>
+      <p class="lede">Markdown. Link to another article with
+        <code>[[Its Title]]</code>. Saving keeps the previous version, so an edit is
+        always recoverable.</p>
+      <section>
+        <label class="small muted">Title</label>
+        <input id="e-title" value="${text(article.title)}" style="width:100%">
+      </section>
+      <section>
+        <label class="small muted">Summary — one line, shown in search results</label>
+        <input id="e-summary" value="${text(article.summary || "")}" style="width:100%">
+      </section>
+      <section>
+        <label class="small muted">Tags, comma separated</label>
+        <input id="e-tags" value="${text((article.tags || []).join(", "))}"
+               style="width:100%">
+      </section>
+      <section>
+        <label class="small muted">Body</label>
+        <textarea id="e-body" rows="22" style="width:100%;font-family:ui-monospace,
+          SFMono-Regular,monospace;font-size:13px">${text(article.body_md || "")}</textarea>
+      </section>
+      <section>
+        <label class="small muted">What changed — optional, shown in the history</label>
+        <input id="e-note" placeholder="e.g. clarified the recloser coordination rule"
+               style="width:100%">
+      </section>
+      <div class="row" style="gap:8px">
+        <button class="action" data-act="save" data-busy="Saving…">Save</button>
+        <button class="action secondary" data-act="cancel">Cancel</button>
+      </div>
+      <div id="result"></div>`;
+
+    onActions(main, {
+      cancel: () => viewKbArticle(article.slug),
+      save: async () => {
+        const title = $("#e-title").value.trim();
+        if (!title) throw new Error("A title is required.");
+        await kbSave(article.slug, {
+          title,
+          summary: $("#e-summary").value.trim(),
+          body_md: $("#e-body").value,
+          tags: $("#e-tags").value.split(",").map((t) => t.trim()).filter(Boolean),
+          change_note: $("#e-note").value.trim() || null,
+        });
+      },
+    });
+  }
+
+  /**
+   * Minimal markdown -> HTML.
+   *
+   * WHY HAND-ROLLED: the console ships with no dependencies by design, and pulling
+   * a markdown library in for one view would change that.
+   *
+   * WHY IT IS SAFE: the source is escaped FIRST with text(), and only then is a
+   * fixed set of constructs re-introduced. That ordering is the whole security
+   * property — article bodies come from users and from the model, and by the time
+   * any pattern runs, every < > & " ' is already an entity, so no input can inject
+   * markup. Nothing here ever writes an attribute from user text except the wiki
+   * slug, which is stripped to [a-z0-9-].
+   */
+  function renderMarkdown(source) {
+    let html = text(source);
+
+    // Fenced blocks are lifted out first so their contents are not processed.
+    const blocks = [];
+    html = html.replace(/```[a-z]*\n([\s\S]*?)```/g, (_match, code) => {
+      blocks.push(code);
+      return `\n BLOCK${blocks.length - 1} \n`;
+    });
+
+    html = html
+      .replace(/^#{4,6} (.*)$/gm, "<h4>$1</h4>")
+      .replace(/^### (.*)$/gm, "<h4>$1</h4>")
+      .replace(/^## (.*)$/gm, "<h3>$1</h3>")
+      .replace(/^# (.*)$/gm, "<h2>$1</h2>")
+      .replace(/^&gt; ?(.*)$/gm, "<blockquote>$1</blockquote>")
+      .replace(/^(---+|\*\*\*+)$/gm, "<hr>")
+      .replace(/\*\*([^*\n]+)\*\*/g, "<strong>$1</strong>")
+      .replace(/(^|[^*])\*([^*\n]+)\*/g, "$1<em>$2</em>")
+      .replace(/`([^`\n]+)`/g, "<code>$1</code>")
+      .replace(/\[\[([^\]|\n]{1,120})(?:\|([^\]\n]{0,120}))?\]\]/g,
+        (_match, target, label) => {
+          // Slugified the same way the server does, so both agree on what a title
+          // resolves to. Restricted to [a-z0-9-] before it reaches an attribute.
+          const slug = target.trim().toLowerCase()
+            .replace(/[^\w\s-]/g, "").replace(/[-\s]+/g, "-");
+          return `<a href="#kb/${slug}" data-slug="${slug}">${label || target}</a>`;
+        })
+      .replace(/^[-*] (.*)$/gm, "<li>$1</li>")
+      .replace(/(<li>[\s\S]*?<\/li>)(?![\s]*<li>)/g, "<ul>$1</ul>");
+
+    html = html.split(/\n{2,}/).map((chunk) => {
+      const trimmed = chunk.trim();
+      if (!trimmed) return "";
+      if (/^<(h\d|ul|ol|li|blockquote|hr)/.test(trimmed)) return trimmed;
+      if (/^ BLOCK\d+ $/.test(trimmed)) return trimmed;
+      return `<p>${trimmed.replace(/\n/g, "<br>")}</p>`;
+    }).join("\n");
+
+    return html.replace(/ BLOCK(\d+) /g,
+      (_match, index) => `<pre><code>${blocks[Number(index)]}</code></pre>`);
+  }
+
+  // ---------------------------------------------------------------------
+  // Proposal agent
+  // ---------------------------------------------------------------------
+  async function viewProposals() {
+    main.innerHTML = `
+      <h2>Use-case proposals</h2>
+      <p class="lede">An eight-section written proposal for one use case, grounded in
+        this instance's own data — the researched company profile, the computed value
+        and its assumptions, the real data gaps. Filed in the knowledge base and
+        attached to the use case.</p>
+      <div class="row" style="gap:8px;margin-bottom:8px">
+        <input id="p-id" type="number" min="1" placeholder="Use case id"
+               style="width:120px">
+        <button class="action secondary" data-act="context"
+                data-busy="Reading…">Check what it knows</button>
+        <button class="action" data-act="generate"
+                data-busy="Writing…">Generate proposal</button>
+      </div>
+      <p class="small muted">"Check what it knows" makes no model call — it shows
+        exactly what the agent would be told, so you can spot a missing value model
+        before spending a generation on it.</p>
+      <div id="result" style="margin-top:16px"></div>`;
+
+    onActions(main, {
+      context: async () => {
+        const id = kbRequireId();
+        const data = await api(`/proposals/use-cases/${id}/context`);
+        const context = data.context || {};
+        const value = context.value || {};
+        const domains = context.domains || {};
+        $("#result").innerHTML = `
+          <h3>${text(data.use_case.title)}</h3>
+          ${(data.warnings || []).map((w) => banner("warn", w)).join("")}
+          <div class="stat" style="margin:12px 0">
+            <div><span class="k">Annual value</span><span class="v">${
+              value.mid != null ? "$" + value.mid + "M" : "—"}</span></div>
+            <div><span class="k">Domains met</span><span class="v">${
+              num((domains.satisfied || []).length)}</span></div>
+            <div><span class="k">Data gaps</span><span class="v">${
+              num((domains.gaps || []).length)}</span></div>
+            <div><span class="k">Sources</span><span class="v">${
+              num((context.sources || []).length)}</span></div>
+          </div>
+          <p class="small muted">Everything the agent would be told:</p>
+          <pre style="max-height:320px;overflow:auto">${
+            text(JSON.stringify(context, null, 2))}</pre>`;
+      },
+      generate: async () => {
+        const id = kbRequireId();
+        try {
+          renderProposal(await api(`/proposals/use-cases/${id}`, { method: "POST" }));
+        } catch (error) {
+          // A 409 means one exists already. Offer to supersede rather than
+          // dead-ending on an error the user can legitimately override.
+          if (!/already exists/i.test(error.message)) throw error;
+          $("#result").innerHTML = banner("warn", error.message)
+            + `<button class="action" data-act="regen"
+                       data-busy="Regenerating…">Regenerate anyway</button>`;
+          onActions($("#result"), {
+            regen: async () => renderProposal(
+              await api(`/proposals/use-cases/${id}?regenerate=true`,
+                        { method: "POST" })),
+          });
+        }
+      },
+    });
+  }
+
+  function kbRequireId() {
+    const id = parseInt($("#p-id").value, 10);
+    if (!id) throw new Error("Enter a use case id.");
+    return id;
+  }
+
+  function renderProposal(data) {
+    const card = data.confirm || {};
+    const after = card.after || {};
+    $("#result").innerHTML = `
+      ${(data.warnings || []).map((w) => banner("warn", w)).join("")}
+      <div class="card" style="border-color:var(--lava)">
+        <h3>Confirm</h3>
+        <p class="small">${text(card.summary || "Save this proposal")}</p>
+        <p class="small muted">${num(after.sections)} sections ·
+          ${num(after.characters)} characters. Nothing is written until you confirm.</p>
+        <div class="row" style="margin-top:10px">
+          <button class="action" data-act="apply" data-token="${text(card.token)}"
+                  data-busy="Saving…">Confirm</button>
+          <button class="action secondary" data-act="cancel">Cancel</button>
+          <span class="small muted">Single use, expires shortly.</span>
+        </div>
+      </div>
+      <h3 class="small muted" style="margin-top:18px">Preview</h3>
+      <div class="card" style="padding:16px 20px;max-height:520px;overflow:auto"
+           id="p-preview"></div>`;
+
+    $("#p-preview").innerHTML = renderMarkdown(data.preview_md || "");
+
+    onActions($("#result"), {
+      apply: async (button) => {
+        const result = await api(`/confirm/${button.dataset.token}`,
+                                { method: "POST" });
+        $("#result").innerHTML = banner("ok",
+          `Saved as <strong>${text(result.slug)}</strong> v${num(result.version)}`
+          + (result.replaced
+            ? " — the previous text is kept in the article's history." : "")
+          + ` · <a href="#kb/${text(result.slug)}"
+                   data-slug="${text(result.slug)}">Open it</a>`);
+        kbWireSlugLinks($("#result"));
+      },
+      cancel: () => { $("#result").innerHTML = ""; },
+    });
+  }
+
+  // ---------------------------------------------------------------------
   // Router
   // ---------------------------------------------------------------------
   const VIEWS = {
@@ -1911,6 +2469,8 @@
     flow: viewFlow,
     catalog: viewCatalog,
     generate: viewGenerate,
+    kb: viewKnowledge,
+    proposals: viewProposals,
     admin: viewAdmin,
     // Deep links straight to a catalog sub-tab. These double as the back-compat
     // targets for the era when each was its own top-level tab, so an old bookmark
@@ -1978,6 +2538,8 @@
       hint: "Create and document new work",
       items: [
         ["generate", "Generate use cases"],
+        ["proposals", "Write a proposal"],
+        ["kb", "Knowledge base"],
         ["artifacts", "What's built"],
         ["taxonomy", "Taxonomy"],
         ["glossary", "Glossary"],
@@ -2080,6 +2642,15 @@
   });
 
   async function show(name) {
+    // #kb/<slug> opens one article. Handled here rather than in VIEWS because the
+    // slug is a parameter, and an article is the thing people paste into Slack —
+    // so it has to survive a reload and a cold open.
+    if (name.startsWith("kb/")) {
+      kbSlug = decodeURIComponent(name.slice(3));
+      name = "kb";
+    } else if (name === "kb") {
+      kbSlug = null;
+    }
     const render = VIEWS[name] || viewStart;
 
     // Mark the current item, and underline the group containing it so the top row
@@ -2100,7 +2671,11 @@
 
     // The hash is the source of truth so a view survives a reload and can be
     // linked to — useful when handing a colleague "the GRANTs page".
-    if (location.hash.slice(1) !== name) location.hash = name;
+    // Don't collapse #kb/<slug> back to #kb: the slug IS the address.
+    const current = location.hash.slice(1);
+    if (current !== name && !(name === "kb" && current.startsWith("kb/"))) {
+      location.hash = name;
+    }
     try {
       await render();
     } catch (error) {

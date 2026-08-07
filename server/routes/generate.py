@@ -394,13 +394,23 @@ async def _research_executor(payload: dict, actor: str) -> dict:
     return await execute_apply_research(payload, actor)
 
 
+async def _proposal_executor(payload: dict, actor: str) -> dict:
+    """Write a generated use-case proposal into the knowledge base.
+
+    Lazily imported for the same cycle reason as the research executor.
+    """
+    from .proposals import execute_create_proposal
+    return await execute_create_proposal(payload, actor)
+
+
 # Intent -> executor. Adding an intent means adding a row here; an intent with no
 # executor is rejected at confirm time rather than silently succeeding.
 _EXECUTORS = {
     cf.INTENT_CREATE_USE_CASES: _execute_create_use_cases,
-    # Registered here rather than in research.py because /api/confirm lives in this
-    # module — every agent-proposed write shares that one gate.
+    # Registered here rather than in their own modules because /api/confirm lives in
+    # this module — every agent-proposed write shares that one gate.
     cf.INTENT_APPLY_RESEARCH: _research_executor,
+    cf.INTENT_CREATE_PROPOSAL: _proposal_executor,
 }
 
 

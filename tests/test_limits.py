@@ -456,6 +456,9 @@ class TestExpensiveEndpointsAreLimited(unittest.TestCase):
                                        ('/attribute"', "generate")],
         "server/routes/inventory.py": [('/artifacts/sync"', "sweep"),
                                        ('/rules/test"', "generate")],
+        # Eight prose sections at 8000 output tokens costs like company research,
+        # not like a short classification call — hence 'research', not 'generate'.
+        "server/routes/proposals.py": [('/use-cases/{use_case_id}"', "research")],
         "server/routes/live.py": [('/sync"', "sweep"), ('/sync-genie"', "sweep")],
     }
 
@@ -465,15 +468,25 @@ class TestExpensiveEndpointsAreLimited(unittest.TestCase):
         root = Path(__file__).parent.parent
         missing = []
         for relative, expectations in self.EXPECTED.items():
-            text = (root / relative).read_text()
+            lines = (root / relative).read_text().split("\n")
             for fragment, limit_name in expectations:
-                # The decorator line must carry the limiter dependency.
-                for line in text.split("\n"):
-                    if line.startswith("@router.post(") and fragment in line:
-                        if f'limiter("{limit_name}")' not in line:
-                            missing.append(f"{relative} {fragment} "
-                                           f"(expected {limit_name})")
-                        break
+                for index, line in enumerate(lines):
+                    if not (line.startswith("@router.post(") and fragment in line):
+                        continue
+                    # A decorator can wrap across lines. Reading only the first one
+                    # reported a correctly-limited endpoint as unlimited, which
+                    # means the same bug would have hidden a REAL missing limit on
+                    # any wrapped decorator. Join until the parens balance.
+                    decorator, depth = "", 0
+                    for candidate in lines[index:]:
+                        decorator += candidate
+                        depth += candidate.count("(") - candidate.count(")")
+                        if depth <= 0:
+                            break
+                    if f'limiter("{limit_name}")' not in decorator:
+                        missing.append(f"{relative} {fragment} "
+                                       f"(expected {limit_name})")
+                    break
                 else:
                     missing.append(f"{relative} {fragment} — endpoint not found")
         self.assertEqual(missing, [],

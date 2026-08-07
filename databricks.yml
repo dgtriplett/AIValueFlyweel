@@ -23,10 +23,10 @@ variables:
     description: "SQL warehouse ID for system-table reads, UC discovery, and ai_query() enrichment (app SP gets CAN_USE)."
   serving_endpoint:
     description: "Foundation Model chat endpoint for the AI agents."
-    default: databricks-claude-sonnet-4-5
+    default: databricks-claude-sonnet-5
   atlas_catalog:
     description: "Unity Catalog the discovery layer writes inventory + enrichment staging into."
-    default: main
+    default: grid_ops_demo_catalog
   atlas_schema:
     description: "Schema inside atlas_catalog for the discovery layer."
     default: grid_atlas_discovery
@@ -35,19 +35,19 @@ variables:
     default: ""
   genie_mirror_catalog:
     description: "Unity Catalog catalog the app may write the Genie mirror into."
-    default: main
+    default: grid_ops_demo_catalog
   genie_mirror_schema:
     description: "Schema for the Genie mirror tables."
     default: grid_atlas
   lakebase_project:
     description: "Lakebase (Autoscaling Postgres) PROJECT id holding app state (see the note in resources)."
-    default: grid-atlas-db
+    default: grid-atlas-pg
   pg_database:
     description: "Database inside the Lakebase project."
     default: app
   demo_mode:
     description: "Enables the removable Demo Mode toggle + /api/demo/* endpoints. Ship 'off' to customers."
-    default: "off"
+    default: off
 
 resources:
   apps:
