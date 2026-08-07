@@ -117,6 +117,40 @@ class TestOneReadinessRule(unittest.TestCase):
                     offenders.append(f"{path.relative_to(SERVER)}:{number}")
         self.assertEqual(offenders, [], f"local BUILT_STATUSES: {offenders}")
 
+    def test_built_statuses_not_hardcoded_in_sql(self):
+        """The Python guard above misses the way this actually went wrong.
+
+        Two route modules imported READY_STATUSES as a constant while typing the
+        BUILT list out by hand inside their SQL — so a change to BUILT_STATUSES
+        would leave those queries answering the old question, and a use case would
+        read "blocked" on one screen and "shovel-ready" on another. Found by an audit
+        of the merged codebase, not by the constant-redeclaration check.
+        """
+        offenders = []
+        pattern = re.compile(r"IN\s*\(\s*'live'\s*,\s*'value_realized'\s*\)")
+        for path in SERVER.rglob("*.py"):
+            if path.name == "readiness.py":
+                continue   # defines BUILT_SQL_LIST; its own query uses it
+            for number, line in enumerate(path.read_text().splitlines(), 1):
+                if pattern.search(line):
+                    offenders.append(f"{path.relative_to(SERVER)}:{number}")
+        self.assertEqual(
+            offenders, [],
+            "these hardcode the built-status list in SQL instead of interpolating "
+            f"readiness.BUILT_SQL_LIST: {offenders}")
+
+    def test_sql_list_helper_matches_the_constant(self):
+        """The rendered fragment must stay in step with the tuple it comes from."""
+        self.assertEqual(readiness.BUILT_SQL_LIST, "'live','value_realized'")
+        self.assertEqual(readiness.READY_SQL_LIST, "'curated','governed'")
+        for status in readiness.BUILT_STATUSES:
+            self.assertIn(f"'{status}'", readiness.BUILT_SQL_LIST)
+
+    def test_sql_list_helper_rejects_an_unsafe_literal(self):
+        """It interpolates into query text, so the assertion must actually fire."""
+        with self.assertRaises(AssertionError):
+            readiness._status_list(("live'; DROP TABLE use_cases; --",))
+
 
 class TestNoDuplicateLlmPlumbing(unittest.TestCase):
     def test_one_llm_call_site(self):

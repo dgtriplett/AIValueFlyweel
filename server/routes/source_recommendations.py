@@ -16,7 +16,7 @@ from ..db import db
 from ..value_engine import load_assumptions, asset_cost, use_case_value
 # Import the readiness rule rather than restating it: a local copy would let
 # this module silently disagree with how readiness is actually computed.
-from ..readiness import READY_STATUSES as READY
+from ..readiness import BUILT_SQL_LIST, READY_STATUSES as READY
 
 router = APIRouter(prefix="/data-sources", tags=["source_recommendations"])
 
@@ -41,8 +41,8 @@ async def _context():
             req_by_uc.setdefault(r["use_case_id"], []).append(r["data_asset_id"])
     # uc -> whether all its direct prerequisite use cases are built (live/value_realized)
     prereq_rows = await db.fetch(
-        """SELECT e.to_use_case_id AS uc_id,
-                  bool_and(up.status IN ('live','value_realized')) AS all_built
+        f"""SELECT e.to_use_case_id AS uc_id,
+                  bool_and(up.status IN ({BUILT_SQL_LIST})) AS all_built
            FROM uc_enables_uc e JOIN use_cases up ON up.id = e.from_use_case_id
            GROUP BY e.to_use_case_id""")
     prereqs_built_by_uc = {r["uc_id"]: bool(r["all_built"]) for r in prereq_rows}

@@ -55,6 +55,35 @@ READY_STATUSES = ("curated", "governed")
 BUILT_STATUSES = ("live", "value_realized")
 
 
+def _status_list(statuses: tuple[str, ...]) -> str:
+    """Render a status tuple as a SQL IN list: "'live','value_realized'".
+
+    Two route modules had the BUILT list typed out by hand in SQL while importing
+    READY_STATUSES as a constant from here — so changing BUILT_STATUSES would have
+    left those queries answering the old question, and the disagreement would
+    surface as a use case reading "blocked" on one screen and "shovel-ready" on
+    another. This makes the constant the only definition.
+
+    Safe to interpolate: the values come from a module constant, never from a
+    request. The assertion makes that a guarantee rather than a convention, since
+    the result goes straight into query text.
+
+    NOTE: only the BUILT list is threaded through today. The `'curated','governed'`
+    literals in the domain queries were left alone deliberately — several of those
+    SQL strings also contain `'{}'::text[]`, and converting them to f-strings breaks
+    that literal. Mechanically rewriting eight query strings to remove a duplicated
+    two-element tuple is a worse trade than leaving it; the redundancy test below
+    covers the risk instead.
+    """
+    for status in statuses:
+        assert status.replace("_", "").isalnum(), f"unsafe status literal: {status!r}"
+    return ",".join(f"'{status}'" for status in statuses)
+
+
+BUILT_SQL_LIST = _status_list(BUILT_STATUSES)
+READY_SQL_LIST = _status_list(READY_STATUSES)
+
+
 def classify(ready: int, total: int, prereqs_total: int, prereqs_built: int) -> tuple[str, float]:
     """Return (label, data_ready_pct)."""
     data_pct = 1.0 if total == 0 else ready / total

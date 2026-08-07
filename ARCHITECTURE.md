@@ -62,6 +62,18 @@ written back to Lakebase, which stays the portfolio's system of record.
 - **Agent state** — `004_agents.sql`: confirm_tokens, uc_generation_previews,
   chat_conversations, chat_messages. `005_research.sql`: research_runs,
   company_profile, assumption_proposals. `006_branding.sql`: branding.
+- **Knowledge base** — `007_knowledge.sql`: kb_folders (materialized path),
+  kb_articles (markdown + a GENERATED tsvector for full-text search),
+  kb_article_versions (append-only history), kb_links (polymorphic attachment to
+  portfolio entities), kb_attachments (binary documents, in a UC Volume when one is
+  configured and Lakebase otherwise).
+- **Constraints** — `008_use_case_title_unique.sql`: a unique index on
+  `lower(title)`. The generation route guarded duplicates with a check-then-insert
+  that nothing in the database backed up, so two concurrent commits could both pass
+  the check and create the same use case twice — double-counting its value in every
+  rollup. The migration merges any pre-existing duplicates (re-pointing their child
+  rows and writing an audit trail) before adding the index, so it cannot abort on
+  real customer data.
 - **Migration ledger** — `schema_migrations`, created by `server/migrator.py`
   rather than by a numbered migration, since it must exist before the ledger can
   be consulted.
