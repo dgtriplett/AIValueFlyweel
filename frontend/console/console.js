@@ -204,10 +204,16 @@
             <h3>A · Sweep your Databricks estate <span class="pill ${
               hasInventory ? "ok" : "warn"}">${hasInventory
                 ? num(inventory.tables) + " tables found" : "nothing yet"}</span></h3>
-            <p class="small muted">Run
-              <code>schema-extractor/extract_schemas.py</code> on your machine — under
-              your own credentials, so it reaches workspaces this app cannot. Metadata
-              only; no table contents are read.</p>
+            <p class="small muted">This app can only authenticate to the one
+              workspace it runs in. Download the extractor and run it on your own
+              machine — under <em>your</em> credentials, so it reaches every workspace
+              you can. Metadata only; no table contents are read, and nothing leaves
+              your machine until you upload the CSVs back here.</p>
+            <div class="row" style="margin-top:10px">
+              <a class="action" href="/api/ingestion/extractor/download">
+                ⬇ Download extractor (.zip)</a>
+              <span class="small muted" id="extractor-info"></span>
+            </div>
             ${discoveryReady ? `
               <div class="stat" style="margin:12px 0">
                 <div><span class="k">Workspaces</span><span class="v">${num(inventory.workspaces)}</span></div>
@@ -397,6 +403,16 @@
               r.errors.slice(0, 8).map((e) => `<li>${text(e)}</li>`).join("")}</ul></div>`
           : "");
     };
+
+    // Tell the user what they're about to download before they click it.
+    api("/ingestion/extractor/info").then((info) => {
+      const slot = $("#extractor-info");
+      if (!slot) return;
+      slot.textContent = info.available
+        ? `${info.files.length} files, ${Math.round(info.total_bytes / 1024)} KB · `
+          + `needs ${info.requires[0]}`
+        : "unavailable in this deployment";
+    }).catch(() => { /* the button still works; the hint is a nicety */ });
 
     onActions(main, {
       recheck: () => viewStart(),

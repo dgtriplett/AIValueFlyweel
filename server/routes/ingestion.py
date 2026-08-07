@@ -31,8 +31,11 @@ from __future__ import annotations
 import csv
 import io
 import json
+import zipfile
+from pathlib import Path
 
 from fastapi import APIRouter, File, HTTPException, Query, Request, UploadFile
+from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 
 from .. import enrichment as enr
@@ -50,6 +53,151 @@ MAX_UPLOAD_BYTES = 64 * 1024 * 1024
 # Rows per INSERT. Statement Execution has a statement-size limit, and batching
 # keeps each statement well inside it while staying far faster than row-at-a-time.
 INSERT_BATCH = 500
+
+
+# ---------------------------------------------------------------------------
+# Extractor download
+# ---------------------------------------------------------------------------
+# The app's service principal only holds credentials for the workspace it runs
+# in, and a utility's data is usually spread across several — prod/dev, per
+# operating company, per region. So the sweep has to run somewhere that can
+# authenticate as a HUMAN, against every workspace they can reach.
+#
+# Serving the tool from the app itself (rather than "go clone the repo") means the
+# person who needs it is already looking at the page that tells them why, and the
+# copy they get matches the version of the app that will ingest their output.
+EXTRACTOR_DIR = Path(__file__).resolve().parents[2] / "schema-extractor"
+
+# Never shipped inside the ZIP: caches, and any CSV left over from a previous run
+# in the source tree (that would be someone else's metadata).
+_EXTRACTOR_SKIP_DIRS = {"__pycache__", "output", ".venv", ".git"}
+_EXTRACTOR_SKIP_SUFFIXES = {".csv", ".pyc", ".pyo"}
+
+
+def _extractor_files() -> list[Path]:
+    if not EXTRACTOR_DIR.is_dir():
+        return []
+    files = []
+    for path in sorted(EXTRACTOR_DIR.rglob("*")):
+        if not path.is_file():
+            continue
+        if any(part in _EXTRACTOR_SKIP_DIRS for part in path.relative_to(EXTRACTOR_DIR).parts):
+            continue
+        if path.suffix.lower() in _EXTRACTOR_SKIP_SUFFIXES:
+            continue
+        files.append(path)
+    return files
+
+
+def _run_instructions() -> str:
+    """A RUN-ME the downloader sees first, tailored to THIS deployment.
+
+    The generic README ships too, but it can't know which app to upload back to or
+    which catalog is configured. Generating this at download time means the
+    instructions name the actual URL, so there is nothing to translate.
+    """
+    from ..config import get_workspace_host
+
+    try:
+        host = get_workspace_host()
+    except Exception:  # noqa: BLE001 - the ZIP must build even if host lookup fails
+        host = ""
+    target = "Grid Atlas → Get started → step 2A"
+    return f"""Grid Atlas — workspace metadata extractor
+=========================================
+
+WHY YOU ARE RUNNING THIS LOCALLY
+--------------------------------
+Grid Atlas authenticates as a service principal that only has credentials for the
+one workspace it is deployed in. Your data is probably spread across more than
+that. This script runs under YOUR credentials, so it reaches every workspace you
+can reach, and produces files you upload back once.
+
+It reads METADATA ONLY — catalog / schema / table / column names, comments,
+owners, and data types. No table contents are ever queried, and nothing is
+transmitted anywhere: output lands in ./output/ for you to inspect first.
+
+STEPS
+-----
+1. pip install -r requirements.txt
+
+2. Edit workspaces.txt — one workspace URL per line. Include every workspace whose
+   data you want in the inventory, especially the ones this app cannot reach.
+
+3. python3 extract_schemas.py
+
+   Per workspace it reuses a matching ~/.databrickscfg profile if it finds one, and
+   otherwise opens a browser to log in. A workspace that fails is reported and
+   SKIPPED — the run continues and still produces output for the rest.
+
+4. Upload these from ./output/ into {target}:
+       all_schemas.csv     (required)
+       all_tables.csv      (required)
+       all_columns.csv     (optional, but markedly improves AI accuracy)
+
+OPTIONS
+-------
+   --no-columns         skip the column sweep. It is the largest query on a big
+                        estate, but also the best signal for classification — a
+                        table with settlement_point and lmp columns is market data
+                        whatever it is named. Prefer narrowing workspaces.txt.
+   --warehouse-id ID    force a specific warehouse instead of auto-picking a
+                        running one.
+   --output-dir DIR     write the CSVs somewhere else.
+
+Re-running is safe. Ingestion MERGEs on (workspace, catalog, schema, table), so
+re-uploading updates rows instead of duplicating them.
+
+THIS DEPLOYMENT
+---------------
+   App:        {host or "(host unavailable)"}
+   Upload to:  {target}
+   Discovery:  {(ATLAS_CATALOG + "." + ATLAS_SCHEMA) if discovery_configured()
+                else "not configured — set ATLAS_CATALOG in app.yaml"}
+"""
+
+
+@router.get("/extractor/download")
+async def download_extractor():
+    """Serve the metadata extractor as a ready-to-run ZIP.
+
+    Generated per request rather than stored as a build artifact, so the bundle
+    always matches the deployed code and carries instructions naming this app.
+    """
+    files = _extractor_files()
+    if not files:
+        raise HTTPException(
+            500,
+            "The extractor source is missing from this deployment. Get it from the "
+            "repository's schema-extractor/ directory instead.")
+
+    buffer = io.BytesIO()
+    with zipfile.ZipFile(buffer, "w", zipfile.ZIP_DEFLATED) as archive:
+        for path in files:
+            archive.write(path, f"schema-extractor/{path.relative_to(EXTRACTOR_DIR)}")
+        # Named to sort first in a file listing, so it is the obvious entry point.
+        archive.writestr("schema-extractor/RUN-ME-FIRST.txt", _run_instructions())
+
+    buffer.seek(0)
+    return StreamingResponse(
+        buffer,
+        media_type="application/zip",
+        headers={"Content-Disposition":
+                 'attachment; filename="grid-atlas-schema-extractor.zip"'})
+
+
+@router.get("/extractor/info")
+async def extractor_info():
+    """What the download contains, for the UI to render before someone clicks."""
+    files = _extractor_files()
+    return {
+        "available": bool(files),
+        "files": [str(p.relative_to(EXTRACTOR_DIR)) for p in files],
+        "total_bytes": sum(p.stat().st_size for p in files),
+        "requires": ["Python 3.9+", "databricks-sdk", "a SQL warehouse per workspace"],
+        "reads": "metadata only — catalog/schema/table/column names, comments, owners",
+        "produces": ["all_schemas.csv", "all_tables.csv", "all_columns.csv"],
+    }
 
 
 def _require_discovery() -> None:
