@@ -32,6 +32,10 @@ from ..lineage import run_sql, system_tables_available
 
 router = APIRouter(tags=["inventory"])
 
+# Rows per INSERT during an artifact sweep. Keeps each statement well inside any
+# parameter limit while turning 500 round-trips into a handful.
+_ARTIFACT_BATCH = 100
+
 
 # ---------------------------------------------------------------------------
 # Rules
@@ -304,26 +308,48 @@ async def sync_artifacts(request: Request):
         if not result["ok"]:
             notes.append(f"{kind}: {result.get('error') or 'unavailable'}")
             return
-        count = 0
+
+        records = []
         for raw in result["rows"]:
             record = mapper(raw)
-            if not record.get("name"):
-                continue
+            if record.get("name"):
+                records.append(record)
+        if not records:
+            found[kind] = 0
+            return
+
+        # Batched rather than one statement per row. Each sweep can return 500
+        # artifacts, and the pool holds 10 connections — 500 sequential round-trips
+        # per source starved concurrent requests and made a repeated sync a
+        # cheap way to tie up the app. UNNEST turns each batch into one statement.
+        written = 0
+        for start in range(0, len(records), _ARTIFACT_BATCH):
+            batch = records[start:start + _ARTIFACT_BATCH]
             await db.execute("""
                 INSERT INTO artifacts
                   (artifact_type, workspace_id, artifact_id, name, owner,
                    uc_catalog, uc_schema, last_run, run_count_30d, status)
-                VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)
+                SELECT $1, w, a, n, o, c, s, lr, rc, st
+                FROM unnest($2::text[], $3::text[], $4::text[], $5::text[],
+                            $6::text[], $7::text[], $8::timestamptz[],
+                            $9::int[], $10::text[])
+                     AS t(w, a, n, o, c, s, lr, rc, st)
                 ON CONFLICT (artifact_type, workspace_id, artifact_id) DO UPDATE SET
                   name=EXCLUDED.name, owner=EXCLUDED.owner,
                   last_run=EXCLUDED.last_run, run_count_30d=EXCLUDED.run_count_30d,
                   status=EXCLUDED.status, is_present=true, last_seen_at=now()
-            """, kind, record.get("workspace_id"), record.get("artifact_id"),
-                record["name"], record.get("owner"), record.get("uc_catalog"),
-                record.get("uc_schema"), record.get("last_run"),
-                record.get("run_count_30d"), record.get("status"))
-            count += 1
-        found[kind] = count
+            """, kind,
+                [r.get("workspace_id") for r in batch],
+                [r.get("artifact_id") for r in batch],
+                [r["name"] for r in batch],
+                [r.get("owner") for r in batch],
+                [r.get("uc_catalog") for r in batch],
+                [r.get("uc_schema") for r in batch],
+                [r.get("last_run") for r in batch],
+                [r.get("run_count_30d") for r in batch],
+                [r.get("status") for r in batch])
+            written += len(batch)
+        found[kind] = written
 
     if available.get("lakeflow_jobs"):
         # Data-relative window: "recent" means relative to the newest data the
@@ -375,20 +401,29 @@ async def sync_artifacts(request: Request):
         LIMIT 500
     """, timeout_s=60)
     if result["ok"]:
-        count = 0
-        for row in result["rows"]:
+        # Same batching as `ingest` above, for the same reason.
+        models = [r for r in result["rows"] if r and r[2]]
+        written = 0
+        for start in range(0, len(models), _ARTIFACT_BATCH):
+            batch = models[start:start + _ARTIFACT_BATCH]
             await db.execute("""
                 INSERT INTO artifacts
                   (artifact_type, workspace_id, artifact_id, name, owner,
                    uc_catalog, uc_schema, last_modified)
-                VALUES ('model',NULL,$1,$2,$3,$4,$5,$6)
+                SELECT 'model', NULL, a, n, o, c, s, lm
+                FROM unnest($1::text[], $2::text[], $3::text[], $4::text[],
+                            $5::text[], $6::timestamptz[]) AS t(a, n, o, c, s, lm)
                 ON CONFLICT (artifact_type, workspace_id, artifact_id) DO UPDATE SET
                   name=EXCLUDED.name, owner=EXCLUDED.owner,
                   last_modified=EXCLUDED.last_modified, is_present=true,
                   last_seen_at=now()
-            """, f"{row[0]}.{row[1]}.{row[2]}", row[2], row[3], row[0], row[1], row[4])
-            count += 1
-        found["model"] = count
+            """,
+                [f"{r[0]}.{r[1]}.{r[2]}" for r in batch],
+                [r[2] for r in batch], [r[3] for r in batch],
+                [r[0] for r in batch], [r[1] for r in batch],
+                [r[4] for r in batch])
+            written += len(batch)
+        found["model"] = written
     else:
         notes.append("system.information_schema.models not readable — models skipped.")
 

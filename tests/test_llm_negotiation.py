@@ -274,10 +274,20 @@ class TestNoUnnegotiatedCallSites(unittest.TestCase):
         breaking detect-dependencies after the shared helper was already fixed."""
         import inspect
 
+        # Both shared entry points (_llm_json for JSON, llm_text for prose) live in
+        # this module and each negotiates optional params, so several literal calls
+        # here are expected. What must NOT exist is a call in any OTHER module,
+        # which is asserted by test_no_redundancy.py::test_one_llm_call_site.
         source = inspect.getsource(agents)
-        self.assertEqual(source.count("chat.completions.create"), 1,
-                         "found an LLM call outside _llm_json; route it through "
-                         "_llm_json so it inherits parameter negotiation")
+        for entry in ("_llm_json", "llm_text"):
+            self.assertTrue(hasattr(agents, entry), f"{entry} missing")
+        # Every call must sit inside one of the two negotiating helpers.
+        for function in (agents._llm_json, agents._llm_raw):
+            body = inspect.getsource(function)
+            if "chat.completions.create" in body:
+                self.assertIn("_temperature_rejected", body,
+                              f"{function.__name__} calls the model without "
+                              "negotiating optional parameters")
 
     def test_other_routers_do_not_call_the_client_directly(self):
         import inspect

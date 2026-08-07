@@ -269,6 +269,54 @@ def _schema_rejected(exc: Exception | None) -> bool:
                ("response_format", "responseformat", "json_schema"))
 
 
+async def llm_text(prompt: str, max_tokens: int = 1600) -> tuple[str | None, bool, str | None]:
+    """Ask for PROSE. Returns (text|None, used_llm, note).
+
+    A sibling to _llm_json for callers that want markdown rather than a JSON
+    object. Exists so no caller has to hand-roll `chat.completions.create`: doing so
+    is how the claude-sonnet-5 issues (temperature rejected, content returned as
+    typed blocks, reasoning exhausting a small token budget) kept resurfacing in
+    endpoints that had been written before the shared path was fixed.
+    """
+    try:
+        parsed_or_text = await _llm_raw(prompt, max_tokens)
+        return parsed_or_text, True, None
+    except Exception as exc:  # noqa: BLE001
+        note = f"AI temporarily unavailable — showing a generated summary. ({type(exc).__name__})"
+        print(f"[agents] LLM text call fell back: {exc}")
+        return None, False, note
+
+
+async def _llm_raw(prompt: str, max_tokens: int) -> str:
+    """Shared call path: negotiates optional params, flattens content blocks."""
+    from ..llm import get_llm_client
+
+    budget = max(max_tokens, MIN_OUTPUT_TOKENS)
+    last: Exception | None = None
+    for with_temperature in (True, False):
+        if with_temperature and _temperature_rejected(last):
+            continue
+        try:
+            client = get_llm_client()
+            kwargs = {
+                "model": SERVING_ENDPOINT,
+                "messages": [{"role": "user", "content": prompt}],
+                "max_tokens": budget,
+            }
+            if with_temperature:
+                kwargs["temperature"] = 0.4
+            resp = await client.chat.completions.create(**kwargs)
+            text = flatten_content(resp.choices[0].message.content)
+            if not text.strip():
+                raise ValueError("empty response")
+            return text
+        except Exception as exc:  # noqa: BLE001
+            last = exc
+            if not _temperature_rejected(exc):
+                break
+    raise last or RuntimeError("no response")
+
+
 async def _portfolio_context():
     from ..readiness import readiness_map
     from ..value_engine import compute_value_range, load_assumptions

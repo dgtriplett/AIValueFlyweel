@@ -13,13 +13,13 @@ from pydantic import BaseModel
 
 from ..common import current_user, write_audit
 from ..db import db
-from ..value_engine import compute_value_range, load_assumptions
+from ..value_engine import compute_value_range, load_assumptions, EFFORT_COST, asset_cost, use_case_value
+# Import the readiness rule rather than restating it: a local copy would let
+# this module silently disagree with how readiness is actually computed.
+from ..readiness import READY_STATUSES as READY
 
 router = APIRouter(prefix="/joint-funding", tags=["joint_funding"])
 
-READY = ("curated", "governed")
-_EFFORT_COST = {"S": (50_000, 150_000), "M": (150_000, 400_000),
-                "L": (400_000, 1_000_000), "XL": (1_000_000, 2_500_000)}
 
 
 async def _context():
@@ -50,16 +50,6 @@ async def _context():
     return assumptions, assets, ucs, lobs, by_asset, req_by_uc, prereqs_built_by_uc
 
 
-def _uc_value(uc, assumptions):
-    rng = compute_value_range(uc.get("hypothesized_value_json"), assumptions)
-    return rng["mid"] if rng else 0.0
-
-
-def _asset_cost(a):
-    if a.get("ingest_cost_low") and a.get("ingest_cost_high"):
-        return float(a["ingest_cost_low"]), float(a["ingest_cost_high"])
-    lo, hi = _EFFORT_COST.get(a.get("ingest_effort") or "M", _EFFORT_COST["M"])
-    return float(lo), float(hi)
 
 
 def _asset_status_map(assets):
@@ -80,7 +70,7 @@ def _build_case(asset, assumptions, ucs, lobs, by_asset, req_by_uc, status_map,
         uc = ucs.get(uc_id)
         if not uc:
             continue
-        full_v = _uc_value(uc, assumptions)
+        full_v = use_case_value(uc, assumptions)
         # Attribute UC value PROPORTIONALLY across the (required) assets it needs, so
         # a UC needing 3 assets contributes ~1/3 of its value to each asset's case —
         # no double-counting when the same UC appears under several shared assets.
@@ -105,7 +95,7 @@ def _build_case(asset, assumptions, ucs, lobs, by_asset, req_by_uc, status_map,
         # Not divided: you must deliver the WHOLE use case to capture its value,
         # so the program to realize this asset's enablement carries every UC's
         # full build cost (this is what makes payback/ROI credible to a CFO).
-        d_lo, d_hi = _EFFORT_COST.get(uc.get("effort_tshirt") or "M", _EFFORT_COST["M"])
+        d_lo, d_hi = EFFORT_COST.get(uc.get("effort_tshirt") or "M", EFFORT_COST["M"])
         delivery_cost_mid += (d_lo + d_hi) / 2
         unlocked.append({"id": uc_id, "title": uc["title"], "lob_id": lob,
                          "lob": lobs.get(lob, "Unassigned"),
@@ -118,7 +108,7 @@ def _build_case(asset, assumptions, ucs, lobs, by_asset, req_by_uc, status_map,
     # "annual value unlocked/enabled" = attributed (non-double-counted) sum at FULL run-rate
     combined = round(sum(u["value_mm"] for u in unlocked), 2)
     benefiting = sorted(per_lob_value.keys())
-    ing_lo, ing_hi = _asset_cost(asset)
+    ing_lo, ing_hi = asset_cost(asset)
     ing_mid = (ing_lo + ing_hi) / 2
     # One-time BUILD cost = data ingestion + FULL delivery cost of every unlocked UC.
     build_cost = round(ing_mid + delivery_cost_mid, 0)
@@ -244,17 +234,14 @@ async def brief(body: BriefIn):
     )
     used_llm = False
     brief_md = None
-    try:
-        from ..llm import get_llm_client
-        from ..config import SERVING_ENDPOINT
-        client = get_llm_client()
-        resp = await client.chat.completions.create(
-            model=SERVING_ENDPOINT, messages=[{"role": "user", "content": prompt}],
-            max_tokens=1400, temperature=0.4)
-        brief_md = resp.choices[0].message.content
-        used_llm = True
-    except Exception as exc:  # noqa: BLE001
-        print(f"[joint_funding] brief LLM fell back: {exc}")
+    # Routed through the shared helper so it inherits optional-parameter
+    # negotiation, content-block flattening, and the reasoning-model token floor.
+    # This call site predated those fixes and silently fell back on sonnet-5.
+    from ..config import SERVING_ENDPOINT
+    from .agents import llm_text
+
+    brief_md, used_llm, _note = await llm_text(prompt, max_tokens=1400)
+    if not brief_md:
         brief_md = (f"# Joint-Funding Business Case — {asset.get('source_category')} · {asset['module']}\n\n"
                     f"{case['pitch'] if 'pitch' in case else facts}\n\n## The numbers\n{facts}\n")
     return {"model": SERVING_ENDPOINT if used_llm else "heuristic", "used_llm": used_llm,

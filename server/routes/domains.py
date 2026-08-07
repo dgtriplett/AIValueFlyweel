@@ -20,6 +20,9 @@ from pydantic import BaseModel, Field
 
 from ..common import current_user, row_to_dict, rows_to_list, write_audit
 from ..db import db
+# Import the readiness rule rather than restating it: a local copy would let
+# this module silently disagree with how readiness is actually computed.
+from ..readiness import READY_STATUSES as READY
 
 router = APIRouter(prefix="/domains", tags=["domains"])
 
@@ -27,7 +30,6 @@ _CATEGORIES = {"operational", "asset", "customer", "grid", "market",
                "financial", "regulatory", "safety", "external", "workforce"}
 _NECESSITY = {"required", "helpful"}
 _CONFIDENCE = {"high", "medium", "low"}
-READY = ("curated", "governed")
 
 
 class DomainIn(BaseModel):

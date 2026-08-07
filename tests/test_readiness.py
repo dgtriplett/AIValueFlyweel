@@ -185,5 +185,44 @@ class TestDualPath(unittest.TestCase):
             self.assertIn(key, out)
 
 
+class TestSingleSourceOfTruth(unittest.TestCase):
+    """The readiness rule must be defined exactly once.
+
+    Five modules previously restated ("curated", "governed") as a local constant.
+    Nothing broke — until the rule changed, at which point four of them would have
+    silently disagreed with how readiness is actually computed, and the app would
+    report two different answers to "is this satisfied?" depending on which endpoint
+    you asked. This is the most load-bearing rule in the app, so it gets a test.
+    """
+
+    def test_readiness_defines_it(self):
+        self.assertEqual(readiness.READY_STATUSES, ("curated", "governed"))
+
+    def test_no_module_redefines_it_locally(self):
+        import pathlib
+        import re
+
+        root = pathlib.Path(__file__).parent.parent / "server"
+        offenders = []
+        pattern = re.compile(r'^\s*(READY|READY_STATUSES)\s*=\s*\(\s*["\']curated')
+        for path in root.rglob("*.py"):
+            if path.name == "readiness.py":
+                continue  # the one legitimate definition
+            for number, line in enumerate(path.read_text().splitlines(), 1):
+                if pattern.match(line):
+                    offenders.append(f"{path.relative_to(root)}:{number}")
+        self.assertEqual(
+            offenders, [],
+            "these modules restate the readiness rule instead of importing "
+            f"READY_STATUSES from readiness.py: {offenders}")
+
+    def test_consumers_import_it(self):
+        """The modules that need the rule should be getting it from one place."""
+        from server.routes import domains, flow, joint_funding, source_recommendations
+        for module in (domains, flow, joint_funding, source_recommendations):
+            self.assertIs(module.READY, readiness.READY_STATUSES,
+                          f"{module.__name__} is not using the shared constant")
+
+
 if __name__ == "__main__":
     unittest.main()

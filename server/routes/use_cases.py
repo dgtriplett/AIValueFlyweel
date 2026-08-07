@@ -235,6 +235,7 @@ async def get_unlocks(uc_id: int):
     my_assets = {r["data_asset_id"] for r in await db.fetch(
         "SELECT data_asset_id FROM uc_requires_asset WHERE use_case_id=$1", uc_id)}
     becomes = []
+    awaiting_prereqs: list[int] = []
     if my_assets:
         # for every OTHER uc, recompute required-readiness assuming my_assets are landed(>=curated)
         req_rows = await db.fetch(
@@ -244,14 +245,39 @@ async def get_unlocks(uc_id: int):
         by_uc: dict[int, list] = {}
         for r in req_rows:
             by_uc.setdefault(r["use_case_id"], []).append((r["data_asset_id"], r["ingestion_status"]))
-        READY = ("curated", "governed")
+        # Imported, not restated: a local copy of the readiness rule would let this
+        # "what does delivering X unlock?" calculation disagree with readiness itself.
+        from ..readiness import BUILT_STATUSES, READY_STATUSES as READY
+
+        # A use case only becomes TRULY shovel-ready when its data completes AND its
+        # upstream prerequisites are built — that is the definition readiness.py and
+        # /api/impact both use. This endpoint previously checked data only, so it
+        # reported use cases as "unlocked" that were actually still waiting on
+        # upstream work, and disagreed with /api/impact about the same question.
+        prereq_rows = await db.fetch(
+            """SELECT e.to_use_case_id AS uc_id,
+                      bool_and(up.status = ANY($1::text[])) AS all_built
+               FROM uc_enables_uc e
+               JOIN use_cases up ON up.id = e.from_use_case_id
+               GROUP BY e.to_use_case_id""",
+            list(BUILT_STATUSES))
+        # Absent from the map means no prerequisites, which is trivially satisfied.
+        prereqs_built = {r["uc_id"]: bool(r["all_built"]) for r in prereq_rows}
+
         for other_id, reqs in by_uc.items():
             if other_id == uc_id:
                 continue
             now_ready = all(st in READY for (_a, st) in reqs)
             hypo_ready = all((aid in my_assets) or (st in READY) for (aid, st) in reqs)
-            if hypo_ready and not now_ready:
+            if not (hypo_ready and not now_ready):
+                continue
+            if prereqs_built.get(other_id, True):
                 becomes.append(other_id)
+            else:
+                # Data would complete, but upstream builds are outstanding. Surfaced
+                # separately rather than dropped: it is a real fast-follow, just not
+                # an immediate unlock.
+                awaiting_prereqs.append(other_id)
 
     enabled_ids = {u["id"] for u in enabled}
     unlocked_ids = enabled_ids | set(becomes)
@@ -278,9 +304,14 @@ async def get_unlocks(uc_id: int):
         "use_case_id": uc_id,
         "newly_enabled": sorted(enabled_ids),
         "becomes_ready": sorted(becomes),
+        # Data would complete but upstream builds are still outstanding. Reported
+        # separately so the headline "unlocks" count means what it says, while the
+        # fast-follows remain visible.
+        "awaiting_prerequisites": sorted(awaiting_prereqs),
         "unlocked": unlocked,
         "summary": {
             "count": len(unlocked_ids),
+            "awaiting_prerequisites_count": len(awaiting_prereqs),
             "lob_count": len(lobs_),
             "hypothesized_value": round(total_value, 2),
         },

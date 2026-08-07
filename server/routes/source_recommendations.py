@@ -13,25 +13,15 @@ effort/cost estimate, and a short AI rationale ("Land these next").
 from fastapi import APIRouter
 
 from ..db import db
-from ..value_engine import compute_value_range, load_assumptions
+from ..value_engine import compute_value_range, load_assumptions, EFFORT_COST, asset_cost, use_case_value
+# Import the readiness rule rather than restating it: a local copy would let
+# this module silently disagree with how readiness is actually computed.
+from ..readiness import READY_STATUSES as READY
 
 router = APIRouter(prefix="/data-sources", tags=["source_recommendations"])
 
-READY = ("curated", "governed")
-_EFFORT_COST = {"S": (50_000, 150_000), "M": (150_000, 400_000),
-                "L": (400_000, 1_000_000), "XL": (1_000_000, 2_500_000)}
 
 
-def _uc_value(uc, assumptions):
-    rng = compute_value_range(uc.get("hypothesized_value_json"), assumptions)
-    return rng["mid"] if rng else 0.0
-
-
-def _asset_cost(a):
-    if a.get("ingest_cost_low") and a.get("ingest_cost_high"):
-        return float(a["ingest_cost_low"]), float(a["ingest_cost_high"])
-    lo, hi = _EFFORT_COST.get(a.get("ingest_effort") or "M", _EFFORT_COST["M"])
-    return float(lo), float(hi)
 
 
 async def _context():
@@ -85,7 +75,7 @@ def _score_source(asset, assumptions, ucs, lobs, by_asset, req_by_uc, status_map
             continue  # data already complete; landing this source doesn't change data status
         hypo_ready = all((a == asset["id"]) or (status_map.get(a) in READY) for a in reqs)
         prereqs_ok = prereqs_built_by_uc.get(uc_id, True)
-        v = _uc_value(uc, assumptions)
+        v = use_case_value(uc, assumptions)
         entry = {"id": uc_id, "title": uc["title"], "lob_id": uc.get("lob_id"),
                  "lob": lobs.get(uc.get("lob_id"), "Unassigned"), "value_mm": round(v, 2)}
         if hypo_ready and prereqs_ok:
@@ -108,7 +98,7 @@ def _score_source(asset, assumptions, ucs, lobs, by_asset, req_by_uc, status_map
     unlocks.sort(key=lambda x: -x["value_mm"])
     awaiting.sort(key=lambda x: -x["value_mm"])
     partial.sort(key=lambda x: (x["still_needs"], -x["value_mm"]))
-    ing_lo, ing_hi = _asset_cost(asset)
+    ing_lo, ing_hi = asset_cost(asset)
     ing_mid = (ing_lo + ing_hi) / 2
     # Immediate-value score prioritizes TRUE shovel-ready flips (data + prereqs);
     # awaiting-prereqs and still-partial UCs add smaller "sets up" credit so the

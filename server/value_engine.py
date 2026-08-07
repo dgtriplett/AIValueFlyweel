@@ -100,3 +100,40 @@ async def computed_range_map() -> dict[int, dict | None]:
     assumptions = await load_assumptions()
     rows = await db.fetch("SELECT id, hypothesized_value_json FROM use_cases")
     return {r["id"]: compute_value_range(r["hypothesized_value_json"], assumptions) for r in rows}
+
+
+# ---------------------------------------------------------------------------
+# Shared cost/value helpers
+# ---------------------------------------------------------------------------
+# Lived as byte-identical copies in routes/joint_funding.py and
+# routes/source_recommendations.py, including the cost table. Both rank
+# investments by value-per-cost, so a change to one copy would have silently
+# made the two recommenders disagree about the same asset.
+
+# Directional installed cost to land one source, by t-shirt effort. Used only when
+# a data asset has no explicit ingest_cost_low/high; these order options for a
+# human rather than pretending to be a quote.
+EFFORT_COST: dict[str, tuple[int, int]] = {
+    "S": (50_000, 150_000),
+    "M": (150_000, 400_000),
+    "L": (400_000, 1_000_000),
+    "XL": (1_000_000, 2_500_000),
+}
+
+
+def use_case_value(use_case: dict, assumptions: dict) -> float:
+    """Mid-point annual $M for a use case, or 0.0 when it has no value model."""
+    rng = compute_value_range(use_case.get("hypothesized_value_json"), assumptions)
+    return rng["mid"] if rng else 0.0
+
+
+def asset_cost(asset: dict) -> tuple[float, float]:
+    """(low, high) $ to land a data asset.
+
+    Prefers explicit per-asset costs when a customer has entered them; otherwise
+    falls back to the effort-based band.
+    """
+    if asset.get("ingest_cost_low") and asset.get("ingest_cost_high"):
+        return float(asset["ingest_cost_low"]), float(asset["ingest_cost_high"])
+    low, high = EFFORT_COST.get(asset.get("ingest_effort") or "M", EFFORT_COST["M"])
+    return float(low), float(high)
