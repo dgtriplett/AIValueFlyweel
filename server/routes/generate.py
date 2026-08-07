@@ -27,7 +27,7 @@ import secrets
 import time
 from datetime import datetime, timedelta, timezone
 
-from fastapi import APIRouter, HTTPException, Path, Request
+from fastapi import APIRouter, Depends, HTTPException, Path, Request
 from pydantic import BaseModel, Field
 
 from .. import confirm as cf
@@ -35,6 +35,7 @@ from .. import generation as gen
 from ..common import current_user, rows_to_list, write_audit
 from ..config import SERVING_ENDPOINT
 from ..db import db
+from ..limits import limiter
 
 router = APIRouter(prefix="/generate", tags=["generation"])
 confirm_router = APIRouter(prefix="/confirm", tags=["generation"])
@@ -105,7 +106,7 @@ async def _resolve_lob(lob_id: int | None) -> tuple[int | None, str]:
 # ---------------------------------------------------------------------------
 # Preview
 # ---------------------------------------------------------------------------
-@router.post("/use-cases")
+@router.post("/use-cases", dependencies=[Depends(limiter("generate"))])
 async def generate_use_cases(body: GenerateIn, request: Request):
     """Generate candidate use cases. Writes nothing but the preview row."""
     if body.lens not in gen.LENSES:
@@ -228,7 +229,7 @@ async def get_preview(preview_id: str):
 # ---------------------------------------------------------------------------
 # Commit -> propose (issues a confirm token; still writes no use cases)
 # ---------------------------------------------------------------------------
-@router.post("/use-cases/commit")
+@router.post("/use-cases/commit", dependencies=[Depends(limiter("write"))])
 async def commit_use_cases(body: CommitIn, request: Request):
     """Propose inserting the selected candidates. Returns a confirm card.
 

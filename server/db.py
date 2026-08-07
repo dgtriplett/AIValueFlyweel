@@ -15,6 +15,24 @@ from .config import get_oauth_token
 
 logger = logging.getLogger(__name__)
 
+
+def _charge_budget() -> None:
+    """Count this query against the current request's budget, if it set one.
+
+    Charged HERE rather than in each caller because fetch/execute are the only two
+    ways a query reaches the pool, so counting at this choke point measures real
+    queries instead of estimating them. Requests that set no budget (almost all of
+    them) pay one dict lookup.
+
+    Imported lazily to keep limits.py free of a db dependency, which would
+    otherwise be a cycle.
+    """
+    from .limits import current_budget
+
+    budget = current_budget.get()
+    if budget is not None:
+        budget.charge()
+
 # asyncpg error classes that indicate the OAuth token is stale/invalid.
 _AUTH_ERRORS = (
     asyncpg.InvalidAuthorizationSpecificationError,
@@ -84,6 +102,7 @@ class DatabasePool:
 
     # -- query helpers ------------------------------------------------------
     async def fetch(self, sql: str, *args):
+        _charge_budget()
         pool = await self.get_pool()
         if pool is None:
             return []
@@ -103,6 +122,7 @@ class DatabasePool:
         return rows[0] if rows else None
 
     async def execute(self, sql: str, *args):
+        _charge_budget()
         pool = await self.get_pool()
         if pool is None:
             return None

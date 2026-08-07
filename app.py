@@ -11,7 +11,7 @@ from fastapi import FastAPI
 from fastapi.responses import FileResponse, JSONResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
 
-from server import logging_setup
+from server import limits, logging_setup
 from server.config import IS_DATABRICKS_APP, SERVING_ENDPOINT, GENIE_SPACE_ID
 from server.db import db, token_refresh_loop
 from server.routes import (
@@ -139,6 +139,8 @@ async def health():
         "serving_endpoint": SERVING_ENDPOINT,
         "genie_space_configured": bool(GENIE_SPACE_ID),
         "counts": counts,
+        # So a "why did I get a 429?" report can be answered without a redeploy.
+        "rate_limits": limits.snapshot(),
     }
 
 

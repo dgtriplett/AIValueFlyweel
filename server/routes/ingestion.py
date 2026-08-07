@@ -34,7 +34,7 @@ import json
 import zipfile
 from pathlib import Path
 
-from fastapi import APIRouter, File, HTTPException, Query, Request, UploadFile
+from fastapi import APIRouter, Depends, File, HTTPException, Query, Request, UploadFile
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 
@@ -43,6 +43,7 @@ from .. import normalization as norm
 from ..common import current_user, rows_to_list, write_audit
 from ..config import ATLAS_CATALOG, ATLAS_SCHEMA, SERVING_ENDPOINT, atlas_fqn, discovery_configured
 from ..db import db
+from ..limits import limiter
 from ..lineage import run_sql
 
 router = APIRouter(prefix="/ingestion", tags=["ingestion"])
@@ -249,7 +250,7 @@ async def list_runs(limit: int = Query(20, ge=1, le=200)):
 # ---------------------------------------------------------------------------
 # Stage 0 — bootstrap the discovery schema
 # ---------------------------------------------------------------------------
-@router.post("/bootstrap")
+@router.post("/bootstrap", dependencies=[Depends(limiter("sweep"))])
 async def bootstrap(request: Request):
     """CREATE the discovery schema + tables in Unity Catalog. Idempotent."""
     _require_discovery()
@@ -540,7 +541,7 @@ async def _canonical_vocabulary() -> list[str]:
     return [r["source_category"] for r in rows]
 
 
-@router.post("/enrich/schemas")
+@router.post("/enrich/schemas", dependencies=[Depends(limiter("sweep"))])
 async def enrich_schemas(body: EnrichIn, request: Request):
     """AI-enrich discovered schemas (single statement; few hundred rows)."""
     _require_discovery()
@@ -562,7 +563,7 @@ async def enrich_schemas(body: EnrichIn, request: Request):
         raise
 
 
-@router.post("/enrich/tables")
+@router.post("/enrich/tables", dependencies=[Depends(limiter("sweep"))])
 async def enrich_tables(body: EnrichIn, request: Request):
     """AI-enrich discovered tables using the staged ai_query pattern.
 
@@ -621,7 +622,7 @@ class CanonicalizeIn(BaseModel):
     max_llm_labels: int = 400
 
 
-@router.post("/canonicalize")
+@router.post("/canonicalize", dependencies=[Depends(limiter("generate"))])
 async def canonicalize(body: CanonicalizeIn, request: Request):
     """Resolve raw source-system labels to the canonical vocabulary.
 
@@ -757,7 +758,7 @@ class AttributeIn(BaseModel):
 _STATUS_ORDER = ("not_started", "landed", "curated", "governed")
 
 
-@router.post("/attribute")
+@router.post("/attribute", dependencies=[Depends(limiter("generate"))])
 async def attribute(body: AttributeIn, request: Request):
     """Attribute discovered tables to catalog data assets by canonical match.
 

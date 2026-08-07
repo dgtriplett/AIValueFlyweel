@@ -23,9 +23,10 @@ useful.
 from __future__ import annotations
 
 import json
+import logging
 import secrets
 
-from fastapi import APIRouter, HTTPException, Request
+from fastapi import APIRouter, Depends, HTTPException, Request
 from pydantic import BaseModel, Field
 
 from .. import chat_tools as ct
@@ -33,6 +34,9 @@ from .. import confirm as cf
 from ..common import current_user, rows_to_list
 from ..config import SERVING_ENDPOINT
 from ..db import db
+from ..limits import CHAT_QUERY_BUDGET, BudgetExceeded, limiter, query_budget
+
+logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/chat", tags=["chat"])
 
@@ -93,9 +97,30 @@ async def _save(conversation_id: str, role: str, *, content: str | None = None,
         conversation_id)
 
 
-@router.post("")
+@router.post("", dependencies=[Depends(limiter("chat"))])
 async def chat(body: ChatIn, request: Request):
-    """One conversational turn."""
+    """One conversational turn.
+
+    A thin wrapper so the query budget has a single place to be established and a
+    single place to be translated into an HTTP response. The model chooses how many
+    tools to call, so the database load of a turn has no natural ceiling —
+    MAX_TOOL_ROUNDS bounds the model calls, not the queries underneath them.
+    """
+    with query_budget(CHAT_QUERY_BUDGET, "This conversation turn") as budget:
+        try:
+            result = await _chat_turn(body, request)
+        except BudgetExceeded as exc:
+            # 429, not 500: the request was too expensive, not malformed. The
+            # turn's user message is already saved, so the conversation stays
+            # coherent when they retry with something narrower.
+            logger.warning("chat turn exceeded its query budget after %d queries",
+                           budget.used)
+            raise HTTPException(429, str(exc)) from exc
+        result["queries"] = budget.used
+        return result
+
+
+async def _chat_turn(body: ChatIn, request: Request):
     actor = current_user(request)
 
     conversation_id = body.conversation_id

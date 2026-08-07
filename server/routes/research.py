@@ -25,7 +25,7 @@ from __future__ import annotations
 
 import json
 
-from fastapi import APIRouter, HTTPException, Request
+from fastapi import APIRouter, Depends, HTTPException, Request
 from pydantic import BaseModel, Field
 
 from .. import confirm as cf
@@ -33,6 +33,7 @@ from .. import research as rs
 from ..common import current_user, rows_to_list, write_audit
 from ..config import SERVING_ENDPOINT
 from ..db import db
+from ..limits import limiter
 
 router = APIRouter(prefix="/research", tags=["research"])
 
@@ -75,7 +76,7 @@ async def _finish_run(run_id: int | None, status: str, stats: dict,
 # ---------------------------------------------------------------------------
 # Research
 # ---------------------------------------------------------------------------
-@router.post("/company")
+@router.post("/company", dependencies=[Depends(limiter("research"))])
 async def research_company(body: ResearchIn, request: Request):
     """Research a company. Writes only the profile + proposals, never assumptions."""
     actor = current_user(request)
@@ -277,7 +278,7 @@ async def get_assumption_research(run_id: int | None = None):
 # ---------------------------------------------------------------------------
 # Apply — confirm-gated
 # ---------------------------------------------------------------------------
-@router.post("/apply")
+@router.post("/apply", dependencies=[Depends(limiter("write"))])
 async def propose_apply(body: ApplyIn, request: Request):
     """Stage the research for confirmation. Writes nothing itself.
 

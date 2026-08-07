@@ -21,12 +21,13 @@ Neither is visible from the portfolio side.
 from __future__ import annotations
 
 
-from fastapi import APIRouter, HTTPException, Query, Request
+from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from pydantic import BaseModel, Field
 
 from .. import rules as rl
 from ..common import current_user, rows_to_list, write_audit
 from ..db import db
+from ..limits import limiter
 from ..lineage import run_sql, system_tables_available
 
 router = APIRouter(tags=["inventory"])
@@ -289,7 +290,7 @@ async def unattributed(limit: int = Query(50, ge=1, le=500)):
     }
 
 
-@router.post("/artifacts/sync")
+@router.post("/artifacts/sync", dependencies=[Depends(limiter("sweep"))])
 async def sync_artifacts(request: Request):
     """Discover artifacts from system tables. Read-only against Databricks.
 

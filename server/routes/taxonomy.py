@@ -12,13 +12,14 @@ are effective-dated rather than updated in place.
 """
 from __future__ import annotations
 
-from fastapi import APIRouter, HTTPException, Request
+from fastapi import APIRouter, Depends, HTTPException, Request
 from pydantic import BaseModel
 
 from .. import taxonomy as tx
 from ..common import current_user, rows_to_list, write_audit
 from ..config import SERVING_ENDPOINT
 from ..db import db
+from ..limits import limiter
 
 router = APIRouter(prefix="/taxonomy", tags=["taxonomy"])
 
@@ -188,7 +189,7 @@ async def set_asset_taxonomy(asset_id: int, body: AssetTaxonomyIn, request: Requ
     return await get_asset_taxonomy(asset_id)
 
 
-@router.post("/classify")
+@router.post("/classify", dependencies=[Depends(limiter("generate"))])
 async def classify(body: ClassifyIn, request: Request):
     """AI-classify assets across all three dimensions.
 

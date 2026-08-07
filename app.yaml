@@ -60,6 +60,18 @@ env:
   - name: DEMO_MODE
     value: "off"
 
+  # Log level. INFO is right for normal operation; DEBUG turns up detail on a
+  # deployed app without a code change or redeploy.
+  - name: LOG_LEVEL
+    value: "INFO"
+
+  # Per-actor rate limits on the expensive endpoints (LLM calls and warehouse
+  # sweeps). Guard rails against accidental load — a room full of workshop
+  # attendees clicking at once, or a UI retry loop — not a quota system.
+  # Set to "off" for a demo where a presenter is deliberately clicking fast.
+  - name: RATE_LIMITS
+    value: "on"
+
 resources:
   - name: "sql-warehouse"
     description: "Warehouse for system-table reads, UC discovery, and ai_query() enrichment."
