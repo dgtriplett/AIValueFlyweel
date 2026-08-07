@@ -202,5 +202,63 @@ class TestDegradedStartup(unittest.TestCase):
         self.assertIn("ATLAS_CATALOG", str(caught.exception.detail))
 
 
+class TestNewFeatureRoutes(unittest.TestCase):
+    """The features merged from the BHE catalog."""
+
+    def test_all_registered(self):
+        paths = _paths()
+        for path in (
+            # company research + assumption calibration
+            "/api/research/company", "/api/research/assumptions",
+            "/api/research/apply", "/api/research/runs",
+            # value flow + glossary
+            "/api/flow/sankey", "/api/flow/glossary",
+            # classification rules
+            "/api/rules", "/api/rules/test", "/api/rules/seed",
+            # artifact inventory
+            "/api/artifacts", "/api/artifacts/sync",
+            "/api/artifacts/unattributed",
+            # chat
+            "/api/chat", "/api/chat/conversations", "/api/chat/tools/list",
+        ):
+            self.assertIn(path, paths, f"{path} not registered")
+
+    def test_literal_paths_precede_their_parameterized_siblings(self):
+        """A literal segment declared after a parameterized one is captured as an
+        id and 404s/422s. This has bitten /domains/gaps, /generate/use-cases/commit,
+        and /chat/tools/list — so assert the whole class of hazard at once."""
+        order = [r.path for r in app.routes if hasattr(r, "path")]
+        pairs = [
+            ("/api/chat/tools/list", "/api/chat/{conversation_id}"),
+            ("/api/domains/gaps", "/api/domains/{domain_id}"),
+            ("/api/domains/coverage-matrix", "/api/domains/{domain_id}"),
+            ("/api/artifacts/unattributed", "/api/artifacts/{artifact_id}"),
+            ("/api/artifacts/sync", "/api/artifacts/{artifact_id}"),
+            ("/api/rules/test", "/api/rules/{rule_id}"),
+            ("/api/rules/seed", "/api/rules/{rule_id}"),
+        ]
+        for literal, parameterized in pairs:
+            if literal in order and parameterized in order:
+                self.assertLess(order.index(literal), order.index(parameterized),
+                                f"{literal} is shadowed by {parameterized}")
+
+    def test_research_apply_goes_through_the_confirm_gate(self):
+        from server import confirm as cf
+        from server.routes import generate
+        self.assertIn(cf.INTENT_APPLY_RESEARCH, generate._EXECUTORS)
+
+    def test_chat_write_tools_only_propose(self):
+        """A chat-driven write must land in the same gate as any other agent
+        write — the chat is the least predictable caller in the app."""
+        from server import chat_tools as ct
+        writers = [t for t in ct.TOOLS.values() if t.writes]
+        self.assertTrue(writers, "no write tools registered")
+        for tool in writers:
+            self.assertIn("propose", tool.name,
+                          f"{tool.name} writes but is not named as a proposal")
+            self.assertIn("confirm", tool.description.lower(),
+                          f"{tool.name} does not tell the model it needs confirmation")
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -224,6 +224,37 @@
       .sw-unused    { background: var(--navy-700); color: var(--navy-500); }
       .legend { display: flex; gap: 16px; flex-wrap: wrap; font-size: 12px;
                 margin-bottom: 14px; }
+
+      /* Sankey. Rendered as inline SVG rather than a charting library: the console
+         ships without a build step, and a 4-column flow is a simple enough layout
+         that a dependency would cost more than it saves. */
+      svg.sankey { width: 100%; height: auto; display: block; }
+      svg.sankey .link { fill: none; opacity: 0.30; }
+      svg.sankey .link:hover { opacity: 0.65; }
+      svg.sankey text { font-size: 10px; fill: var(--navy-300); }
+      svg.sankey .col-label { font-size: 10px; fill: var(--navy-500);
+                              text-transform: uppercase; letter-spacing: 0.08em; }
+
+      /* Chat */
+      .chat-log { display: flex; flex-direction: column; gap: 12px;
+                  margin-bottom: 16px; }
+      .msg { max-width: 78%; padding: 10px 14px; border-radius: 10px; font-size: 14px; }
+      .msg.user { align-self: flex-end; background: var(--navy-600); color: var(--oat); }
+      .msg.assistant { align-self: flex-start; background: var(--navy-800);
+                       border: 1px solid var(--navy-600); }
+      .msg.tool { align-self: flex-start; background: transparent;
+                  border-left: 2px solid var(--navy-600); border-radius: 0;
+                  color: var(--navy-400); font-size: 12px; padding: 2px 10px;
+                  font-family: "DM Mono", monospace; max-width: 100%; }
+      .chat-input { display: flex; gap: 10px; }
+      .chat-input input { flex: 1; }
+      .suggestions { display: flex; gap: 8px; flex-wrap: wrap; margin-bottom: 14px; }
+      .suggestions button {
+        background: var(--navy-800); border: 1px solid var(--navy-600);
+        color: var(--navy-300); border-radius: 999px; padding: 6px 13px;
+        font: inherit; font-size: 12px; cursor: pointer;
+      }
+      .suggestions button:hover { border-color: var(--navy-400); color: var(--oat); }
       .legend span.key { display: inline-block; width: 13px; height: 13px;
                          border-radius: 3px; vertical-align: -2px; margin-right: 5px; }
     </style>
@@ -268,10 +299,10 @@
             round-trip, and the multi-workspace sweep + AI enrichment.
           -->
           <button data-view="start" aria-current="page">Get started</button>
+          <button data-view="ask">Ask</button>
           <button data-view="coverage">Coverage &amp; gaps</button>
-          <button data-view="domains">Data domains</button>
-          <button data-view="aliases">Source mapping</button>
-          <button data-view="taxonomy">Taxonomy</button>
+          <button data-view="flow">Value flow</button>
+          <button data-view="catalog">Catalog</button>
           <button data-view="generate">Generate use cases</button>
           <button data-view="admin">Admin</button>
         </nav>

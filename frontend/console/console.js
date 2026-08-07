@@ -895,6 +895,593 @@
     }
   }
 
+
+  // ---------------------------------------------------------------------
+  // Ask — chat over the portfolio
+  // ---------------------------------------------------------------------
+  let chatConversation = null;
+
+  async function viewAsk() {
+    main.innerHTML = `
+      <h2>Ask</h2>
+      <p class="lede">Ask about the portfolio in plain language. Answers come from
+        your actual data, not from general utility knowledge. Changes are always
+        proposed for your approval, never applied directly.</p>
+      <div class="suggestions">
+        <button data-q="What's blocking the most value right now?">What's blocking the most value?</button>
+        <button data-q="Which use cases could we build today with data we already have?">What could we build today?</button>
+        <button data-q="What is our total portfolio value and how much is buildable now?">Portfolio value?</button>
+        <button data-q="Are the value assumptions calibrated to this company, or still generic defaults?">Are the numbers calibrated?</button>
+      </div>
+      <div class="chat-log" id="chat-log"></div>
+      <div id="result"></div>
+      <div class="chat-input">
+        <input id="chat-q" placeholder="Ask about use cases, gaps, or value…"
+          autocomplete="off">
+        <button class="action" data-act="send" data-busy="Thinking…">Send</button>
+      </div>
+      <p class="small muted" style="margin-top:10px">
+        <a href="#" data-act="new-conv">Start a new conversation</a>
+        · <span id="tool-count"></span></p>`;
+
+    api("/chat/tools/list").then((info) => {
+      const slot = $("#tool-count");
+      if (slot) {
+        slot.textContent = `${info.read_only_count} read tools, `
+          + `${info.write_count} that propose changes`;
+      }
+    }).catch(() => {});
+
+    const log = $("#chat-log");
+
+    const append = (role, html) => {
+      const div = document.createElement("div");
+      div.className = `msg ${role}`;
+      div.innerHTML = html;
+      log.appendChild(div);
+      div.scrollIntoView({ block: "nearest" });
+    };
+
+    const ask = async (question) => {
+      append("user", text(question));
+      const payload = { message: question };
+      if (chatConversation) payload.conversation_id = chatConversation;
+      const reply = await api("/chat", {
+        method: "POST", body: JSON.stringify(payload),
+      });
+      chatConversation = reply.conversation_id;
+      (reply.tools_used || []).forEach((t) =>
+        append("tool", `→ ${text(t.tool)}`));
+      if (reply.answer) append("assistant", text(reply.answer).replace(/\n/g, "<br>"));
+      if (reply.note) append("tool", text(reply.note));
+      if (reply.confirm) renderChatConfirm(reply.confirm);
+    };
+
+    const send = async () => {
+      const input = $("#chat-q");
+      const question = input.value.trim();
+      if (!question) return;
+      input.value = "";
+      await ask(question);
+    };
+
+    onActions(main, {
+      send: () => send(),
+      "new-conv": async () => {
+        chatConversation = null;
+        log.innerHTML = "";
+        $("#result").innerHTML = "";
+      },
+    });
+
+    main.querySelectorAll(".suggestions button").forEach((button) => {
+      button.addEventListener("click", async () => {
+        const restore = busy(button, "…");
+        try {
+          await ask(button.dataset.q);
+        } catch (error) {
+          $("#result").innerHTML = banner("err", error.message);
+        } finally {
+          restore();
+        }
+      });
+    });
+
+    $("#chat-q").addEventListener("keydown", (event) => {
+      if (event.key === "Enter") {
+        event.preventDefault();
+        $("[data-act=send]").click();
+      }
+    });
+
+    function renderChatConfirm(card) {
+      $("#result").innerHTML = `
+        <div class="card" style="border-color:var(--lava)">
+          <h3>Confirm this change</h3>
+          <p class="small">${text(card.summary)}</p>
+          <div class="row" style="margin-top:10px">
+            <button class="action" data-act="apply" data-token="${text(card.token)}"
+              data-busy="Applying…">Confirm</button>
+            <button class="action secondary" data-act="cancel">Cancel</button>
+            <span class="small muted">Single-use, and expires shortly.</span>
+          </div>
+        </div>`;
+      onActions($("#result"), {
+        apply: async (button) => {
+          const result = await api(`/confirm/${button.dataset.token}`,
+            { method: "POST" });
+          $("#result").innerHTML = banner("ok", "Applied.");
+          append("tool", `✓ applied: ${text(result.intent)}`);
+        },
+        cancel: () => { $("#result").innerHTML = ""; },
+      });
+    }
+  }
+
+  // ---------------------------------------------------------------------
+  // Value flow — Sankey
+  // ---------------------------------------------------------------------
+  async function viewFlow() {
+    main.innerHTML = `<p class="muted"><span class="spin"></span> Tracing value…</p>`;
+    const [data, lobs] = await Promise.all([
+      api("/flow/sankey?top_use_cases=20"),
+      api("/lobs").catch(() => []),
+    ]);
+    const s = data.summary || {};
+
+    main.innerHTML = `
+      <h2>Value flow</h2>
+      <p class="lede">Where value comes from and where it stops. Ribbon width is
+        annual $M carried; a red data need has no landed source, so everything
+        downstream of it is blocked.</p>
+
+      <div class="row" style="margin-bottom:14px">
+        <div><label for="flow-lob">Line of business</label>
+          <select id="flow-lob"><option value="">All</option>${
+            (lobs || []).map((l) => `<option value="${l.id}">${text(l.name)}</option>`)
+              .join("")}</select></div>
+        <div><label for="flow-top">Use cases shown</label>
+          <select id="flow-top">
+            <option value="10">10</option>
+            <option value="20" selected>20</option>
+            <option value="40">40</option>
+          </select></div>
+        <button class="action secondary" data-act="reload" data-busy="Loading…">Apply</button>
+      </div>
+
+      <div class="stat" style="margin-bottom:16px">
+        <div><span class="k">Value flowing</span><span class="v">$${num(s.total_value_mm)}M</span></div>
+        <div><span class="k">Blocked</span><span class="v">$${num(s.blocked_value_mm)}M</span></div>
+        <div><span class="k">Blocked share</span><span class="v">${s.blocked_pct || 0}%</span></div>
+        <div><span class="k">Sources</span><span class="v">${num(s.sources)}</span></div>
+        <div><span class="k">Data needs</span><span class="v">${num(s.domains)}</span></div>
+      </div>
+
+      ${data.note ? banner("info", data.note) : ""}
+      ${s.blocked_value_mm > 0
+        ? banner("warn", `$${num(s.blocked_value_mm)}M of value (${s.blocked_pct}%) `
+            + `cannot flow because a required data need has no landed source. `
+            + `The red nodes are where it stops.`)
+        : ""}
+      <div id="sankey"></div>
+      <div class="legend" style="margin-top:12px">
+        <span><span class="key sw-covered"></span>satisfied need</span>
+        <span><span class="key sw-gap"></span>gap — no landed source</span>
+        <span><span class="key sw-available"></span>use case</span>
+        <span><span class="key sw-unused"></span>source / line of business</span>
+      </div>`;
+
+    renderSankey(data);
+
+    onActions(main, {
+      reload: async () => {
+        const lob = $("#flow-lob").value;
+        const top = $("#flow-top").value;
+        const fresh = await api(`/flow/sankey?top_use_cases=${top}`
+          + (lob ? `&lob_id=${lob}` : ""));
+        renderSankey(fresh);
+      },
+    });
+  }
+
+  /**
+   * Draw a 4-column Sankey as inline SVG.
+   *
+   * Hand-rolled rather than pulling in a charting library: the console has no build
+   * step, and a fixed 4-column layout needs simple math — nodes stack vertically per
+   * column, ribbons are cubic BÃ©ziers between them. A dependency would cost more
+   * than it saves here.
+   */
+  function renderSankey(data) {
+    const host = $("#sankey");
+    if (!host) return;
+    const nodes = data.nodes || [];
+    const links = data.links || [];
+    if (!nodes.length) {
+      host.innerHTML = `<p class="muted small">Nothing to show yet.</p>`;
+      return;
+    }
+
+    const COLS = 4;
+    const W = 1100, GAP = 8, NODE_W = 14, PAD = 26;
+    const byCol = [[], [], [], []];
+    nodes.forEach((n) => { if (byCol[n.column]) byCol[n.column].push(n); });
+
+    // Height is driven by the busiest column so nothing overlaps.
+    const tallest = Math.max(...byCol.map((c) => c.length), 1);
+    const H = Math.max(320, tallest * 26 + PAD * 2);
+    const colX = (c) => PAD + c * ((W - PAD * 2 - NODE_W) / (COLS - 1));
+
+    // Flow through each node, so height encodes weight.
+    const flow = {};
+    links.forEach((l) => {
+      flow[l.source] = (flow[l.source] || 0) + l.value;
+      flow[l.target] = (flow[l.target] || 0) + l.value;
+    });
+
+    const pos = {};
+    byCol.forEach((column, index) => {
+      const total = column.reduce((sum, n) => sum + (flow[n.id] || 0), 0) || 1;
+      const available = H - PAD * 2 - GAP * Math.max(column.length - 1, 0);
+      let y = PAD;
+      column.forEach((node) => {
+        // Floor at 3px: a thin-but-real flow must stay visible and hoverable.
+        const height = Math.max(3, ((flow[node.id] || 0) / total) * available);
+        pos[node.id] = { x: colX(index), y, h: height, node };
+        y += height + GAP;
+      });
+    });
+
+    const COLOR = {
+      landed: "#618794", not_landed: "#2A4A56",
+      satisfied: "#00A972", gap: "#FF3621",
+      shovel_ready: "#00A972", awaiting_prerequisites: "#FFAB00",
+      nearly_ready: "#2272B4", blocked: "#98102A", unknown: "#618794",
+      lob: "#618794",
+    };
+    const colorOf = (node) => COLOR[node.state] || "#618794";
+
+    // Track consumed offsets so parallel ribbons stack instead of overlapping.
+    const outAt = {}, inAt = {};
+    const ribbons = links.map((link) => {
+      const a = pos[link.source], b = pos[link.target];
+      if (!a || !b) return "";
+      const total = flow[link.source] || 1;
+      const thickness = Math.max(1, (link.value / total) * a.h);
+      const y0 = a.y + (outAt[link.source] = (outAt[link.source] || 0) + thickness) - thickness / 2;
+      const totalIn = flow[link.target] || 1;
+      const thicknessIn = Math.max(1, (link.value / totalIn) * b.h);
+      const y1 = b.y + (inAt[link.target] = (inAt[link.target] || 0) + thicknessIn) - thicknessIn / 2;
+      const x0 = a.x + NODE_W, x1 = b.x;
+      const mid = (x0 + x1) / 2;
+      return `<path class="link" d="M${x0},${y0} C${mid},${y0} ${mid},${y1} ${x1},${y1}"
+        stroke="${colorOf(a.node)}" stroke-width="${Math.max(1, thickness)}"
+        ><title>${text(a.node.label)} → ${text(b.node.label)}: $${link.value}M</title></path>`;
+    }).join("");
+
+    const boxes = Object.values(pos).map(({ x, y, h, node }) => {
+      const anchor = node.column === COLS - 1 ? "end" : "start";
+      const tx = node.column === COLS - 1 ? x - 6 : x + NODE_W + 6;
+      const label = node.label.length > 34 ? node.label.slice(0, 33) + "…" : node.label;
+      return `<g>
+        <rect x="${x}" y="${y}" width="${NODE_W}" height="${h}" rx="2"
+          fill="${colorOf(node)}"><title>${text(node.label)}${
+            node.value_mm ? ` — $${node.value_mm}M` : ""} (${text(node.state)})</title></rect>
+        <text x="${tx}" y="${y + h / 2 + 3}" text-anchor="${anchor}">${text(label)}</text>
+      </g>`;
+    }).join("");
+
+    const headers = (data.legend?.columns || []).map((label, index) =>
+      `<text class="col-label" x="${colX(index)}" y="14">${text(label)}</text>`).join("");
+
+    host.innerHTML = `<svg class="sankey" viewBox="0 0 ${W} ${H}"
+      preserveAspectRatio="xMidYMid meet">${headers}${ribbons}${boxes}</svg>`;
+  }
+
+  // ---------------------------------------------------------------------
+  // Catalog — data needs, source mapping, taxonomy, glossary, artifacts, rules
+  //
+  // One view with sub-tabs rather than six top-level tabs. These are all "look at
+  // and curate the catalog" tasks; as separate tabs they crowded out the four
+  // things a user actually navigates between (get started, ask, coverage, flow).
+  // ---------------------------------------------------------------------
+  let catalogTab = "needs";
+
+  async function viewCatalog() {
+    const tabs = [
+      ["needs", "Data needs"],
+      ["mapping", "Source mapping"],
+      ["taxonomy", "Taxonomy"],
+      ["glossary", "Glossary"],
+      ["artifacts", "What's built"],
+      ["rules", "Naming rules"],
+    ];
+    main.innerHTML = `
+      <h2>Catalog</h2>
+      <p class="lede">What data you have, what it means, and what has been built on
+        it.</p>
+      <div class="row" style="gap:6px;margin-bottom:18px">
+        ${tabs.map(([id, label]) => `<button class="action ${
+          id === catalogTab ? "" : "secondary"}" data-sub="${id}">${label}</button>`).join("")}
+      </div>
+      <div id="sub"></div>
+      <div id="result"></div>`;
+
+    main.querySelectorAll("[data-sub]").forEach((button) => {
+      button.addEventListener("click", () => {
+        catalogTab = button.dataset.sub;
+        viewCatalog();
+      });
+    });
+
+    const sub = $("#sub");
+    sub.innerHTML = `<p class="muted"><span class="spin"></span> Loading…</p>`;
+    try {
+      if (catalogTab === "needs") await subDomains(sub);
+      else if (catalogTab === "mapping") await subMapping(sub);
+      else if (catalogTab === "taxonomy") await subTaxonomy(sub);
+      else if (catalogTab === "glossary") await subGlossary(sub);
+      else if (catalogTab === "artifacts") await subArtifacts(sub);
+      else if (catalogTab === "rules") await subRules(sub);
+    } catch (error) {
+      sub.innerHTML = banner("err", error.message);
+    }
+  }
+
+  async function subDomains(host) {
+    const domains = await api("/domains");
+    const satisfied = domains.filter((d) => d.satisfied).length;
+    host.innerHTML = `
+      <p class="small muted">Semantic data needs, decoupled from the products that
+        provide them — so running Maximo instead of SAP PM is not a gap.</p>
+      <div class="stat" style="margin:14px 0">
+        <div><span class="k">Needs</span><span class="v">${num(domains.length)}</span></div>
+        <div><span class="k">Satisfied</span><span class="v">${num(satisfied)}</span></div>
+        <div><span class="k">Gaps</span><span class="v">${num(domains.length - satisfied)}</span></div>
+      </div>
+      <table><thead><tr><th>Data need</th><th>Category</th>
+        <th class="num">Sources</th><th class="num">Landed</th>
+        <th class="num">Used by</th><th>State</th></tr></thead>
+      <tbody>${domains.map((d) => `<tr>
+        <td><strong>${text(d.label)}</strong>
+          <div class="small muted mono">${text(d.name)}</div></td>
+        <td class="small muted">${text(d.category)}</td>
+        <td class="num">${num(d.serving_asset_count)}</td>
+        <td class="num">${num(d.ready_asset_count)}</td>
+        <td class="num">${num(d.required_by_count)}</td>
+        <td><span class="pill ${d.satisfied ? "ok" : "bad"}">${
+          d.satisfied ? "satisfied" : "gap"}</span></td></tr>`).join("")}</tbody></table>`;
+  }
+
+  async function subMapping(host) {
+    const [needsReview, categories] = await Promise.all([
+      api("/ingestion/aliases?needs_review=true&limit=200").catch(() => []),
+      api("/data-assets").then((assets) => [...new Set(
+        assets.map((a) => a.source_category).filter(Boolean))].sort()).catch(() => []),
+    ]);
+    const options = ["Other", ...categories].map((c) =>
+      `<option value="${text(c)}">${text(c)}</option>`).join("");
+    host.innerHTML = `
+      <p class="small muted">Raw source labels the normalizer could not confidently
+        resolve. A correction here is pinned permanently.</p>
+      ${needsReview.length ? `<table style="margin-top:12px">
+        <thead><tr><th>Raw label</th><th>Mapped to</th><th>How</th>
+          <th>Confidence</th><th>Correct it</th></tr></thead>
+        <tbody>${needsReview.map((a) => `<tr data-id="${a.id}">
+          <td class="mono">${text(a.raw)}</td><td>${text(a.canonical || "—")}</td>
+          <td class="small muted">${text(a.mapped_by)}</td>
+          <td><span class="pill ${a.confidence === "high" ? "ok"
+            : a.confidence === "low" ? "bad" : "warn"}">${
+            text(a.confidence || "none")}</span></td>
+          <td class="row"><select data-role="canonical">${options}</select>
+            <button class="action secondary" data-act="fix" data-id="${a.id}"
+              data-busy="Saving…">Save</button></td></tr>`).join("")}</tbody></table>`
+        : banner("ok", "Every source label is confidently mapped.")}`;
+    onActions(host, {
+      fix: async (button) => {
+        const row = button.closest("tr");
+        const canonical = $('[data-role="canonical"]', row).value;
+        await api(`/ingestion/aliases/${button.dataset.id}`, {
+          method: "PATCH", body: JSON.stringify({ canonical }),
+        });
+        row.style.opacity = "0.45";
+        $("#result").innerHTML = banner("ok", `Pinned to ${canonical}.`);
+      },
+    });
+  }
+
+  async function subTaxonomy(host) {
+    const [coverage, current] = await Promise.all([
+      api("/taxonomy/coverage"), api("/taxonomy"),
+    ]);
+    const dist = Object.entries(current.distribution || {})
+      .filter(([, v]) => Object.keys(v).length)
+      .map(([dim, values]) => `<div class="card"><h3>${
+        text(dim.replace(/_/g, " "))}</h3><table><tbody>${
+        Object.entries(values).sort((a, b) => b[1] - a[1]).map(([v, n]) =>
+          `<tr><td>${text(v)}</td><td class="num">${num(n)}</td></tr>`).join("")
+      }</tbody></table></div>`).join("");
+    host.innerHTML = `
+      <p class="small muted">How data arrives, how critical it is, and what kind of
+        thing produces it. Effective-dated, so a reclassification keeps its history.</p>
+      <div class="stat" style="margin:14px 0">
+        <div><span class="k">Assets</span><span class="v">${num(coverage.total_assets)}</span></div>
+        <div><span class="k">Fully classified</span><span class="v">${num(coverage.fully_classified)}</span></div>
+        ${Object.entries(coverage.by_dimension || {}).map(([d, st]) =>
+          `<div><span class="k">${text(d.replace(/_/g, " "))}</span>
+            <span class="v">${st.pct}%</span></div>`).join("")}
+      </div>
+      <div class="row" style="margin-bottom:14px">
+        <button class="action" data-act="classify" data-busy="Classifying…">
+          Classify unlabelled assets</button>
+        <span class="small muted">Manual classifications are never overwritten.</span>
+      </div>
+      ${dist || `<p class="muted small">Nothing classified yet.</p>`}`;
+    onActions(host, {
+      classify: async () => {
+        const r = await api("/taxonomy/classify", {
+          method: "POST", body: JSON.stringify({ max_assets: 200 }),
+        });
+        $("#result").innerHTML = banner("ok",
+          `${num(r.values_written)} classification(s) across ${
+            num(r.assets_considered)} asset(s).`);
+        setTimeout(() => viewCatalog(), 1200);
+      },
+    });
+  }
+
+  async function subGlossary(host) {
+    const data = await api("/flow/glossary");
+    const s = data.summary || {};
+    host.innerHTML = `
+      <p class="small muted">Business terms with the systems behind them. Data needs
+        appear automatically — a need already is a term with a definition — and are
+        marked <em>derived</em> until someone curates one.</p>
+      <div class="stat" style="margin:14px 0">
+        <div><span class="k">Terms</span><span class="v">${num(s.total)}</span></div>
+        <div><span class="k">Curated</span><span class="v">${num(s.curated)}</span></div>
+        <div><span class="k">Derived</span><span class="v">${num(s.derived)}</span></div>
+      </div>
+      <table><thead><tr><th>Term</th><th>Definition</th>
+        <th>Systems of record</th><th>Source</th></tr></thead>
+      <tbody>${(data.terms || []).slice(0, 80).map((t) => `<tr>
+        <td><strong>${text(t.term)}</strong></td>
+        <td class="small muted">${text((t.definition || "").slice(0, 110))}</td>
+        <td class="small mono">${text((t.source_systems || []).slice(0, 3).join(", "))}</td>
+        <td><span class="pill ${t.origin_kind === "curated" ? "ok" : "warn"}">${
+          text(t.origin_kind)}</span></td></tr>`).join("")}</tbody></table>`;
+  }
+
+  async function subArtifacts(host) {
+    const [all, unattributed] = await Promise.all([
+      api("/artifacts?limit=200"),
+      api("/artifacts/unattributed?limit=30").catch(() => ({ artifacts: [], summary: {} })),
+    ]);
+    const s = all.summary || {};
+    const u = unattributed.summary || {};
+    host.innerHTML = `
+      <p class="small muted">What has already been built on the platform. The
+        unattributed part is the point: work the portfolio doesn't know about, or
+        something abandoned that still costs money.</p>
+      <div class="stat" style="margin:14px 0">
+        <div><span class="k">Artifacts</span><span class="v">${num(s.total)}</span></div>
+        <div><span class="k">Unclaimed</span><span class="v">${num(s.unattributed)}</span></div>
+        <div><span class="k">Active + unclaimed</span><span class="v">${num(u.active_unclaimed)}</span></div>
+      </div>
+      <div class="row" style="margin-bottom:14px">
+        <button class="action" data-act="sync" data-busy="Scanning…">
+          Scan the workspace</button>
+        <span class="small muted">Read-only against system tables.</span>
+      </div>
+      ${u.active_unclaimed
+        ? banner("warn", `${u.active_unclaimed} artifact(s) ran recently but no use `
+            + `case claims them — likely shadow work worth adding to the portfolio.`)
+        : ""}
+      ${(all.by_type || []).length ? `<table><thead><tr><th>Type</th>
+        <th class="num">Total</th><th class="num">Unclaimed</th></tr></thead>
+        <tbody>${all.by_type.map((t) => `<tr><td>${text(t.artifact_type)}</td>
+          <td class="num">${num(t.n)}</td>
+          <td class="num">${num(t.unattributed)}</td></tr>`).join("")}
+        </tbody></table>` : `<p class="muted small">Nothing scanned yet.</p>`}`;
+    onActions(host, {
+      sync: async () => {
+        const r = await api("/artifacts/sync", { method: "POST" });
+        $("#result").innerHTML = banner(r.total ? "ok" : "info",
+          `Found ${num(r.total)} artifact(s). ${text(r.hint || "")}`)
+          + ((r.notes || []).length ? `<div class="card"><ul class="tight small muted">${
+              r.notes.map((n) => `<li>${text(n)}</li>`).join("")}</ul></div>` : "");
+        if (r.total) setTimeout(() => viewCatalog(), 1200);
+      },
+    });
+  }
+
+  async function subRules(host) {
+    const data = await api("/rules");
+    const vocab = data.vocabulary || {};
+    host.innerHTML = `
+      <p class="small muted">Teach the app your catalog naming conventions once,
+        instead of hand-correcting thousands of discovered rows. First match wins per
+        dimension, so a specific rule can be ordered ahead of a general one.</p>
+      <div class="row" style="margin:14px 0">
+        <button class="action secondary" data-act="seed" data-busy="Loading…">
+          Load common conventions</button>
+        <button class="action secondary" data-act="test" data-busy="Testing…">
+          Test against real tables</button>
+      </div>
+      <div class="card">
+        <h3>Add a rule</h3>
+        <div class="row">
+          <div><label for="r-dim">Decides</label><select id="r-dim">${
+            (vocab.dimensions || []).map((d) => `<option>${text(d)}</option>`).join("")
+          }</select></div>
+          <div><label for="r-field">Looks at</label><select id="r-field">${
+            (vocab.fields || []).map((f) => `<option>${text(f)}</option>`).join("")
+          }</select></div>
+          <div><label for="r-match">Match</label><select id="r-match">${
+            (vocab.match_types || []).map((m) => `<option>${text(m)}</option>`).join("")
+          }</select></div>
+          <div><label for="r-pattern">Pattern</label>
+            <input id="r-pattern" placeholder="prod_"></div>
+          <div><label for="r-value">Assign</label>
+            <input id="r-value" placeholder="production"></div>
+          <button class="action" data-act="add" data-busy="Adding…">Add</button>
+        </div>
+        <p class="small muted" style="margin:8px 0 0">Leave <em>Assign</em> blank for
+          an <code>ignore</code> rule.</p>
+      </div>
+      ${(data.rules || []).length ? `<table><thead><tr><th>Decides</th><th>Field</th>
+        <th>Match</th><th>Pattern</th><th>Assigns</th><th class="num">Priority</th>
+        <th></th></tr></thead>
+        <tbody>${data.rules.map((r) => `<tr>
+          <td>${text(r.dimension)}</td><td class="small">${text(r.field)}</td>
+          <td class="small muted">${text(r.match_type)}</td>
+          <td class="mono small">${text(r.pattern)}</td>
+          <td>${text(r.value || "—")}</td>
+          <td class="num">${num(r.priority)}</td>
+          <td><button class="action secondary" data-act="del" data-id="${r.id}"
+            data-busy="…">Remove</button></td></tr>`).join("")}</tbody></table>`
+        : `<p class="muted small">No rules yet.</p>`}`;
+    onActions(host, {
+      seed: async () => {
+        const r = await api("/rules/seed", { method: "POST" });
+        $("#result").innerHTML = banner("ok", `Added ${num(r.created)} rule(s).`);
+        setTimeout(() => viewCatalog(), 900);
+      },
+      add: async () => {
+        const value = $("#r-value").value.trim();
+        await api("/rules", {
+          method: "POST",
+          body: JSON.stringify({
+            dimension: $("#r-dim").value, field: $("#r-field").value,
+            match_type: $("#r-match").value, pattern: $("#r-pattern").value.trim(),
+            value: value || null,
+          }),
+        });
+        $("#result").innerHTML = banner("ok", "Rule added.");
+        setTimeout(() => viewCatalog(), 700);
+      },
+      del: async (button) => {
+        await api(`/rules/${button.dataset.id}`, { method: "DELETE" });
+        button.closest("tr").style.opacity = "0.4";
+      },
+      test: async () => {
+        const r = await api("/rules/test", {
+          method: "POST", body: JSON.stringify({ limit: 100 }),
+        });
+        const s = r.summary || {};
+        $("#result").innerHTML = banner(s.unmatched ? "warn" : "ok",
+          `${num(r.rules_applied)} rule(s) over ${num(s.total)} row(s) from `
+          + `${text(r.sample_source)}: ${num(s.ignored)} ignored, `
+          + `${num(s.unmatched)} matched nothing.`)
+          + Object.entries(s.by_dimension || {}).map(([dim, values]) =>
+            `<div class="card"><h3>${text(dim)}</h3><table><tbody>${
+              Object.entries(values).map(([v, n]) =>
+                `<tr><td>${text(v)}</td><td class="num">${num(n)}</td></tr>`).join("")
+            }</tbody></table></div>`).join("");
+      },
+    });
+  }
+
   // ---------------------------------------------------------------------
   // Admin — Demo Mode + instance state
   // ---------------------------------------------------------------------
@@ -1044,12 +1631,20 @@
   // ---------------------------------------------------------------------
   const VIEWS = {
     start: viewStart,
-    aliases: viewAliases,
-    domains: viewDomains,
+    ask: viewAsk,
     coverage: viewCoverage,
-    taxonomy: viewTaxonomy,
+    flow: viewFlow,
+    catalog: viewCatalog,
     generate: viewGenerate,
     admin: viewAdmin,
+    // Back-compat: these were separate top-level tabs before the catalog views
+    // were consolidated. Old links land on the right sub-tab rather than nowhere.
+    aliases: () => { catalogTab = "mapping"; return viewCatalog(); },
+    domains: () => { catalogTab = "needs"; return viewCatalog(); },
+    taxonomy: () => { catalogTab = "taxonomy"; return viewCatalog(); },
+    glossary: () => { catalogTab = "glossary"; return viewCatalog(); },
+    artifacts: () => { catalogTab = "artifacts"; return viewCatalog(); },
+    rules: () => { catalogTab = "rules"; return viewCatalog(); },
     // Back-compat: the merged onboarding flow replaced these two separate views,
     // so old bookmarks and the /console#setup links in the docs still land
     // somewhere sensible instead of silently falling through to the default.

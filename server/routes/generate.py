@@ -383,10 +383,23 @@ def _describe(candidate: dict) -> str:
     return "\n\n".join(p.strip() for p in parts if p.strip())
 
 
+async def _research_executor(payload: dict, actor: str) -> dict:
+    """Apply calibrated value assumptions. Owned by routes/research.py.
+
+    Imported lazily: research.py imports this module's confirm helpers, so a
+    module-scope import would close a cycle.
+    """
+    from .research import execute_apply_research
+    return await execute_apply_research(payload, actor)
+
+
 # Intent -> executor. Adding an intent means adding a row here; an intent with no
 # executor is rejected at confirm time rather than silently succeeding.
 _EXECUTORS = {
     cf.INTENT_CREATE_USE_CASES: _execute_create_use_cases,
+    # Registered here rather than in research.py because /api/confirm lives in this
+    # module — every agent-proposed write shares that one gate.
+    cf.INTENT_APPLY_RESEARCH: _research_executor,
 }
 
 

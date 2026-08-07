@@ -25,6 +25,35 @@ router = APIRouter(prefix="/agents", tags=["agents"])
 MIN_OUTPUT_TOKENS = 6000
 
 
+def flatten_content(content) -> str:
+    """Flatten a chat-completion `content` field into answer text.
+
+    Newer endpoints return a LIST of typed blocks rather than a string, and
+    reasoning models include a `reasoning` block that is NOT the answer — including
+    it makes a JSON extractor parse the model's thinking. Shared with routes/chat.py
+    so both paths handle the same shapes identically.
+    """
+    if content is None:
+        return ""
+    if isinstance(content, str):
+        return content
+    if isinstance(content, list):
+        parts = []
+        for block in content:
+            if isinstance(block, str):
+                parts.append(block)
+            elif isinstance(block, dict):
+                if block.get("type") in ("reasoning", "thinking"):
+                    continue
+                parts.append(str(block.get("text") or block.get("content") or ""))
+            else:
+                if getattr(block, "type", None) in ("reasoning", "thinking"):
+                    continue
+                parts.append(str(getattr(block, "text", "") or ""))
+        return "".join(parts)
+    return str(content)
+
+
 class DetectIn(BaseModel):
     use_case_id: int
     max_assets: int = 6
@@ -171,37 +200,7 @@ async def _llm_json(prompt: str, max_tokens: int = 1600, response_schema: dict |
         resp = await client.chat.completions.create(**kwargs)
         return resp.choices[0].message.content
 
-    def _as_text(content) -> str:
-        """Flatten a reply into answer text.
-
-        Newer endpoints (observed on `databricks-claude-sonnet-5`) return
-        `content` as a LIST of typed blocks rather than a string, which made
-        `.strip()` raise "'list' object has no attribute 'strip'" and dropped the
-        agents to heuristics even though the model had answered.
-
-        Blocks of type `reasoning` are SKIPPED. On a reasoning model those carry
-        the private thinking trace, not the answer; including them means the JSON
-        extractor scrapes braces out of the reasoning and parses garbage.
-        """
-        if content is None:
-            return ""
-        if isinstance(content, str):
-            return content
-        if isinstance(content, list):
-            parts = []
-            for block in content:
-                if isinstance(block, str):
-                    parts.append(block)
-                elif isinstance(block, dict):
-                    if block.get("type") in ("reasoning", "thinking"):
-                        continue
-                    parts.append(str(block.get("text") or block.get("content") or ""))
-                else:
-                    if getattr(block, "type", None) in ("reasoning", "thinking"):
-                        continue
-                    parts.append(str(getattr(block, "text", "") or ""))
-            return "".join(parts)
-        return str(content)
+    _as_text = flatten_content
 
     def _extract(content):
         """Parse the reply, tolerating content blocks, a code fence, or prose."""
