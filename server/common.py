@@ -1,5 +1,6 @@
 """Shared helpers for routes: user attribution, audit logging, serialization."""
 import json
+import logging
 from datetime import date, datetime
 from decimal import Decimal
 from typing import Any, Optional
@@ -7,6 +8,8 @@ from typing import Any, Optional
 from fastapi import Request
 
 from .db import db
+
+logger = logging.getLogger(__name__)
 
 
 def current_user(request: Request) -> str:
@@ -73,4 +76,7 @@ async def write_audit(entity_type: str, entity_id, action: str, actor: str, diff
             json.dumps(diff or {}),
         )
     except Exception as exc:  # noqa: BLE001
-        print(f"[audit] failed to record {action} on {entity_type}#{entity_id}: {exc}")
+        # A lost audit row must not fail the write it describes, but it does need to
+        # be visible: the audit log is the only record of who changed what.
+        logger.warning("audit write failed for %s on %s#%s (%s: %s)",
+                       action, entity_type, entity_id, type(exc).__name__, exc)

@@ -9,12 +9,15 @@ computation that powers the flywheel highlight moment.
 - GET  /api/use-cases/{id}/unlocks is provided in use_cases.py.
 """
 import json
+import logging
 
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel
 
 from ..config import SERVING_ENDPOINT
 from ..db import db
+
+logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/agents", tags=["agents"])
 
@@ -140,7 +143,8 @@ async def detect_dependencies(body: DetectIn):
                     "rationale": e.get("rationale", "")}
                    for e in parsed["enables"] if e.get("to_use_case_id") in uc_label]
     except Exception as exc:  # noqa: BLE001
-        print(f"[agents] LLM detect fell back to heuristic: {exc}")
+        logger.info("dependency detection fell back to heuristic (%s: %s)",
+                    type(exc).__name__, exc)
 
     return {
         "use_case_id": body.use_case_id,
@@ -253,7 +257,10 @@ async def _llm_json(prompt: str, max_tokens: int = 1600, response_schema: dict |
 
     note = ("AI temporarily unavailable — showing heuristic ranking. "
             f"({type(last_exc).__name__})")
-    print(f"[agents] LLM call fell back: {last_exc}")
+    # Warning, not info: every fallback means a user saw heuristic numbers where
+    # they expected model output, and the cause is usually configuration.
+    logger.warning("LLM JSON call fell back to heuristic after %d attempt(s): "
+                   "%s: %s", len(tried), type(last_exc).__name__, last_exc)
     return None, False, note
 
 
@@ -283,7 +290,8 @@ async def llm_text(prompt: str, max_tokens: int = 1600) -> tuple[str | None, boo
         return parsed_or_text, True, None
     except Exception as exc:  # noqa: BLE001
         note = f"AI temporarily unavailable — showing a generated summary. ({type(exc).__name__})"
-        print(f"[agents] LLM text call fell back: {exc}")
+        logger.warning("LLM prose call fell back (%s: %s)",
+                       type(exc).__name__, exc)
         return None, False, note
 
 

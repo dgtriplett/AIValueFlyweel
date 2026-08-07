@@ -3,6 +3,7 @@
 Serves the REST API under /api/* and the built React SPA from frontend/dist.
 """
 import asyncio
+import logging
 import os
 from contextlib import asynccontextmanager
 from pathlib import Path
@@ -11,6 +12,7 @@ from fastapi import FastAPI
 from fastapi.responses import FileResponse, JSONResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
 
+from server import logging_setup
 from server.config import IS_DATABRICKS_APP, SERVING_ENDPOINT, GENIE_SPACE_ID
 from server.db import db, token_refresh_loop
 from server.routes import (
@@ -43,6 +45,11 @@ from server.routes import (
     branding,
 )
 
+# Install handlers before anything logs. JSON in Databricks Apps, text locally;
+# LOG_LEVEL turns detail up on a deployed app without a code change.
+logging_setup.configure()
+logger = logging.getLogger("grid_atlas.app")
+
 BASE_DIR = Path(__file__).parent
 MIGRATIONS_DIR = BASE_DIR / "server" / "migrations"
 FRONTEND_DIST = BASE_DIR / "frontend" / "dist"
@@ -52,47 +59,33 @@ FRONTEND_DIST = BASE_DIR / "frontend" / "dist"
 CONSOLE_DIR = BASE_DIR / "frontend" / "console"
 
 
-async def run_migrations() -> None:
-    """Best-effort schema check on startup.
+async def check_schema() -> None:
+    """Report schema state at startup. Never applies migrations.
 
-    Schema creation/migration is OWNED by the install step (databricks.yml setup
-    + scripts/seed_clean.py), run as the Lakebase owner (the deploying principal).
-    The running app authenticates as its own service principal, which holds DML
-    but is NOT the table owner, so it cannot run DDL (CREATE/ALTER). That is
-    expected and fine: we attempt the idempotent migration opportunistically and,
-    if we lack ownership, log a single benign line and continue — the SP already
-    has every privilege it needs to serve the app.
+    The app authenticates as a service principal holding DML but NOT DDL, so it
+    cannot apply migrations — and should not. Replaying SQL on every boot is how a
+    non-idempotent migration silently destroys customer data on a restart nobody was
+    watching. server/migrator.py owns the ledger; scripts/migrate.py applies, run as
+    the database owner.
+
+    A pending migration is a state to report, not a crash: the portfolio still works
+    for every table that does exist.
     """
+    from server.migrator import startup_check
+
     pool = await db.get_pool()
     if pool is None:
-        print("[startup] Lakebase not configured - running in demo mode")
+        logger.info("Lakebase not configured — running in demo mode")
         return
     try:
-        # Every migration, in lexical order. 002+ ALTER tables that 001 creates,
-        # so the numeric prefix ordering is load-bearing; applying only 001 would
-        # leave the domain, discovery, and agent tables missing.
-        sql = "\n".join(p.read_text() for p in sorted(MIGRATIONS_DIR.glob("*.sql")))
-        async with pool.acquire() as conn:
-            await conn.execute(sql)
-        print("[startup] schema up to date")
-    except Exception as exc:  # noqa: BLE001
-        # DDL failures at startup are EXPECTED and non-fatal: the app SP holds DML
-        # but not table ownership, so it can't run CREATE/ALTER. Schema is owned by
-        # the install/seed step (run as the DB owner). Detect the ownership case
-        # (asyncpg InsufficientPrivilegeError -> SQLSTATE 42501, "must be owner")
-        # and log a single benign line; keep serving either way.
-        sqlstate = getattr(exc, "sqlstate", None)
-        msg = str(exc).lower()
-        if sqlstate == "42501" or "must be owner" in msg or "permission denied" in msg:
-            print("[startup] schema managed by install step (app SP lacks DDL "
-                  "privilege, which is expected) - continuing")
-        else:
-            print(f"[startup] schema check skipped ({type(exc).__name__}: {exc}) - continuing")
+        await startup_check(db, MIGRATIONS_DIR)
+    except Exception as exc:  # noqa: BLE001 - never block startup on a status check
+        logger.warning("schema check failed (%s) — continuing", type(exc).__name__)
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    await run_migrations()
+    await check_schema()
     refresh_task = asyncio.create_task(token_refresh_loop())
     yield
     refresh_task.cancel()
@@ -100,6 +93,10 @@ async def lifespan(app: FastAPI):
 
 
 app = FastAPI(title="Grid Atlas", version="0.1.0", lifespan=lifespan)
+
+# Correlates every log line emitted while handling a request, and emits one line per
+# request with status + duration. Added before the routers so it wraps all of them.
+logging_setup.install_middleware(app)
 
 # --- API routers -----------------------------------------------------------
 for module in (lobs, data_assets, use_cases, dependencies, values, roadmap,

@@ -96,11 +96,25 @@ def _multipart() -> types.ModuleType:
     return mod
 
 
+def _quiet_logging() -> None:
+    """Silence app logging during tests.
+
+    Importing app.py calls logging_setup.configure(), which is correct at runtime
+    but makes test output unreadable — and warnings about unapplied migrations look
+    like failures when they are the expected state under a fake database. Tests that
+    assert on log OUTPUT install their own handler, so this only suppresses the
+    incidental noise.
+    """
+    import logging
+    logging.disable(logging.CRITICAL)
+
+
 def install() -> None:
     _ensure("asyncpg", _asyncpg)
     _ensure("aiohttp", _aiohttp)
     _ensure("openai", _openai)
     _ensure("multipart", _multipart)
+    _quiet_logging()
 
 
 install()

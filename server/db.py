@@ -6,11 +6,14 @@
 """
 import os
 import asyncio
+import logging
 from typing import Optional
 
 import asyncpg
 
 from .config import get_oauth_token
+
+logger = logging.getLogger(__name__)
 
 # asyncpg error classes that indicate the OAuth token is stale/invalid.
 _AUTH_ERRORS = (
@@ -55,7 +58,13 @@ class DatabasePool:
                 )
                 self._demo_mode = False
             except Exception as exc:  # noqa: BLE001
-                print(f"[db] Lakebase connection failed, entering demo mode: {exc}")
+                # Demo mode is a legitimate state (no Lakebase configured), but
+                # arriving here with PGHOST set means a real failure the operator
+                # needs to see, so log at warning with the cause.
+                logger.warning(
+                    "Lakebase connection failed (%s: %s) — entering demo mode; "
+                    "reads return empty and writes are no-ops",
+                    type(exc).__name__, exc)
                 self._demo_mode = True
                 self._pool = None
         return self._pool
@@ -119,6 +128,8 @@ async def token_refresh_loop(interval_seconds: int = 45 * 60) -> None:
         if not db.is_demo_mode and os.environ.get("PGHOST"):
             try:
                 await db.refresh_token()
-                print("[db] OAuth token refreshed")
+                logger.info("OAuth token refreshed")
             except Exception as exc:  # noqa: BLE001
-                print(f"[db] token refresh failed: {exc}")
+                # Not fatal: the next query's auth-error path recreates the pool.
+                logger.warning("token refresh failed (%s: %s) — will retry on the "
+                               "next query", type(exc).__name__, exc)
