@@ -129,7 +129,7 @@ async def seed_rules(request: Request):
     return {"created": created, "total_seeds": len(rl.SEED_RULES)}
 
 
-@router.post("/rules/test")
+@router.post("/rules/test", dependencies=[Depends(limiter("generate"))])
 async def test_rules(body: RuleTestIn):
     """Dry-run the active rules against real discovered rows.
 

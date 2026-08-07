@@ -366,7 +366,7 @@ async def _merge_rows(table: str, key_columns: list[str], columns: list[str],
     return written
 
 
-@router.post("/upload/schemas")
+@router.post("/upload/schemas", dependencies=[Depends(limiter("sweep"))])
 async def upload_schemas(request: Request, file: UploadFile = File(...)):
     """Ingest `all_schemas.csv` from the extractor."""
     _require_discovery()
@@ -408,7 +408,7 @@ async def upload_schemas(request: Request, file: UploadFile = File(...)):
         raise HTTPException(500, f"Schema upload failed: {exc}")
 
 
-@router.post("/upload/tables")
+@router.post("/upload/tables", dependencies=[Depends(limiter("sweep"))])
 async def upload_tables(request: Request, file: UploadFile = File(...)):
     """Ingest `all_tables.csv` from the extractor."""
     _require_discovery()
@@ -465,7 +465,7 @@ async def upload_tables(request: Request, file: UploadFile = File(...)):
         raise HTTPException(500, f"Table upload failed: {exc}")
 
 
-@router.post("/upload/columns")
+@router.post("/upload/columns", dependencies=[Depends(limiter("sweep"))])
 async def upload_columns(request: Request, file: UploadFile = File(...)):
     """Ingest `all_columns.csv`, folded into `discovered_tables.column_summary`.
 

@@ -189,6 +189,12 @@ async def _chat_turn(body: ChatIn, request: Request):
                 else:
                     try:
                         result = await tool.handler(args, actor)
+                    except BudgetExceeded:
+                        # MUST propagate. Reporting this to the model as a tool
+                        # error would let it keep calling tools, so the budget
+                        # would bound nothing — it is a limit on the request, not
+                        # a failure the model can work around.
+                        raise
                     except Exception as exc:  # noqa: BLE001
                         # Surface the failure to the model so it can recover or
                         # explain, rather than failing the whole turn.
@@ -220,6 +226,11 @@ async def _chat_turn(body: ChatIn, request: Request):
             # Loop exhausted without a final answer.
             note = (f"Stopped after {MAX_TOOL_ROUNDS} rounds of tool use. "
                     "Try a narrower question.")
+    except BudgetExceeded:
+        # Also propagate past the outer handler, or it becomes a 502 "assistant
+        # unavailable" — which points support at the serving endpoint for what is
+        # actually this request exceeding its own database budget.
+        raise
     except Exception as exc:  # noqa: BLE001
         message = str(exc)
         raise HTTPException(

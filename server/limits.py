@@ -206,7 +206,14 @@ def limiter(limit_name: str, *, cost: float = 1.0):
     """FastAPI dependency form: `dependencies=[Depends(limiter("chat"))]`.
 
     Preferred over an in-body call when the whole endpoint is rate-limited, since
-    it runs before the body is parsed or validated.
+    router-level dependencies resolve before the request body is VALIDATED — so a
+    flood of malformed requests is limited too, not just well-formed ones. Verified
+    by driving the app: six invalid bodies consumed the bucket and the seventh
+    returned 429 rather than another 422.
+
+    It does NOT run before the body is READ off the wire. For the multipart upload
+    endpoints the bytes still arrive; the size cap inside each handler is what
+    bounds that, and the limit bounds how often the work behind it happens.
     """
     def dependency(request: Request) -> None:
         enforce(limit_name, request, cost=cost)

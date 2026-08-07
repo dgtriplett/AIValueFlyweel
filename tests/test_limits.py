@@ -314,6 +314,123 @@ class TestQueryBudgetChargesRealQueries(LimitsTestCase):
         self.assertEqual(asyncio.run(run()), [3, 7, 5])
 
 
+class TestBudgetIsNotSwallowed(LimitsTestCase):
+    """BudgetExceeded must propagate past the chat loop's broad handlers.
+
+    THE BUG THIS CAUGHT: BudgetExceeded is a RuntimeError, and the chat loop wraps
+    each tool call in `except Exception` to report a failure to the model rather
+    than failing the whole turn. That converted the budget into a tool-error string
+    the model could route around — so the budget bounded nothing, and the request
+    kept querying. The outer handler was worse: it turned it into a 502 "assistant
+    unavailable", pointing support at the serving endpoint for what was actually
+    this request exceeding its own database budget.
+
+    Enforced structurally (does the code re-raise?) rather than by simulating a
+    turn, because reaching the tool-call path requires a live model.
+    """
+
+    def setUp(self):
+        super().setUp()
+        import inspect
+
+        from server.routes import chat
+        self.source = inspect.getsource(chat)
+
+    def test_tool_call_handler_reraises_the_budget(self):
+        # The `except BudgetExceeded: raise` must appear BEFORE the broad handler,
+        # or Python matches the broad one first.
+        budget_at = self.source.find("except BudgetExceeded")
+        self.assertNotEqual(budget_at, -1,
+                            "the chat loop does not re-raise BudgetExceeded — the "
+                            "query budget bounds nothing")
+        broad_at = self.source.find("except Exception as exc:  # noqa: BLE001")
+        self.assertLess(budget_at, broad_at,
+                        "except BudgetExceeded must precede except Exception, or "
+                        "the broad handler matches first")
+
+    def test_both_swallow_points_reraise(self):
+        """Two handlers could swallow it: the per-tool one and the outer one.
+
+        There are THREE `except BudgetExceeded` clauses in the module and the
+        distinction matters: the two inside `_chat_turn` must re-raise, while the
+        one in the `chat` wrapper is where it becomes a 429. Asserting a bare count
+        conflates them — as an earlier version of this test did.
+        """
+        lines = self.source.split("\n")
+        reraise = 0
+        converts = 0
+        for index, line in enumerate(lines):
+            if not line.strip().startswith("except BudgetExceeded"):
+                continue
+            # The clause body: the next few non-comment, non-blank lines.
+            body = [candidate.strip() for candidate in lines[index + 1:index + 8]
+                    if candidate.strip() and not candidate.strip().startswith("#")]
+            if body and body[0] == "raise":
+                reraise += 1
+            elif any("HTTPException(429" in statement for statement in body):
+                converts += 1
+
+        self.assertEqual(reraise, 2,
+                         "both handlers inside _chat_turn must bare-`raise` the "
+                         f"budget so it reaches the wrapper (found {reraise})")
+        self.assertEqual(converts, 1,
+                         "exactly one handler should convert the budget into a "
+                         f"429 (found {converts})")
+
+    def test_a_budget_exception_is_not_confusable_with_a_tool_failure(self):
+        """Reads as a distinct type at every catch site."""
+        self.assertTrue(issubclass(limits.BudgetExceeded, Exception))
+        self.assertIsNot(limits.BudgetExceeded, RuntimeError)
+
+
+class TestLimiterRunsBeforeBodyValidation(LimitsTestCase):
+    """A flood of MALFORMED requests must be limited too.
+
+    If the limiter ran after body validation, an attacker or a broken client
+    sending garbage would never be limited — every request would 422 having already
+    consumed the model call or warehouse query behind it. Driving the real app is
+    the only way to establish the ordering, since it is FastAPI's, not ours.
+    """
+
+    def _post(self, path, body):
+        import asyncio
+
+        import app as app_module
+
+        scope = {
+            "type": "http", "asgi": {"version": "3.0"}, "http_version": "1.1",
+            "method": "POST", "path": path, "raw_path": path.encode(),
+            "query_string": b"", "root_path": "", "scheme": "http",
+            "server": ("test", 80), "client": ("9.9.9.9", 1),
+            "headers": [(b"x-forwarded-email", b"limits-test@example.com"),
+                        (b"content-type", b"application/json")],
+        }
+        captured = {}
+
+        async def receive():
+            return {"type": "http.request", "body": body, "more_body": False}
+
+        async def send(message):
+            if message["type"] == "http.response.start":
+                captured["status"] = message["status"]
+
+        asyncio.run(app_module.app(scope, receive, send))
+        return captured["status"]
+
+    def test_invalid_bodies_still_consume_the_limit(self):
+        import json
+
+        burst = limits.LIMITS["chat"].burst
+        garbage = json.dumps({"not_the_expected_field": "x"}).encode()
+
+        statuses = [self._post("/api/chat", garbage) for _ in range(burst + 2)]
+        self.assertTrue(all(status == 422 for status in statuses[:burst]),
+                        f"expected the first {burst} to fail validation: {statuses}")
+        self.assertEqual(statuses[burst], 429,
+                         "a flood of malformed requests was not rate limited — the "
+                         f"limiter is running after body validation: {statuses}")
+
+
 class TestExpensiveEndpointsAreLimited(unittest.TestCase):
     """Every endpoint that costs money or warehouse time must declare a limit.
 
@@ -332,9 +449,13 @@ class TestExpensiveEndpointsAreLimited(unittest.TestCase):
         "server/routes/ingestion.py": [('/bootstrap"', "sweep"),
                                        ('/enrich/schemas"', "sweep"),
                                        ('/enrich/tables"', "sweep"),
+                                       ('/upload/schemas"', "sweep"),
+                                       ('/upload/tables"', "sweep"),
+                                       ('/upload/columns"', "sweep"),
                                        ('/canonicalize"', "generate"),
                                        ('/attribute"', "generate")],
-        "server/routes/inventory.py": [('/artifacts/sync"', "sweep")],
+        "server/routes/inventory.py": [('/artifacts/sync"', "sweep"),
+                                       ('/rules/test"', "generate")],
         "server/routes/live.py": [('/sync"', "sweep"), ('/sync-genie"', "sweep")],
     }
 
@@ -358,6 +479,52 @@ class TestExpensiveEndpointsAreLimited(unittest.TestCase):
         self.assertEqual(missing, [],
                          f"expensive endpoints without the expected rate limit: "
                          f"{missing}")
+
+    def test_every_warehouse_touching_post_is_limited(self):
+        """Derived from the code, not from a list I maintain by hand.
+
+        THE GAP THIS CAUGHT: the three CSV upload endpoints each parse a file and
+        run batched warehouse MERGEs, and all three shipped unlimited — the
+        hand-written inventory above only checked endpoints I had thought to list,
+        which is precisely the blind spot an inventory has. Any POST whose handler
+        reaches the warehouse must declare a limit.
+        """
+        import ast
+        from pathlib import Path
+
+        root = Path(__file__).parent.parent
+        # Functions that execute against the SQL warehouse.
+        warehouse_calls = {"run_sql", "_merge_rows", "run_statement"}
+        unlimited = []
+
+        for path in sorted((root / "server" / "routes").glob("*.py")):
+            text = path.read_text()
+            tree = ast.parse(text)
+            lines = text.split("\n")
+            for node in ast.walk(tree):
+                if not isinstance(node, ast.AsyncFunctionDef):
+                    continue
+                post = [d for d in node.decorator_list
+                        if isinstance(d, ast.Call)
+                        and getattr(d.func, "attr", "") == "post"]
+                if not post:
+                    continue
+                calls = {getattr(inner.func, "id", None)
+                         or getattr(inner.func, "attr", None)
+                         for inner in ast.walk(node)
+                         if isinstance(inner, ast.Call)}
+                if not (calls & warehouse_calls):
+                    continue
+                decorator_text = lines[post[0].lineno - 1]
+                if "limiter(" not in decorator_text:
+                    unlimited.append(
+                        f"server/routes/{path.name}:{post[0].lineno} "
+                        f"{node.name}()")
+
+        self.assertEqual(
+            unlimited, [],
+            "these POST endpoints reach the SQL warehouse but declare no rate "
+            f"limit, so concurrent runs can saturate it: {unlimited}")
 
     def test_every_llm_calling_module_is_covered(self):
         """A module that calls the model must appear in EXPECTED above.
