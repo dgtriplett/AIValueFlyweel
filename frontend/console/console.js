@@ -2081,6 +2081,20 @@
       <div id="result"></div>`;
 
     $("#kb-content").innerHTML = renderMarkdown(article.body_md || "*Empty.*");
+    // The renderer links every [[..]] identically because it cannot know which
+    // slugs resolve — only the server does. Marking the dead ones afterwards stops
+    // a link that looks live from sending the reader to an error page.
+    const dead = new Set((article.references || [])
+      .filter((reference) => !reference.exists)
+      .map((reference) => reference.slug));
+    $("#kb-content").querySelectorAll("a[data-slug]").forEach((link) => {
+      if (!dead.has(link.dataset.slug)) return;
+      const span = document.createElement("span");
+      span.className = "muted";
+      span.title = `No article named "${link.dataset.slug}" yet`;
+      span.textContent = `${link.textContent}?`;
+      link.replaceWith(span);
+    });
     kbRenderMeta(article);
 
     onActions(main, {

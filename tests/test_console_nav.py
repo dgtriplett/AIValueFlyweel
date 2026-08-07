@@ -256,7 +256,56 @@ class TestCssInvariants(unittest.TestCase):
                       "phone screen")
 
 
-class TestConsoleBundleIsValid(unittest.TestCase):
+class TestKnowledgeBaseView(unittest.TestCase):
+    """The KB view, including the markdown renderer's security property."""
+
+    def test_kb_and_proposals_are_routed(self):
+        for view in ("kb", "proposals"):
+            self.assertIn(f"{view}:", JS, f"{view} has no VIEWS entry")
+
+    def test_article_slug_is_addressable(self):
+        """An article is the thing people paste into Slack, so #kb/<slug> must
+        survive a cold load — verified in a browser against the live app."""
+        self.assertIn('name.startsWith("kb/")', JS)
+
+    def test_slug_hash_is_not_collapsed(self):
+        """The router rewrites the hash to the view name; that would turn
+        #kb/<slug> back into #kb and lose the address."""
+        self.assertIn('name === "kb" && current.startsWith("kb/")', JS)
+
+    def test_markdown_escapes_before_parsing(self):
+        """THE security property of the renderer.
+
+        Article bodies come from users and from the model. Escaping first and only
+        then re-introducing a fixed set of constructs means no input can inject
+        markup — by the time any pattern runs, every < > & " ' is an entity. If a
+        future edit ever moves a replace() ahead of the text() call, this breaks.
+        """
+        body = JS[JS.index("function renderMarkdown"):]
+        body = body[:body.index("\n  }")]
+        escape_at = body.index("text(source)")
+        first_replace = body.index(".replace(")
+        self.assertLess(escape_at, first_replace,
+                        "renderMarkdown must escape the source BEFORE any pattern "
+                        "runs, or article content can inject HTML")
+
+    def test_wiki_link_slug_is_restricted_before_reaching_an_attribute(self):
+        body = JS[JS.index("function renderMarkdown"):]
+        body = body[:body.index("\n  }")]
+        self.assertIn('replace(/[^\\w\\s-]/g, "")', body,
+                      "the wiki slug goes into an href and a data attribute, so it "
+                      "must be stripped to a safe character set first")
+
+    def test_dead_wiki_links_are_marked(self):
+        """Found in the browser on the live app: an unresolved [[link]] rendered
+        identically to a live one, so clicking it led to an error page. Only the
+        server knows which slugs resolve, so the marking happens after render."""
+        self.assertIn("reference.exists", JS)
+        self.assertIn("replaceWith(span)", JS)
+
+    def test_uploads_do_not_force_a_json_content_type(self):
+        """api() special-cases FormData; sending JSON headers breaks multipart."""
+        self.assertIn("options.body instanceof FormData", JS)
     def test_javascript_parses(self):
         """A syntax error ships and renders a blank page — there is no build step.
 
