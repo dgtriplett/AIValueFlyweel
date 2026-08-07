@@ -1195,6 +1195,7 @@
       ["glossary", "Glossary"],
       ["artifacts", "What's built"],
       ["rules", "Naming rules"],
+      ["branding", "Branding"],
     ];
     main.innerHTML = `
       <h2>Catalog</h2>
@@ -1223,6 +1224,7 @@
       else if (catalogTab === "glossary") await subGlossary(sub);
       else if (catalogTab === "artifacts") await subArtifacts(sub);
       else if (catalogTab === "rules") await subRules(sub);
+      else if (catalogTab === "branding") await subBranding(sub);
     } catch (error) {
       sub.innerHTML = banner("err", error.message);
     }
@@ -1482,6 +1484,278 @@
     });
   }
 
+
+  // ---------------------------------------------------------------------
+  // Research — cold-start a new account and calibrate the value model
+  //
+  // The backend shipped before this view did, which meant the feature existed
+  // only to anyone willing to curl it. This is the surface for it: research a
+  // company, review the calibrated assumptions WITH their provenance, and apply
+  // the ones you trust.
+  //
+  // The review table is the point. Every dollar figure in the app derives from
+  // these 34 numbers, so the screen is built around judging them — confidence
+  // badge, what it was derived from, and the reasoning — rather than just
+  // displaying them.
+  // ---------------------------------------------------------------------
+  async function viewResearch() {
+    main.innerHTML = `<p class="muted"><span class="spin"></span> Loading…</p>`;
+    const [profile, proposals] = await Promise.all([
+      api("/research/company").catch(() => ({ researched: false })),
+      api("/research/assumptions").catch(() => ({ assumptions: [], summary: {} })),
+    ]);
+
+    const s = proposals.summary || {};
+    const rows = proposals.assumptions || [];
+    const pending = rows.filter((r) => !r.applied);
+
+    const confidencePill = (c) => `<span class="pill ${
+      c === "high" ? "ok" : c === "medium" ? "warn" : "bad"}">${text(c || "low")}</span>`;
+
+    main.innerHTML = `
+      <h2>Research</h2>
+      <p class="lede">Name a utility and the app researches it, then calibrates the
+        34 value assumptions that drive every dollar figure. Nothing is applied until
+        you approve it.</p>
+      <div id="result"></div>
+
+      <section class="card">
+        <h3>${profile.researched ? "Re-run research" : "Research a company"}</h3>
+        <p class="step-why">Shipped as generic defaults, the value model describes a
+          hypothetical 2-million-customer utility — so every number is directionally
+          meaningless until it is scaled to a real company.</p>
+        <div class="row">
+          <div style="flex:1"><label for="rc-name">Company name</label>
+            <input id="rc-name" placeholder="e.g. Eversource Energy"
+              value="${text(profile.company_name || "")}" style="width:100%"></div>
+          <button class="action" data-act="research" data-busy="Researching…">
+            Research</button>
+        </div>
+        <div class="row" style="margin-top:10px">
+          <label class="row small" style="margin:0">
+            <input type="checkbox" id="rc-assume" checked style="width:auto">
+            Calibrate the value assumptions</label>
+          <label class="row small" style="margin:0">
+            <input type="checkbox" id="rc-lobs" checked style="width:auto">
+            Propose lines of business</label>
+        </div>
+        <p class="small muted" style="margin:10px 0 0">Use the full legal or operating
+          name. Takes up to a minute — it is two model calls.</p>
+      </section>
+
+      ${profile.researched ? `
+        <section class="card">
+          <h3>${text(profile.company_name)}</h3>
+          <div class="stat" style="margin-bottom:12px">
+            <div><span class="k">Type</span><span class="v" style="font-size:14px">${
+              text(profile.utility_type || "—")}</span></div>
+            <div><span class="k">Segments</span><span class="v" style="font-size:14px">${
+              text((profile.segments || []).join(", ") || "—")}</span></div>
+            <div><span class="k">Market</span><span class="v" style="font-size:14px">${
+              text(profile.iso_rto || "—")}</span></div>
+          </div>
+          <p class="small muted">${text(profile.description || "")}</p>
+          ${profile.regulator ? `<p class="small muted"><strong>Regulator:</strong> ${
+            text(profile.regulator)}</p>` : ""}
+          ${profile.research_notes ? banner("warn",
+            `Caveats from the research: ${profile.research_notes}`) : ""}
+        </section>` : ""}
+
+      ${rows.length ? `
+        <section>
+          <h3 class="small muted">Calibrated value assumptions</h3>
+          <div class="stat" style="margin:12px 0">
+            <div><span class="k">Calibrated</span><span class="v">${num(s.total)}</span></div>
+            <div><span class="k">Changed</span><span class="v">${num(s.changed)}</span></div>
+            <div><span class="k">High confidence</span><span class="v">${
+              num((s.by_confidence || {}).high)}</span></div>
+            <div><span class="k">Needs review</span><span class="v">${
+              num(s.needs_review)}</span></div>
+          </div>
+
+          ${s.needs_review
+            ? banner("warn", `${s.needs_review} value(s) are industry-typical rather `
+                + `than company-specific. They are still scaled to the right size of `
+                + `utility, but check them before quoting a number that depends on one.`)
+            : ""}
+
+          <div class="row" style="margin-bottom:12px">
+            <button class="action" data-act="apply-trusted" data-busy="Preparing…">
+              Apply high + medium confidence</button>
+            <button class="action secondary" data-act="apply-all" data-busy="Preparing…">
+              Apply all ${num(pending.length)}</button>
+            <button class="action secondary" data-act="apply-selected" data-busy="Preparing…">
+              Apply selected</button>
+          </div>
+
+          <table>
+            <thead><tr><th></th><th>Assumption</th><th class="num">Default</th>
+              <th class="num">Calibrated</th><th class="num">Change</th>
+              <th>Confidence</th><th>Basis &amp; reasoning</th></tr></thead>
+            <tbody>${rows.map((r) => `
+              <tr${r.applied ? ' style="opacity:.5"' : ""}>
+                <td><input type="checkbox" class="pick-key" value="${text(r.key)}"
+                  ${r.applied ? "disabled" : ""} style="width:auto"></td>
+                <td><strong>${text(r.label || r.key)}</strong>
+                  <div class="small muted mono">${text(r.key)}${
+                    r.unit ? ` · ${text(r.unit)}` : ""}</div></td>
+                <td class="num">${num(r.value_before)}</td>
+                <td class="num"><strong>${num(r.value_proposed)}</strong></td>
+                <td class="num small ${
+                  (r.pct_change || 0) > 0 ? "" : "muted"}">${
+                  r.pct_change === null || r.pct_change === undefined
+                    ? "—" : (r.pct_change > 0 ? "+" : "") + r.pct_change + "%"}</td>
+                <td>${confidencePill(r.confidence)}${
+                  r.applied ? ' <span class="pill ok">applied</span>' : ""}</td>
+                <td class="small muted">${text(r.basis || "")}${
+                  r.rationale ? `<div>${text(r.rationale)}</div>` : ""}</td>
+              </tr>`).join("")}</tbody>
+          </table>
+        </section>`
+        : (profile.researched
+            ? banner("info", "No calibrated assumptions on record. Re-run research "
+                + "with 'Calibrate the value assumptions' checked.")
+            : "")}`;
+
+    const propose = async (keys) => {
+      if (!keys.length) throw new Error("Nothing selected.");
+      const card = await api("/research/apply", {
+        method: "POST",
+        body: JSON.stringify({ run_id: proposals.run_id, keys }),
+      });
+      renderApplyCard(card);
+    };
+
+    onActions(main, {
+      research: async () => {
+        const name = $("#rc-name").value.trim();
+        if (!name) throw new Error("Enter a company name.");
+        const result = await api("/research/company", {
+          method: "POST",
+          body: JSON.stringify({
+            company_name: name,
+            calibrate_assumptions: $("#rc-assume").checked,
+            propose_lobs: $("#rc-lobs").checked,
+          }),
+        });
+        $("#result").innerHTML = banner("ok",
+          `Researched ${text(result.company.company_name)} — `
+          + `${num((result.assumption_summary || {}).total)} assumption(s) calibrated `
+          + `by ${text(result.model)}. Nothing applied yet.`)
+          + ((result.warnings || []).length
+            ? `<div class="card"><h3>Notes from the research</h3>
+                <ul class="tight small muted">${result.warnings.slice(0, 6)
+                  .map((w) => `<li>${text(w)}</li>`).join("")}</ul></div>` : "");
+        setTimeout(viewResearch, 1400);
+      },
+      "apply-trusted": () => propose(
+        pending.filter((r) => r.confidence !== "low").map((r) => r.key)),
+      "apply-all": () => propose(pending.map((r) => r.key)),
+      "apply-selected": () => propose(
+        [...document.querySelectorAll(".pick-key:checked")].map((i) => i.value)),
+    });
+
+    function renderApplyCard(card) {
+      $("#result").innerHTML = `
+        <div class="card" style="border-color:var(--lava)">
+          <h3>Confirm recalibration</h3>
+          <p class="small">${text(card.summary)}</p>
+          <p class="small muted">This changes every dollar figure in the portfolio at
+            once. Calibrated values are badged in Value &amp; Assumptions so anyone
+            can see where a number came from.</p>
+          <div class="row" style="margin-top:10px">
+            <button class="action" data-act="confirm" data-token="${text(card.token)}"
+              data-busy="Applying…">Confirm</button>
+            <button class="action secondary" data-act="cancel">Cancel</button>
+          </div>
+        </div>`;
+      onActions($("#result"), {
+        confirm: async (button) => {
+          const result = await api(`/confirm/${button.dataset.token}`,
+            { method: "POST" });
+          $("#result").innerHTML = banner("ok",
+            `Applied ${num(result.applied_count)} value(s). The portfolio has been `
+            + `re-quantified.`);
+          setTimeout(viewResearch, 1500);
+        },
+        cancel: () => { $("#result").innerHTML = ""; },
+      });
+    }
+  }
+
+  // ---------------------------------------------------------------------
+  // Branding — make the instance look like the customer's
+  // ---------------------------------------------------------------------
+  async function subBranding(host) {
+    const b = await api("/branding");
+    host.innerHTML = `
+      <p class="small muted">Show the customer's name and logo in the header, so the
+        app reads as theirs in a workshop. The name defaults to the researched company
+        when one exists.</p>
+      <div class="card" style="margin-top:14px">
+        <h3>Header</h3>
+        <div class="row">
+          <div style="flex:1"><label for="b-name">Display name
+            <span class="muted">(from ${text(b.source)})</span></label>
+            <input id="b-name" style="width:100%" placeholder="${text(b.display_name)}"
+              value="${text(b.source === "custom" ? b.display_name : "")}"></div>
+        </div>
+        <div class="row" style="margin-top:10px">
+          <div style="flex:1"><label for="b-sub">Subtitle</label>
+            <input id="b-sub" style="width:100%" value="${text(b.subtitle)}"></div>
+          <div><label for="b-accent">Accent</label>
+            <input id="b-accent" type="color" value="${text(b.accent_color)}"
+              style="width:56px;padding:2px"></div>
+          <button class="action" data-act="save" data-busy="Saving…">Save</button>
+        </div>
+      </div>
+      <div class="card">
+        <h3>Logo</h3>
+        ${b.has_logo
+          ? `<div class="row" style="margin-bottom:10px">
+              <img src="${text(b.logo_url)}?t=${Date.now()}" alt="Current logo"
+                style="max-height:44px;background:var(--navy-900);padding:6px;border-radius:4px">
+              <button class="action secondary" data-act="del-logo" data-busy="Removing…">
+                Remove</button></div>`
+          : `<p class="small muted">No logo uploaded.</p>`}
+        <div class="row" style="margin-top:8px">
+          <div><label for="b-logo">PNG, JPEG, GIF, WebP or SVG · max 2MB</label>
+            <input type="file" id="b-logo" accept="image/*"></div>
+          <button class="action" data-act="up-logo" data-busy="Uploading…">Upload</button>
+        </div>
+      </div>`;
+
+    onActions(host, {
+      save: async () => {
+        await api("/branding", {
+          method: "PUT",
+          body: JSON.stringify({
+            display_name: $("#b-name").value.trim() || null,
+            subtitle: $("#b-sub").value.trim() || null,
+            accent_color: $("#b-accent").value,
+          }),
+        });
+        $("#result").innerHTML = banner("ok",
+          "Saved. Reload to see it in the header.");
+      },
+      "up-logo": async () => {
+        const input = $("#b-logo");
+        if (!input.files || !input.files[0]) throw new Error("Choose an image first.");
+        const form = new FormData();
+        form.append("file", input.files[0]);
+        const r = await api("/branding/logo", { method: "POST", body: form });
+        $("#result").innerHTML = banner("ok",
+          `Uploaded ${Math.round(r.bytes / 1024)}KB. Reload to see it.`);
+        setTimeout(() => viewCatalog(), 900);
+      },
+      "del-logo": async () => {
+        await api("/branding/logo", { method: "DELETE" });
+        $("#result").innerHTML = banner("ok", "Logo removed.");
+        setTimeout(() => viewCatalog(), 700);
+      },
+    });
+  }
+
   // ---------------------------------------------------------------------
   // Admin — Demo Mode + instance state
   // ---------------------------------------------------------------------
@@ -1632,6 +1906,7 @@
   const VIEWS = {
     start: viewStart,
     ask: viewAsk,
+    research: viewResearch,
     coverage: viewCoverage,
     flow: viewFlow,
     catalog: viewCatalog,
@@ -1645,6 +1920,7 @@
     glossary: () => { catalogTab = "glossary"; return viewCatalog(); },
     artifacts: () => { catalogTab = "artifacts"; return viewCatalog(); },
     rules: () => { catalogTab = "rules"; return viewCatalog(); },
+    branding: () => { catalogTab = "branding"; return viewCatalog(); },
     // Back-compat: the merged onboarding flow replaced these two separate views,
     // so old bookmarks and the /console#setup links in the docs still land
     // somewhere sensible instead of silently falling through to the default.
