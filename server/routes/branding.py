@@ -19,6 +19,7 @@ import re
 from fastapi import APIRouter, File, HTTPException, Request, Response, UploadFile
 from pydantic import BaseModel, Field
 
+from .. import accounts
 from ..common import current_user, write_audit
 from ..db import db
 
@@ -64,14 +65,15 @@ async def get_branding():
             "SELECT display_name, subtitle, accent_color, logo_mime, "
             "logo_filename, updated_at, "
             "(logo_bytes IS NOT NULL) AS has_logo "
-            "FROM branding WHERE id = 1")
+            "FROM branding WHERE account_id = $1", await accounts.current())
     except Exception:  # noqa: BLE001 - table may not exist on an un-migrated install
         pass
 
     company = None
     try:
         profile = await db.fetchrow(
-            "SELECT company_name FROM company_profile WHERE id = 1")
+            "SELECT company_name FROM company_profile WHERE account_id = $1",
+            await accounts.current())
         company = profile["company_name"] if profile else None
     except Exception:  # noqa: BLE001
         pass
@@ -105,16 +107,18 @@ async def set_branding(body: BrandingIn, request: Request):
                  f"got {accent!r}")
     actor = current_user(request)
     await db.execute("""
-        INSERT INTO branding (id, display_name, subtitle, accent_color, updated_by)
-        VALUES (1, $1, $2, $3, $4)
-        ON CONFLICT (id) DO UPDATE SET
+        INSERT INTO branding (account_id, display_name, subtitle, accent_color,
+                              updated_by)
+        VALUES ($5, $1, $2, $3, $4)
+        ON CONFLICT (account_id) DO UPDATE SET
           display_name = EXCLUDED.display_name,
           subtitle = EXCLUDED.subtitle,
           accent_color = EXCLUDED.accent_color,
           updated_by = EXCLUDED.updated_by,
           updated_at = now()
     """, (body.display_name or "").strip() or None,
-        (body.subtitle or "").strip() or None, accent, actor)
+        (body.subtitle or "").strip() or None, accent, actor,
+        await accounts.current())
     await write_audit("branding", None, "update", actor, body.model_dump())
     return await get_branding()
 
@@ -149,13 +153,14 @@ async def upload_logo(request: Request, file: UploadFile = File(...)):
 
     actor = current_user(request)
     await db.execute("""
-        INSERT INTO branding (id, logo_bytes, logo_mime, logo_filename, updated_by)
-        VALUES (1, $1, $2, $3, $4)
-        ON CONFLICT (id) DO UPDATE SET
+        INSERT INTO branding (account_id, logo_bytes, logo_mime, logo_filename,
+                              updated_by)
+        VALUES ($5, $1, $2, $3, $4)
+        ON CONFLICT (account_id) DO UPDATE SET
           logo_bytes = EXCLUDED.logo_bytes, logo_mime = EXCLUDED.logo_mime,
           logo_filename = EXCLUDED.logo_filename,
           updated_by = EXCLUDED.updated_by, updated_at = now()
-    """, content, mime, file.filename, actor)
+    """, content, mime, file.filename, actor, await accounts.current())
     await write_audit("branding", None, "upload_logo", actor,
                       {"bytes": len(content), "mime": mime})
     return {"ok": True, "bytes": len(content), "mime": mime,
@@ -188,7 +193,8 @@ async def serve_logo():
     row = None
     try:
         row = await db.fetchrow(
-            "SELECT logo_bytes, logo_mime FROM branding WHERE id = 1")
+            "SELECT logo_bytes, logo_mime FROM branding WHERE account_id = $1",
+            await accounts.current())
     except Exception:  # noqa: BLE001
         pass
     if row is None or not row["logo_bytes"]:
@@ -213,6 +219,7 @@ async def delete_logo(request: Request):
     actor = current_user(request)
     await db.execute(
         "UPDATE branding SET logo_bytes=NULL, logo_mime=NULL, logo_filename=NULL, "
-        "updated_by=$1, updated_at=now() WHERE id=1", actor)
+        "updated_by=$1, updated_at=now() WHERE account_id=$2", actor,
+        await accounts.current())
     await write_audit("branding", None, "delete_logo", actor)
     return await get_branding()

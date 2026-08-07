@@ -92,7 +92,30 @@ def compute_realized(uc_row: dict, assumptions: dict[str, float]):
 
 
 async def load_assumptions() -> dict[str, float]:
-    rows = await db.fetch("SELECT key, value FROM value_assumptions")
+    """The current account's calibrated assumptions.
+
+    Scoped, because this is THE customer-specific input: Eversource's SAIDI minute
+    value and National Grid's are different numbers, and an unscoped read here would
+    quantify one utility's portfolio with another's assumptions. Every dollar figure
+    in the app flows through this function, so getting the scope wrong would be
+    wrong everywhere at once and obvious nowhere.
+
+    Rows with a NULL account_id are shared defaults, and an account's own row wins —
+    so a fresh account starts on the seeded 34 and diverges only where it has been
+    calibrated.
+    """
+    from . import accounts
+
+    account_id = await accounts.current()
+    if account_id is None:
+        rows = await db.fetch("SELECT key, value FROM value_assumptions")
+    else:
+        rows = await db.fetch(
+            """SELECT DISTINCT ON (key) key, value
+               FROM value_assumptions
+               WHERE account_id = $1 OR account_id IS NULL
+               -- account-specific first, so DISTINCT ON keeps it over the default
+               ORDER BY key, (account_id IS NULL)""", account_id)
     return {r["key"]: float(r["value"]) for r in rows}
 
 

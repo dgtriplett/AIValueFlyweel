@@ -112,10 +112,64 @@ def _as_list(value) -> list:
     return []
 
 
-async def readiness_map() -> dict[int, dict]:
+async def ready_assets(status_override: dict[int, str] | None = None) -> list[int]:
+    """Asset ids that count as READY for the current account.
+
+    One place decides this, because it is the input to every readiness answer in the
+    app. Before accounts existed it was `da.ingestion_status IN (...)` inline in each
+    query; per-account status made that wrong in eight places at once.
+
+    Reads asset_status_by_account, which resolves the account's own row over the
+    shared column, and falls back to the plain column on a pre-migration database so
+    an un-upgraded install keeps working.
+
+    `status_override` is applied LAST and wins: it is the caller's hypothesis
+    ("suppose we landed asset 42"), and an override that lost to stored state would
+    make the simulator silently report the present instead of the projection.
+    """
+    from . import accounts
+
+    account_id = await accounts.current()
+    statuses: dict[int, str] = {}
+    if account_id is not None:
+        try:
+            rows = await db.fetch(
+                "SELECT data_asset_id, ingestion_status FROM asset_status_by_account "
+                "WHERE account_id = $1", account_id)
+            statuses = {r["data_asset_id"]: r["ingestion_status"] for r in rows}
+        except Exception:  # noqa: BLE001 - view absent before migration 009
+            statuses = {}
+    if not statuses:
+        rows = await db.fetch("SELECT id, ingestion_status FROM data_assets")
+        statuses = {r["id"]: r["ingestion_status"] for r in rows}
+
+    if status_override:
+        statuses.update(status_override)
+    return [asset_id for asset_id, status in statuses.items()
+            if status in READY_STATUSES]
+
+async def readiness_map(
+    status_override: dict[int, str] | None = None,
+) -> dict[int, dict]:
     """Return {use_case_id: {readiness, ready_pct, required_total, required_ready,
     prereqs_total, prereqs_built, pending_prereqs:[{id,title}],
-    requirement_model, pending_domains:[{name,label}]}}."""
+    requirement_model, pending_domains:[{name,label}]}}.
+
+    Status is read PER ACCOUNT via asset_status_by_account, so two customers'
+    readiness is computed from their own landed sources against the shared catalog.
+
+    `status_override` maps data_asset_id -> hypothetical status and is what powers
+    the what-if simulator: "if we landed the OMS, what turns shovel-ready?" It runs
+    the real readiness logic against a projected world rather than duplicating the
+    dual-path rules in a second implementation — a parallel copy would answer the
+    hypothetical differently from the actual, which is worse than not having it.
+    """
+    # Which assets count as ready for THIS account, with any hypothetical override
+    # applied. Resolved once here and passed into both path queries as an int[], so
+    # the account rule and the what-if projection live in exactly one place instead
+    # of being repeated in every WHERE clause.
+    ready_asset_ids = await ready_assets(status_override)
+
     # --- MODULE path counts (CHUNK A semantics, unchanged) -----------------
     rows = await db.fetch(
         """
@@ -124,13 +178,12 @@ async def readiness_map() -> dict[int, dict]:
                COUNT(ura.data_asset_id) FILTER (WHERE ura.criticality = 'required') AS required_total,
                COUNT(ura.data_asset_id) FILTER (
                    WHERE ura.criticality = 'required'
-                     AND da.ingestion_status IN ('curated','governed')
+                     AND ura.data_asset_id = ANY($1::int[])
                ) AS required_ready
         FROM use_cases uc
         LEFT JOIN uc_requires_asset ura ON ura.use_case_id = uc.id
-        LEFT JOIN data_assets da ON da.id = ura.data_asset_id
         GROUP BY uc.id, uc.requires_locked
-        """
+        """, ready_asset_ids
     )
 
     # --- DOMAIN path counts (CHUNK B) --------------------------------------
@@ -147,11 +200,10 @@ async def readiness_map() -> dict[int, dict]:
                    urd.domain_id,
                    dd.name  AS domain_name,
                    dd.label AS domain_label,
-                   COALESCE(bool_or(da.ingestion_status IN ('curated','governed')), false) AS satisfied
+                   COALESCE(bool_or(asd.data_asset_id = ANY($1::int[])), false) AS satisfied
             FROM uc_requires_domain urd
             JOIN data_domains dd ON dd.id = urd.domain_id
             LEFT JOIN asset_serves_domain asd ON asd.domain_id = urd.domain_id
-            LEFT JOIN data_assets da ON da.id = asd.data_asset_id
             WHERE urd.necessity = 'required'
               AND COALESCE(dd.is_active, true) = true
             GROUP BY urd.use_case_id, urd.domain_id, dd.name, dd.label
@@ -168,7 +220,7 @@ async def readiness_map() -> dict[int, dict]:
                )                                 AS pending_domains
         FROM domain_satisfaction
         GROUP BY use_case_id
-        """
+        """, ready_asset_ids
     )
     by_domain = {r["use_case_id"]: r for r in domain_rows}
 

@@ -74,6 +74,18 @@ written back to Lakebase, which stays the portfolio's system of record.
   rollup. The migration merges any pre-existing duplicates (re-pointing their child
   rows and writing an audit trail) before adding the index, so it cannot abort on
   real customer data.
+- **Accounts (multi-tenancy)** — `009_accounts.sql`: accounts,
+  account_asset_status, and the `asset_status_by_account` view. The
+  customer-specific tables (company_profile, branding, value_assumptions, research,
+  kb_*) gained an `account_id`; the reference library (use_cases, data_assets,
+  data_domains, the edges) stays shared, because it is the product's IP and copying
+  it per account would mean applying every catalog fix N times.
+  `data_assets.ingestion_status` was the hard case — per-customer state on a shared
+  table — so it moved to `account_asset_status` with the column kept as the
+  default-account fallback, resolved through the view so one COALESCE serves every
+  query instead of eight copies. A NULL `account_id` means "visible to all", which
+  is how a seeded folder or a global glossary term serves every tenant without
+  duplication.
 - **Migration ledger** — `schema_migrations`, created by `server/migrator.py`
   rather than by a numbered migration, since it must exist before the ledger can
   be consulted.

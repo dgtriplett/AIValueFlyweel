@@ -26,6 +26,7 @@ from __future__ import annotations
 
 from typing import Awaitable, Callable
 
+from . import accounts
 from .db import db
 
 
@@ -255,7 +256,9 @@ async def _next_best(args: dict, actor: str) -> dict:
 
 
 async def _company_profile(args: dict, actor: str) -> dict:
-    row = await db.fetchrow("SELECT * FROM company_profile WHERE id = 1")
+    row = await db.fetchrow(
+        "SELECT * FROM company_profile WHERE account_id = $1",
+        await accounts.current())
     if row is None:
         return {"researched": False,
                 "note": "No company researched yet. Research can calibrate the "

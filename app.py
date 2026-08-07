@@ -44,6 +44,8 @@ from server.routes import (
     branding,
     knowledge,
     proposals,
+    accounts as accounts_routes,
+    whatif,
 )
 
 # Install handlers before anything logs. JSON in Databricks Apps, text locally;
@@ -99,12 +101,19 @@ app = FastAPI(title="Grid Atlas", version="0.1.0", lifespan=lifespan)
 # request with status + duration. Added before the routers so it wraps all of them.
 logging_setup.install_middleware(app)
 
+# Resolves which customer's data this request is about, into a ContextVar the value
+# engine and readiness read. Added AFTER the logging middleware so account-resolution
+# warnings carry a request id.
+from server import accounts as _accounts  # noqa: E402
+_accounts.install_middleware(app)
+
 # --- API routers -----------------------------------------------------------
 for module in (lobs, data_assets, use_cases, dependencies, values, roadmap,
                comments, funding_requests, impact, value_assumptions, genie, agents,
                analytics, live, onboarding, joint_funding, source_recommendations,
                domains, ingestion, generate, setup, taxonomy, research,
-               flow, inventory, chat, branding, knowledge, proposals):
+               flow, inventory, chat, branding, knowledge, proposals,
+               accounts_routes, whatif):
     app.include_router(module.router, prefix="/api")
 
 # Secondary routers whose paths don't sit under their module's own prefix:

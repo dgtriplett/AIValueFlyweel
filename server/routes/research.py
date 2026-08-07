@@ -28,6 +28,7 @@ import json
 from fastapi import APIRouter, Depends, HTTPException, Request
 from pydantic import BaseModel, Field
 
+from .. import accounts
 from .. import confirm as cf
 from .. import research as rs
 from ..common import current_user, rows_to_list, write_audit
@@ -119,8 +120,8 @@ async def research_company(body: ResearchIn, request: Request):
                (id, company_name, utility_type, segments, service_territory,
                 regulator, iso_rto, description, research_notes, researched_at,
                 researched_by, model)
-               VALUES (1,$1,$2,$3,$4,$5,$6,$7,$8,now(),$9,$10)
-               ON CONFLICT (id) DO UPDATE SET
+               VALUES ($11,$1,$2,$3,$4,$5,$6,$7,$8,now(),$9,$10)
+               ON CONFLICT (account_id) DO UPDATE SET
                  company_name=EXCLUDED.company_name,
                  utility_type=EXCLUDED.utility_type,
                  segments=EXCLUDED.segments,
@@ -228,7 +229,9 @@ async def research_company(body: ResearchIn, request: Request):
 
 @router.get("/company")
 async def get_company():
-    row = await db.fetchrow("SELECT * FROM company_profile WHERE id = 1")
+    row = await db.fetchrow(
+        "SELECT * FROM company_profile WHERE account_id = $1",
+        await accounts.current())
     if row is None:
         return {"researched": False,
                 "hint": "POST /api/research/company with a company name."}
@@ -312,7 +315,9 @@ async def propose_apply(body: ApplyIn, request: Request):
             + (f"Unknown keys: {sorted(wanted - {r['key'] for r in rows})}"
                if wanted else "The proposals match the current values."))
 
-    profile = await db.fetchrow("SELECT company_name FROM company_profile WHERE id = 1")
+    profile = await db.fetchrow(
+        "SELECT company_name FROM company_profile WHERE account_id = $1",
+        await accounts.current())
     company = profile["company_name"] if profile else "this utility"
     by_confidence: dict[str, int] = {}
     for row in chosen:
@@ -373,7 +378,9 @@ async def execute_apply_research(payload: dict, actor: str) -> dict:
 
     created_lobs = []
     if payload.get("apply_lobs"):
-        profile = await db.fetchrow("SELECT segments FROM company_profile WHERE id = 1")
+        profile = await db.fetchrow(
+            "SELECT segments FROM company_profile WHERE account_id = $1",
+            await accounts.current())
         segments = list(profile["segments"] or []) if profile else []
         mapping = {
             "generation": ("Generation", "Owned generation fleet operations."),

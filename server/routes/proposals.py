@@ -31,6 +31,7 @@ import logging
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
 
+from .. import accounts
 from .. import confirm as cf
 from .. import knowledge as kb
 from .. import proposals as pr
@@ -138,7 +139,9 @@ async def _gather_context(use_case_id: int) -> tuple[dict, dict]:
         WHERE e.to_use_case_id = $1 ORDER BY up.title
     """, use_case_id)
 
-    company = await db.fetchrow("SELECT * FROM company_profile WHERE id = 1")
+    company = await db.fetchrow(
+        "SELECT * FROM company_profile WHERE account_id = $1",
+        await accounts.current())
     lob = None
     if use_case.get("lob_id"):
         lob_row = await db.fetchrow("SELECT name FROM lobs WHERE id = $1",
