@@ -320,5 +320,93 @@ class TestKnowledgeBaseView(unittest.TestCase):
         self.assertIn('$("#nav")', JS)
 
 
+class TestSpaGroupedNav(unittest.TestCase):
+    """The SPA at / must carry the grouped nav and link to the new features.
+
+    THE GAP THIS CLOSES: every nav improvement this session went into /console. The
+    SPA is the app's front door, and it still showed nine flat tabs plus a link
+    labelled "Get Started & Discovery" — a console tab that no longer exists under
+    that name — with nothing pointing at the knowledge base or the proposal agent.
+    Both features were invisible from the first screen a customer sees.
+
+    The SPA's React source is not in this repo, so the change is a patch to the
+    committed bundle applied by a re-runnable script. These tests guard the two ways
+    that goes wrong: the patch silently not being applied, and the patched bundle not
+    parsing — which would serve a blank page to every user.
+    """
+
+    @classmethod
+    def setUpClass(cls):
+        html = (ROOT / "frontend" / "dist" / "index.html").read_text()
+        match = re.search(r"/assets/(index-[\w-]+\.js)", html)
+        assert match, "index.html references no entry bundle"
+        cls.bundle_name = match.group(1)
+        cls.bundle = (ROOT / "frontend" / "dist" / "assets"
+                      / cls.bundle_name).read_text(errors="surrogateescape")
+
+    def test_the_entry_bundle_is_patched(self):
+        """index.html's bundle specifically — not merely one of the chunks.
+
+        assets/ holds several index-*.js files and only the one index.html loads is
+        served. Patching a different chunk would pass a naive check while changing
+        nothing a user sees.
+        """
+        self.assertIn("gaGroupedNav", self.bundle,
+                      f"{self.bundle_name} (the bundle index.html loads) does not "
+                      "carry the grouped nav — run scripts/patch_spa_grouped_nav.py")
+
+    def test_links_to_the_knowledge_base_and_proposals(self):
+        for href in ("/console/#kb", "/console/#proposals"):
+            self.assertIn(href, self.bundle,
+                          f"the SPA does not link to {href}, so that feature is "
+                          "invisible from the app's front door")
+
+    def test_the_stale_console_label_is_gone(self):
+        """"Get Started & Discovery" was a console tab that has been merged away."""
+        self.assertNotIn("Get Started & Discovery", self.bundle)
+
+    def test_groups_reuse_the_existing_tab_array(self):
+        """The patch must not restate the tab list.
+
+        Looking tabs up in Dg by id means a reordered or extended Dg still resolves,
+        and tab state and routing stay untouched — the patch changes only how the
+        tabs are presented.
+        """
+        self.assertIn("Dg.find(x=>x.id===", self.bundle)
+
+    def test_patched_bundle_parses(self):
+        """A bundle that does not parse is a blank page for every user.
+
+        The first version of this patch injected a statement before the `Dg` binding
+        — which sits inside a chained `const` declaration — and produced exactly
+        that. Checked as .mjs because the bundle is an ES module and `node --check`
+        rejects `export` in a .js file.
+        """
+        import shutil
+        import subprocess
+        import tempfile
+
+        if shutil.which("node") is None:
+            self.skipTest("node not installed")
+        with tempfile.NamedTemporaryFile("w", suffix=".mjs", delete=False,
+                                         errors="surrogateescape") as handle:
+            handle.write(self.bundle)
+            temp = handle.name
+        try:
+            result = subprocess.run(["node", "--check", temp],
+                                    capture_output=True, text=True)
+            self.assertEqual(result.returncode, 0,
+                             "the patched SPA bundle does not parse")
+        finally:
+            os.unlink(temp)
+
+    def test_the_patch_script_is_idempotent_and_checkable(self):
+        source = (ROOT / "scripts" / "patch_spa_grouped_nav.py").read_text()
+        self.assertIn("--check", source, "needs a no-op status mode for CI")
+        self.assertIn("is_patched", source, "must skip an already-patched bundle")
+        self.assertIn("_syntax_error", source,
+                      "must refuse to WRITE a bundle that does not parse")
+
+
 if __name__ == "__main__":
     unittest.main()

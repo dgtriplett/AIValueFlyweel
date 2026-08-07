@@ -127,6 +127,13 @@ def main() -> int:
         results.append(run("lint (ruff)", ["ruff", "check", "."],
                            optional_tool="ruff"))
         results.append(check_console_bundle())
+        # The SPA bundle is committed and serves the app's front door. An unpatched
+        # one silently reverts the grouped nav and hides the knowledge base and the
+        # proposal agent — features become invisible without anything failing.
+        results.append(run("SPA nav patch applied",
+                           [sys.executable, str(ROOT / "scripts"
+                                                / "patch_spa_grouped_nav.py"),
+                            "--check"]))
 
     print("\n" + "=" * 62)
     for result in results:
