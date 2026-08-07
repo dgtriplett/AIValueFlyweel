@@ -25,6 +25,7 @@ catalog, 63 data domains, 34 value assumptions** — so day one is populated.
 ## Table of contents
 - [What's inside](#whats-inside)
 - [Reference architecture](#reference-architecture)
+- [Operations](OPERATIONS.md)
 - [The pipeline](#the-pipeline)
 - [Tech stack](#tech-stack)
 - [Repository layout](#repository-layout)
@@ -55,12 +56,25 @@ catalog, 63 data domains, 34 value assumptions** — so day one is populated.
 ### Discovery & agents *(the console, at `/console`)*
 | Area | What it does |
 |---|---|
-| **Setup & health** | Probes every dependency — Lakebase, warehouse, Unity Catalog, serving endpoint, system tables, Genie — and prints the exact GRANT statements for anything failing. |
-| **Discovery** | Upload multi-workspace metadata, AI-enrich it, normalize source systems, attribute discovered tables to catalog modules. |
-| **Source mapping** | Review and correct the source-system labels the normalizer wasn't confident about. A human correction is permanent. |
-| **Data domains** | 63 semantic data needs with per-domain satisfaction, plus gaps ranked by the value they block. |
+| **Get started** | Guided setup: probes every dependency — Lakebase, warehouse, Unity Catalog, serving endpoint, system tables, Genie — and prints the exact GRANT statements for anything failing. Also Excel export/import for bulk offline population, and a downloadable extractor for workspaces this one cannot reach. |
+| **Ask** | Chat over the portfolio with 12 typed tools. Read tools answer; write tools only ever *propose*, landing in the same confirm gate as every other agent write. |
+| **Company research** | Research a utility and **recalibrate all 34 value assumptions from the findings**, each with a confidence level and its derivation. Correctly zeroes what does not apply (fuel and capacity for a wires-only utility). Nothing is applied without confirmation. |
+| **Coverage** | 63 semantic data needs with per-domain satisfaction, plus gaps ranked by the value they block. |
+| **Flow** | Sankey from source → domain → use case → line of business, weighted by dollars, plus a glossary that projects domains as derived terms. |
+| **Catalog** | Seven surfaces: data needs, source mapping (a human correction is permanent), taxonomy, glossary, artifact inventory, classification rules, and branding. |
 | **Taxonomy** | AI classification across integration pattern, criticality, and vendor type. Effective-dated, so history survives a reclassification. |
 | **Generate use cases** | Author new use cases grounded in real data availability, with a `ready` / `gap` lens. Preview → approve → create; nothing is written without an explicit yes. |
+| **Branding** | Set the customer's name, subtitle, accent colour, and logo, so the app reads as theirs in a workshop. Falls back to the researched company name automatically. |
+| **Admin** | Audit log, schema state, and the operational surface below. |
+
+### Operations
+| Concern | How it is handled |
+|---|---|
+| **Schema changes** | Versioned migrations with a checksum ledger, applied **at most once** by [`scripts/migrate.py`](scripts/migrate.py) as the database owner. The app holds DML but not DDL and never applies a migration; it reports drift instead of guessing. |
+| **Logs** | Structured JSON with a request id on every line, echoed as `X-Request-Id`. `LOG_LEVEL` turns up detail without a redeploy. OAuth tokens are redacted in the formatter, not at call sites. |
+| **Rate limits** | Per-actor token buckets on the endpoints that cost money or warehouse time, plus a per-request query budget bounding one chat turn's share of the connection pool. Guard rails against accidental load, not a quota — set `RATE_LIMITS=off` for a demo. |
+| **Human approval** | Every agent-initiated write goes through a single-use, server-side, 10-minute propose/confirm token. The client's authority is one bit: yes or no to what it was shown. |
+| **CI** | [`scripts/check.py`](scripts/check.py) runs every gate — tests, lint, secret scan, console syntax, and a clean import against the real dependencies. The workflow only calls it, so the gates are identical locally and in CI. |
 
 ---
 
@@ -79,14 +93,18 @@ layer, with the **Foundation Model API** behind the agents.
                                         │ HTTPS (Databricks App auth)
 ┌───────────────────── Databricks App: "grid-atlas" ──────────────────────────┐
 │  FastAPI (app.py)                                                            │
+│   Middleware: request id → every log line + X-Request-Id                     │
 │   /api/*  routers (server/routes/)                                           │
 │     PORTFOLIO  lobs · use_cases · data_assets · dependencies · values ·      │
 │                roadmap · joint_funding · value_assumptions · analytics ·     │
 │                impact · comments · funding_requests · onboarding · genie     │
-│     DISCOVERY  ingestion · domains · taxonomy · setup                        │
-│     AGENTS     agents · generate · confirm                                   │
+│     DISCOVERY  ingestion · domains · taxonomy · setup · inventory · flow     │
+│     AGENTS     agents · generate · chat · research · confirm                 │
+│     INSTANCE   branding                                                      │
 │   Domain logic: value_engine · readiness · phase · normalization ·           │
-│                 enrichment · generation · taxonomy · confirm · lineage       │
+│                 enrichment · generation · research · chat_tools · rules ·    │
+│                 taxonomy · confirm · lineage                                 │
+│   Cross-cutting: logging_setup · limits (rate + query budget) · migrator     │
 │   Auth: dual-mode — service principal in-app, CLI profile locally            │
 └────────┬──────────────────┬───────────────────────────┬─────────────────────┘
          │ asyncpg          │ Statement Execution API   │ chat completions /
@@ -105,7 +123,11 @@ layer, with the **Foundation Model API** behind the agents.
  │  roadmap       │  │  discovered_tables        │  │  • roadmap waves   │
  │  taxonomy      │  │  enrichment staging       │  │  • canonicalize    │
  │  aliases       │  │                           │  │  • classify        │
- │  confirm_tokens│  │ Genie mirror (portfolio)  │  │                    │
+ │  confirm_tokens│  │ Genie mirror (portfolio)  │  │  • chat (12 tools) │
+ │  research_runs │  │                           │  │  • company research│
+ │  branding      │  │                           │  │                    │
+ │  chat_*        │  │                           │  │                    │
+ │schema_migrations│ │                           │  │                    │
  └────────────────┘  └──────────────────────────┘  └────────────────────┘
    your workspace       your catalog, your govern.    heuristic fallback
 ```
@@ -125,6 +147,14 @@ layer, with the **Foundation Model API** behind the agents.
 - **Graceful degradation, everywhere.** No Lakebase → demo mode. No
   `ATLAS_CATALOG` → discovery disabled, curated catalog still works. No serving
   endpoint → heuristic agents. No Genie space → placeholder. Nothing cascades.
+- **Schema changes are explicit.** Migrations carry a checksum and apply at most
+  once, run by the install step as the database owner. Because the app cannot
+  execute DDL, a restart can never replay a migration — the failure mode where a
+  non-idempotent backfill silently destroys data on a reboot nobody watched.
+- **Supportable.** One request id ties together every log line, the response
+  header, and the 429 if there was one, so a user report maps to a specific
+  request without reproducing it. Secrets are redacted in the formatter, so a
+  token in an unexamined exception string does not reach the log.
 
 See [`ARCHITECTURE.md`](ARCHITECTURE.md) for the layer-by-layer breakdown.
 
@@ -190,19 +220,28 @@ wrong:
 ├── requirements.txt
 ├── server/
 │   ├── config.py               # Dual-mode auth + settings
-│   ├── db.py                   # asyncpg pool + OAuth refresh
+│   ├── db.py                   # asyncpg pool + OAuth refresh + budget charging
+│   ├── logging_setup.py        # JSON logs, request ids, secret redaction
+│   ├── limits.py               # Per-actor rate limits + query budgets
+│   ├── migrator.py             # Migration ledger, apply-once, drift detection
 │   ├── value_engine.py         # Parameterized value model
 │   ├── readiness.py            # Dual-path readiness (domain / module)
 │   ├── normalization.py        # 5-stage source-system canonicalization
 │   ├── enrichment.py           # Staged ai_query() SQL builders
 │   ├── generation.py           # Use-case prompts + candidate validation
+│   ├── research.py             # Company research + assumption calibration
+│   ├── chat_tools.py           # 12 typed tools for the chat assistant
+│   ├── rules.py                # Classification rules (first-match-wins)
 │   ├── taxonomy.py             # 3-dimension classification
 │   ├── confirm.py              # Single-use propose/confirm tokens
 │   ├── lineage.py, live.py     # System-table reads + Genie mirror
-│   ├── migrations/             # 001_init · 002_domains · 003_discovery · 004_agents
+│   ├── migrations/             # 001_init … 006_branding
 │   └── routes/                 # One module per domain area
 ├── scripts/
 │   ├── deploy.py               # One-shot deploy (interactive or scripted)
+│   ├── migrate.py              # Apply migrations as the database owner
+│   ├── check.py                # Every CI gate, runnable locally
+│   ├── check_no_secrets.py     # Credential / workspace-value scan
 │   ├── seed_clean.py           # Clean day-1 seed
 │   ├── seed_demo.py            # Populated walkthrough seed
 │   ├── seed_lib.py             # Shared loader + domain derivation
@@ -212,7 +251,8 @@ wrong:
 ├── frontend/
 │   ├── dist/                   # Pre-built SPA (COMMITTED — served by the app)
 │   └── console/                # Operator console (plain HTML/JS, no build)
-├── tests/                      # 281 stdlib-only tests + a local dev server
+├── tests/                      # stdlib-only test suite + a local dev server
+├── .github/workflows/ci.yml    # Calls scripts/check.py — no logic of its own
 └── ARCHITECTURE.md · INSTALL.md · DEMO_MODE.md · DELTA_SHARING.md · LICENSE.md
 ```
 
@@ -264,6 +304,13 @@ with empty values.
 | `GENIE_SPACE_ID` | Genie space over the portfolio mirror. | Genie |
 | `GENIE_MIRROR_CATALOG` / `GENIE_MIRROR_SCHEMA` | UC target for the mirror. | Genie |
 | `DEMO_MODE` | Header toggle + `/api/demo/*`. **Ship `off`** — it can reset the portfolio. | no |
+| `LOG_LEVEL` | `INFO` normally; `DEBUG` raises detail on a running app with no redeploy. | no |
+| `RATE_LIMITS` | `on` by default. Set `off` for a demo where clicking fast is deliberate. | no |
+| `DATABRICKS_PROFILE` | **Local development only.** The CLI profile used when not running inside Databricks Apps, where the service principal is injected instead. | local |
+
+`app.yaml` shipping empty is enforced by a test, not a convention — it has caught
+a real regression where a Lakebase host, a service-principal id, and `DEMO_MODE=on`
+were committed.
 
 ---
 
@@ -287,12 +334,20 @@ the domain layer is useful immediately without anyone re-authoring 240 use cases
 ## Testing
 
 ```bash
-python3 -m unittest discover -s tests -v      # 281 tests, ~0.15s
+python3 scripts/check.py                      # every CI gate
+python3 -m unittest discover -s tests         # just the tests, <1s
 ```
 
 Standard library only — no pytest, no containers, no database, no network. See
 [`tests/README.md`](tests/README.md) for what each file covers and why the DB is
 faked rather than provisioned.
+
+`scripts/check.py` is the single definition of "does this repo pass": tests, lint,
+a secret scan, a syntax check of the operator console, and a clean import of
+`app.py` against the **real** dependencies (the suite stubs `asyncpg`/`openai`, so
+that last gate is what catches "works in tests, crashes on boot"). CI only calls
+this script, so the gates are identical on a laptop and in CI, and a missing tool
+is reported as *skipped* rather than counted as a pass.
 
 To work on the UI without a workspace:
 
@@ -307,6 +362,7 @@ python3 tests/serve_local.py --port 8000       # then open /console
 | Doc | Contents |
 |---|---|
 | [`INSTALL.md`](INSTALL.md) | Step-by-step deploy, manual and scripted, including the GRANTs. |
+| [`OPERATIONS.md`](OPERATIONS.md) | Running it for someone else: migrations, logs, diagnosing a report, rate limits, upgrades, common failures. |
 | [`ARCHITECTURE.md`](ARCHITECTURE.md) | Layer-by-layer architecture, data flow, security posture. |
 | [`schema-extractor/README.md`](schema-extractor/README.md) | The multi-workspace metadata sweep. |
 | [`tests/README.md`](tests/README.md) | Test suite map and testing approach. |

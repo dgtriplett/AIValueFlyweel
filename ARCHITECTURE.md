@@ -59,7 +59,12 @@ written back to Lakebase, which stays the portfolio's system of record.
   value_assumptions, roadmap_items, comments, funding_requests, audit_log.
 - **Discovery state** — `003_discovery.sql`: discovered_schemas,
   discovered_tables, data_asset_aliases, asset_taxonomy, ingestion_runs.
-- **Agent state** — `004_agents.sql`: confirm_tokens, uc_generation_previews.
+- **Agent state** — `004_agents.sql`: confirm_tokens, uc_generation_previews,
+  chat_conversations, chat_messages. `005_research.sql`: research_runs,
+  company_profile, assumption_proposals. `006_branding.sql`: branding.
+- **Migration ledger** — `schema_migrations`, created by `server/migrator.py`
+  rather than by a numbered migration, since it must exist before the ledger can
+  be consulted.
 - **Value engine** (`value_engine.py`) — safe structured evaluator: component
   value = multiplier × Π(assumption keys); low/high bands; realized via
   parameterized actuals or manual override. Editing one global assumption
@@ -68,11 +73,28 @@ written back to Lakebase, which stays the portfolio's system of record.
 - **Normalization** (`normalization.py`) — 5-stage canonicalization cascade.
 - **Enrichment** (`enrichment.py`) — staged `ai_query()` SQL builders.
 - **Generation** (`generation.py`) — prompts + candidate validation.
+- **Research** (`research.py`) — company research plus assumption calibration. The
+  `ASSUMPTION_GUIDE` gives every one of the 34 assumptions a unit, a meaning, and a
+  derivation, because several read as something other than what they are —
+  `saidiMinuteValueMM` looks like a duration but is the $M value of avoiding one
+  minute, and a model left to infer that is wrong by orders of magnitude.
+- **Chat tools** (`chat_tools.py`) — 12 typed tools. Read tools execute; write
+  tools return a `_propose` descriptor and never write.
+- **Rules** (`rules.py`) — classification rules, first-match-wins per dimension.
 - **Taxonomy** (`taxonomy.py`) — 3 dimensions, effective-dated.
 - **Confirm** (`confirm.py`) — single-use tokens gating agent writes.
 - **Live integration** (`lineage.py`, `live.py`) — Statement Execution API over
   the bound warehouse; reads `system.access.table_lineage`, `system.lakeflow.*`,
   `system.serving.*`, `system.billing.usage`; degrades gracefully.
+- **Migrator** (`migrator.py`) — checksum ledger, apply-once, drift detection. The
+  app calls only the read-only `startup_check`; applying belongs to
+  `scripts/migrate.py`, run as the database owner.
+- **Logging** (`logging_setup.py`) — JSON in Databricks Apps, text locally; a
+  request id in a `ContextVar` so concurrent requests never share one; redaction
+  in the formatter.
+- **Limits** (`limits.py`) — per-actor token buckets and the per-request query
+  budget, charged at the `db.fetch`/`db.execute` choke point so it counts real
+  queries rather than estimating them.
 
 ## The three decisions worth understanding
 
@@ -183,7 +205,20 @@ multiple workers and restart between propose and confirm.
   `requires_locked` / `domains_locked` are never overwritten by a re-run. A human
   decision outranks the model's, permanently.
 - **No secrets in the repo.** `app.yaml` ships with empty values; `.gitignore`
-  excludes the deploy cache, node_modules, and venvs.
+  excludes the deploy cache, node_modules, and venvs. Both are enforced by tests
+  (`tests/test_deploy.py`, `scripts/check_no_secrets.py`) rather than by
+  convention — the `app.yaml` guard has caught a real regression.
+- **No secrets in the logs.** Redaction runs in the log formatter, so a token
+  inside an exception string nobody thought to sanitize is still caught. Uploaded
+  logos are served under a restrictive CSP with `nosniff`, since an SVG can carry
+  script.
+- **Schema DDL is not reachable from the app.** Migrations apply at most once, run
+  as the database owner. A restart cannot replay one, which is the failure mode
+  where a non-idempotent backfill destroys data unattended.
+- **Bounded cost per caller.** Per-actor rate limits on the endpoints that spend
+  money or warehouse time, and a per-request query budget so one chat turn cannot
+  monopolize the connection pool. Guard rails against accidental load, explicitly
+  not a security control — see [`OPERATIONS.md`](OPERATIONS.md).
 - **Graceful degradation.** No Lakebase → demo mode. No `ATLAS_CATALOG` →
   discovery disabled. No warehouse → dependent probes report *skipped*, not
   failed. No serving endpoint → heuristic agents. No Genie space → placeholder.
@@ -201,3 +236,9 @@ multiple workers and restart between propose and confirm.
 | Model hallucinates a domain | Dropped, with a warning. Never created. |
 | Duplicate confirm | Rejected as "already applied". |
 | Re-uploading an inventory | MERGE on the natural key: updates, never duplicates. |
+| Unapplied migration | Logged with the exact command to run; the app still serves every table that exists. |
+| Applied migration file edited | Reported as drift and refused — see [`OPERATIONS.md`](OPERATIONS.md#drift). |
+| A migration fails midway | That file is rolled back and not recorded; later files do not run, since they assume it landed. Re-runnable once fixed. |
+| Too many expensive requests | 429 with `Retry-After` and a message saying it is a guard rail, not a quota. |
+| A chat turn queries unboundedly | 429 at the query budget, with the count. The user's message is already saved, so the conversation stays coherent. |
+| An unknown rate-limit name | Fails **open**. An outage caused by the thing preventing outages is a worse trade. |

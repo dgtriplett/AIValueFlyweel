@@ -36,6 +36,7 @@ that has never talked to Databricks.
 | `test_logging.py` | JSON log shape, per-request correlation ids under concurrency, secret redaction, and an AST check banning `print()` in `server/`. |
 | `test_ci.py` | The workflow references files that exist, tests the deployed Python version and the declared floor, and no gate has been silently dropped from `check.py`. |
 | `test_limits.py` | Rate limits are per-actor and per-class, the limiter fails open, query budgets stay isolated across concurrent requests, and every expensive endpoint declares a limit. |
+| `test_docs.py` | Docs make no claim the code contradicts: links resolve, documented flags exist, every setting the code reads is documented, and nothing still says migrations apply on startup. |
 | `test_no_redundancy.py` | One definition per rule: no module restates `READY_STATUSES`, copies the cost table, or evaluates value models outside `value_engine`. |
 | `test_app_wiring.py` | Every router is mounted, and no literal route is shadowed by a parameterized one declared before it. |
 | `test_llm_negotiation.py` | Optional-parameter negotiation (`temperature` / `response_format` rejection) and that every model call goes through a negotiating helper. |

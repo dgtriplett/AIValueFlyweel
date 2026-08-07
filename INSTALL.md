@@ -132,8 +132,18 @@ ALTER DEFAULT PRIVILEGES IN SCHEMA public
 ```
 
 Deliberately **not** ownership: without it the SP cannot run DDL, which is the
-intended least-privilege posture (`app.py`'s `run_migrations()` expects that and
-logs a single benign line).
+intended least-privilege posture. Schema changes are applied by **you** as the
+database owner, not by the running app — see
+[Applying migrations](OPERATIONS.md#applying-migrations).
+
+`scripts/migrate.py --grant-app-sp <client-id>` issues exactly the grants above, so
+you do not have to paste them by hand. Re-run it after any migration that creates a
+table: `ALTER DEFAULT PRIVILEGES` only covers tables created later by the *same*
+role.
+
+The app checks the schema at startup and logs what is pending; it never applies
+anything, so an unapplied migration is a line in the log rather than a corrupted
+database.
 
 ---
 
@@ -383,13 +393,23 @@ passes them for you.
 
 ```bash
 git pull
+
+# 1. Apply any new migrations FIRST, as the database owner.
+python3 scripts/migrate.py --profile <profile> --project <lakebase-project> --status
+python3 scripts/migrate.py --profile <profile> --project <lakebase-project>
+
+# 2. Then deploy the code.
 python3 scripts/deploy.py --yes --skip-seed --profile <profile> --target prod \
   --warehouse-id <id> --atlas-catalog <catalog>
 ```
 
-Migrations are idempotent and applied on startup, so a schema addition lands
-automatically. Re-running the seed is **destructive** (it truncates and reloads the
-portfolio) — use `--skip-seed` on an instance with real data.
+**Order matters.** The app cannot apply migrations itself, so deploying code that
+expects a new table before that table exists leaves it serving errors until you
+migrate. `--status` is read-only and tells you whether there is anything to do.
+
+Re-running the seed is **destructive** (it truncates and reloads the portfolio) —
+use `--skip-seed` on an instance with real data. The reference library is seed
+data, not migrations; refreshing it is a separate, explicit choice.
 
 ---
 
