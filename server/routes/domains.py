@@ -183,6 +183,125 @@ def _gap_rationale(label: str, uc_count: int, value_mm: float, no_source: bool) 
             f"source unblocks {uc_count} use case{plural} worth ~${value_mm:.0f}M/yr.")
 
 
+@router.get("/coverage-matrix")
+async def coverage_matrix():
+    """Data domains (rows) x lines of business (columns) coverage pivot.
+
+    Adapted from the BHE catalog's gaps matrix, which pivots source systems against
+    operating companies. Keyed on DOMAINS rather than products here, because a
+    domain is the thing a use case actually needs — and on `lobs`, which is this
+    app's equivalent dimension.
+
+    Four cell states, and the fourth is the one that earns the view its place:
+
+      covered    a use case in this LOB needs this domain, and it is satisfied
+      gap        a use case in this LOB needs it, and it is NOT satisfied
+      available  it IS satisfied but no use case in this LOB needs it — data the
+                 utility already has and is not exploiting. That is a use-case
+                 design prompt, and nothing else in the app surfaces it.
+      unused     neither required nor satisfied
+
+    A domain that is `gap` in every LOB requiring it is a *universal gap*: nothing
+    in the estate provides it, so it is an acquisition decision rather than an
+    ingestion backlog item.
+    """
+    from ..value_engine import compute_value_range, load_assumptions
+
+    assumptions = await load_assumptions()
+    lobs = [dict(r) for r in await db.fetch("SELECT id, name FROM lobs ORDER BY name")]
+    domain_rows = await db.fetch("""
+        SELECT dd.id, dd.name, dd.label, dd.category,
+               COUNT(DISTINCT asd.data_asset_id) AS serving_asset_count,
+               COUNT(DISTINCT asd.data_asset_id) FILTER (
+                   WHERE da.ingestion_status IN ('curated','governed')
+               ) AS ready_asset_count
+        FROM data_domains dd
+        LEFT JOIN asset_serves_domain asd ON asd.domain_id = dd.id
+        LEFT JOIN data_assets da ON da.id = asd.data_asset_id
+        WHERE COALESCE(dd.is_active, true) = true
+        GROUP BY dd.id
+        ORDER BY dd.category NULLS LAST, dd.label
+    """)
+
+    # Which (domain, LOB) pairs are required, by how many use cases, worth what.
+    demand_rows = await db.fetch("""
+        SELECT urd.domain_id, uc.lob_id, uc.id AS use_case_id, uc.title,
+               uc.hypothesized_value_json, urd.necessity
+        FROM uc_requires_domain urd
+        JOIN use_cases uc ON uc.id = urd.use_case_id
+        WHERE uc.in_portfolio = true
+    """)
+    demand: dict[tuple, dict] = {}
+    for row in demand_rows:
+        if row["lob_id"] is None:
+            continue  # unassigned use cases have no column to sit in
+        key = (row["domain_id"], row["lob_id"])
+        rng = compute_value_range(row_to_dict(row).get("hypothesized_value_json"),
+                                  assumptions)
+        entry = demand.setdefault(key, {"use_cases": 0, "required": 0, "value_mm": 0.0})
+        entry["use_cases"] += 1
+        if row["necessity"] == "required":
+            entry["required"] += 1
+        entry["value_mm"] += (rng["mid"] if rng else 0.0)
+
+    matrix = []
+    for domain in domain_rows:
+        satisfied = (domain["ready_asset_count"] or 0) > 0
+        cells = []
+        required_anywhere = False
+        gap_everywhere = True
+        for lob in lobs:
+            found = demand.get((domain["id"], lob["id"]))
+            needed = bool(found and found["required"])
+            if needed:
+                required_anywhere = True
+            if needed and satisfied:
+                state = "covered"
+                gap_everywhere = False
+            elif needed:
+                state = "gap"
+            elif satisfied:
+                state = "available"
+                gap_everywhere = False
+            else:
+                state = "unused"
+                gap_everywhere = False
+            cells.append({
+                "lob_id": lob["id"], "lob_name": lob["name"], "state": state,
+                "use_case_count": (found or {}).get("use_cases", 0),
+                "required_count": (found or {}).get("required", 0),
+                "value_mm": round((found or {}).get("value_mm", 0.0), 2),
+            })
+        matrix.append({
+            "domain": {"id": domain["id"], "name": domain["name"],
+                       "label": domain["label"], "category": domain["category"]},
+            "satisfied": satisfied,
+            "serving_asset_count": domain["serving_asset_count"] or 0,
+            "ready_asset_count": domain["ready_asset_count"] or 0,
+            "universal_gap": required_anywhere and gap_everywhere,
+            "cells": cells,
+        })
+
+    def total(state: str) -> int:
+        return sum(1 for row in matrix for cell in row["cells"] if cell["state"] == state)
+
+    return {
+        "lobs": lobs,
+        "rows": matrix,
+        "summary": {
+            "domains": len(matrix),
+            "universal_gaps": sum(1 for r in matrix if r["universal_gap"]),
+            "covered": total("covered"),
+            "gaps": total("gap"),
+            # The headline opportunity number: data you have that nothing uses.
+            "available_unused": total("available"),
+            "value_at_risk_mm": round(sum(
+                cell["value_mm"] for row in matrix for cell in row["cells"]
+                if cell["state"] == "gap"), 2),
+        },
+    }
+
+
 @router.get("/{domain_id}")
 async def get_domain(domain_id: int):
     row = await db.fetchrow("SELECT * FROM data_domains WHERE id = $1", domain_id)

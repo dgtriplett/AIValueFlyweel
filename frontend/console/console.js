@@ -97,218 +97,265 @@
   }
 
   // ---------------------------------------------------------------------
-  // Setup & health
+  // Get started — the SINGLE onboarding surface
+  //
+  // Merges what used to be three overlapping places: the SPA's "Get Started"
+  // tab (Excel round-trip + auto-populate from system tables), the console's
+  // "Setup & health" probes, and the console's "Discovery" pipeline. All three
+  // answered "how do I get my data in?", so a user had to know which one to
+  // open — and the SPA tab silently duplicated work the pipeline does better.
+  //
+  // Structure is a dependency-ordered checklist: health first (nothing else can
+  // work until the probes pass), then a CHOICE of population paths, then the
+  // pipeline stages that only make sense once data exists. Steps that cannot yet
+  // succeed render locked rather than failing when clicked.
   // ---------------------------------------------------------------------
-  async function viewSetup() {
-    main.innerHTML = `<p class="muted"><span class="spin"></span> Probing dependencies…</p>`;
-    let status;
-    try {
-      status = await api("/setup/status");
-    } catch (error) {
-      main.innerHTML = `<h2>Setup &amp; health</h2>` + banner("err",
-        `Could not read setup status: ${error.message}`);
+  async function viewStart() {
+    main.innerHTML = `<p class="muted"><span class="spin"></span> Checking your workspace…</p>`;
+
+    const [status, inventory] = await Promise.all([
+      api("/setup/status").catch((e) => ({ error: e.message })),
+      api("/ingestion/summary").catch(() => ({ configured: false })),
+    ]);
+
+    if (status.error) {
+      main.innerHTML = `<h2>Get started</h2>` + banner("err",
+        `Could not read setup status: ${status.error}`);
       return;
     }
 
     $("#env").textContent = status.environment || "";
 
-    const pills = status.checks.map((check) => {
-      const kind = check.ok ? "ok" : (check.required ? "bad" : "warn");
-      return `<span class="pill ${kind}" title="${text(check.detail)}">
-        <span class="dot"></span>${text(check.label)}</span>`;
+    const check = (name) => (status.checks || []).find((c) => c.name === name) || {};
+    const healthy = !!status.ready;
+    const discoveryReady = !!inventory.configured && !!inventory.available;
+    const hasInventory = (inventory.tables || 0) > 0;
+    const hasEnrichment = (inventory.enriched_tables || 0) > 0;
+
+    const pills = (status.checks || []).map((c) => {
+      const kind = c.ok ? "ok" : (c.required ? "bad" : "warn");
+      return `<span class="pill ${kind}" title="${text(c.detail)}">
+        <span class="dot"></span>${text(c.label)}</span>`;
     }).join("");
 
-    const headline = status.ready
-      ? banner("ok", `Ready. ${status.summary.passing} of ${status.summary.total} checks passing.`
-          + (status.summary.optional_failing
-            ? ` ${status.summary.optional_failing} optional feature(s) not configured — the portfolio works without them.`
-            : ""))
-      : banner("err", `${status.summary.required_failing} required check(s) failing. `
-          + (status.next_action || ""));
+    const failing = (status.checks || []).filter((c) => !c.ok);
+    const failureCards = failing.map((c) => `
+      <div class="card" style="margin-top:10px">
+        <div class="row">
+          <strong>${text(c.label)}</strong>
+          <span class="pill ${c.required ? "bad" : "warn"}">
+            ${c.required ? "required" : "optional"}</span>
+        </div>
+        <p class="small muted" style="margin:6px 0 0">${text(c.detail)}</p>
+        ${c.fix ? `<p class="small" style="margin:6px 0 0">${text(c.fix)}</p>` : ""}
+        ${(c.grants || []).length
+          ? `<pre class="sql">${text(c.grants.join("\n"))}</pre>` : ""}
+      </div>`).join("");
 
-    const failing = status.checks.filter((c) => !c.ok);
-    const detail = failing.length
-      ? `<section><h3 class="small muted">Not passing</h3>${failing.map((check) => `
-          <div class="card">
-            <div class="row">
-              <strong>${text(check.label)}</strong>
-              <span class="pill ${check.required ? "bad" : "warn"}">
-                ${check.required ? "required" : "optional"}</span>
-            </div>
-            <p class="small muted" style="margin:6px 0 0">${text(check.detail)}</p>
-            ${check.fix ? `<p class="small" style="margin:6px 0 0">${text(check.fix)}</p>` : ""}
-            ${check.grants && check.grants.length
-              ? `<pre class="sql">${text(check.grants.join("\n"))}</pre>` : ""}
-          </div>`).join("")}</section>`
-      : "";
+    const stepNum = (n, state) =>
+      `<div class="step-num ${state}">${state === "done" ? "✓" : n}</div>`;
 
     main.innerHTML = `
-      <h2>Setup &amp; health</h2>
-      <p class="lede">Every dependency is probed here. Anything failing shows the
-        exact fix — and, where it is a permissions problem, the GRANT statements to
-        hand a metastore admin.</p>
+      <h2>Get started</h2>
+      <p class="lede">Everything needed to go from an empty install to a populated
+        portfolio, in order. Each step says why it matters and what it will change;
+        nothing here runs on its own.</p>
+
       <div class="pills">${pills}</div>
-      ${headline}
-      <div class="row" style="margin-bottom:18px">
-        <button class="action" data-act="recheck" data-busy="Re-checking…">Re-check</button>
-        <button class="action secondary" data-act="grants">Show all GRANTs</button>
-        <span class="small muted">Service principal:
-          <code>${text(status.service_principal)}</code></span>
+      <div id="result"></div>
+
+      <!-- 1. health -->
+      <div class="step">
+        ${stepNum(1, healthy ? "done" : "active")}
+        <div class="card">
+          <h3>1 · Check the workspace</h3>
+          <p class="step-why">Every later step depends on Lakebase, a warehouse, and
+            Unity Catalog. Probing first means a missing grant shows up here with the
+            SQL to fix it, instead of as a 403 halfway through a pipeline.</p>
+          ${healthy
+            ? banner("ok", `Ready — ${status.summary.passing} of ${status.summary.total} `
+                + `checks passing.`
+                + (status.summary.optional_failing
+                  ? ` ${status.summary.optional_failing} optional feature(s) not `
+                    + `configured; the portfolio works without them.` : ""))
+            : banner("err", `${status.summary.required_failing} required check(s) `
+                + `failing. ${status.next_action || ""}`)}
+          <div class="row">
+            <button class="action secondary" data-act="recheck" data-busy="Re-checking…">
+              Re-check</button>
+            <button class="action secondary" data-act="grants">Show all GRANTs</button>
+            <span class="small muted">Running as
+              <code>${text(status.service_principal)}</code></span>
+          </div>
+          ${failureCards}
+        </div>
       </div>
-      <div id="result"></div>
-      ${detail}`;
 
-    onActions(main, {
-      recheck: () => viewSetup(),
-      grants: async () => {
-        const payload = await api("/setup/grants");
-        $("#result").innerHTML = `
-          <div class="card">
-            <h3>Unity Catalog privileges</h3>
-            <p class="small muted">Run as a metastore admin or catalog owner.
-              Steps that cannot be expressed as SQL are included as comments.</p>
-            <pre class="sql">${text(payload.sql)}</pre>
-          </div>`;
-      },
-    });
-  }
+      <!-- 2. populate: two paths -->
+      <div class="step">
+        ${stepNum(2, hasInventory ? "done" : (healthy ? "active" : ""))}
+        <div class="card">
+          <h3>2 · Tell the app what data you have</h3>
+          <p class="step-why">Two ways in, and they compose — most utilities do both.
+            Sweep the estate to discover what exists, then use the workbook to record
+            the judgement calls only a person can make.</p>
 
-  // ---------------------------------------------------------------------
-  // Discovery pipeline
-  // ---------------------------------------------------------------------
-  async function viewDiscovery() {
-    main.innerHTML = `<p class="muted"><span class="spin"></span> Reading inventory…</p>`;
-    const summary = await api("/ingestion/summary").catch((e) => ({ error: e.message }));
+          <div class="card" style="background:var(--navy-900)">
+            <h3>A · Sweep your Databricks estate <span class="pill ${
+              hasInventory ? "ok" : "warn"}">${hasInventory
+                ? num(inventory.tables) + " tables found" : "nothing yet"}</span></h3>
+            <p class="small muted">Run
+              <code>schema-extractor/extract_schemas.py</code> on your machine — under
+              your own credentials, so it reaches workspaces this app cannot. Metadata
+              only; no table contents are read.</p>
+            ${discoveryReady ? `
+              <div class="stat" style="margin:12px 0">
+                <div><span class="k">Workspaces</span><span class="v">${num(inventory.workspaces)}</span></div>
+                <div><span class="k">Schemas</span><span class="v">${num(inventory.schemas)}</span></div>
+                <div><span class="k">Tables</span><span class="v">${num(inventory.tables)}</span></div>
+                <div><span class="k">Enriched</span><span class="v">${num(inventory.enriched_tables)}</span></div>
+              </div>
+              <div class="row" style="margin-top:8px">
+                <button class="action secondary" data-act="bootstrap" data-busy="Creating…">
+                  Create discovery tables</button>
+              </div>
+              <div class="row" style="margin-top:10px">
+                <div><label for="f-schemas">all_schemas.csv</label>
+                  <input type="file" id="f-schemas" accept=".csv"></div>
+                <button class="action" data-act="up-schemas" data-busy="Uploading…">Upload</button>
+              </div>
+              <div class="row" style="margin-top:8px">
+                <div><label for="f-tables">all_tables.csv</label>
+                  <input type="file" id="f-tables" accept=".csv"></div>
+                <button class="action" data-act="up-tables" data-busy="Uploading…">Upload</button>
+              </div>
+              <div class="row" style="margin-top:8px">
+                <div><label for="f-columns">all_columns.csv
+                  <span class="muted">(optional — markedly better AI accuracy)</span></label>
+                  <input type="file" id="f-columns" accept=".csv"></div>
+                <button class="action" data-act="up-columns" data-busy="Uploading…">Upload</button>
+              </div>`
+            : banner("info", inventory.configured
+                ? `Discovery catalog unreachable: ${text(inventory.error || "unknown")}`
+                : "Set ATLAS_CATALOG in app.yaml to enable the estate sweep. The "
+                  + "curated 146-module catalog and the workbook below both work "
+                  + "without it.")}
+          </div>
 
-    if (summary.error) {
-      main.innerHTML = `<h2>Discovery</h2>` + banner("err", summary.error);
-      return;
-    }
-    if (!summary.configured) {
-      main.innerHTML = `
-        <h2>Discovery</h2>
-        <p class="lede">Sweep your Databricks estate for the data you actually
-          have, enrich it with AI, and attribute it to the catalog.</p>
-        ${banner("info", "Discovery is not configured. Set ATLAS_CATALOG in app.yaml "
-          + "and redeploy. The curated 146-module catalog works without it.")}`;
-      return;
-    }
+          <div class="card" style="background:var(--navy-900)">
+            <h3>B · Fill in the workbook</h3>
+            <p class="small muted">An Excel round-trip over the reference library.
+              Circulate it, have owners mark what is actually landed, upload it back.
+              This captures the things discovery can't infer — whether a source is
+              <em>governed</em>, who owns it, what it is worth.</p>
+            <div class="row" style="margin-top:10px">
+              <a class="action secondary" href="/api/onboarding/export.xlsx">
+                Download workbook</a>
+              <div><label for="f-workbook">Filled workbook</label>
+                <input type="file" id="f-workbook" accept=".xlsx,.csv"></div>
+              <button class="action secondary" data-act="wb-preview" data-busy="Checking…">
+                Preview changes</button>
+              <button class="action" data-act="wb-apply" data-busy="Applying…">Apply</button>
+            </div>
+            <p class="small muted" style="margin:8px 0 0">Preview first — it shows
+              every field that would change before anything is written.</p>
+          </div>
 
-    const runs = await api("/ingestion/runs?limit=8").catch(() => []);
-
-    main.innerHTML = `
-      <h2>Discovery</h2>
-      <p class="lede">Run these in order. Each step is idempotent, so re-running is
-        safe — and each shows what it changed rather than only that it finished.</p>
-
-      <section class="card">
-        <h3>Inventory</h3>
-        <div class="stat" style="margin-bottom:14px">
-          <div><span class="k">Workspaces</span><span class="v">${num(summary.workspaces)}</span></div>
-          <div><span class="k">Schemas</span><span class="v">${num(summary.schemas)}</span></div>
-          <div><span class="k">Tables</span><span class="v">${num(summary.tables)}</span></div>
-          <div><span class="k">Enriched</span><span class="v">${num(summary.enriched_tables)}</span></div>
-          <div><span class="k">Source systems</span><span class="v">${num(summary.canonicals)}</span></div>
+          <div class="card" style="background:var(--navy-900)">
+            <h3>C · Detect from system tables</h3>
+            <p class="small muted">Reads lineage and job history to auto-advance
+              sources that show real activity. Read-only against Databricks, and
+              preview-first.</p>
+            <div class="row" style="margin-top:10px">
+              <button class="action secondary" data-act="sync-dry" data-busy="Checking…">
+                Preview</button>
+              <button class="action secondary" data-act="sync-apply" data-busy="Syncing…">
+                Apply</button>
+            </div>
+          </div>
         </div>
-        <p class="small muted">Writing to
-          <code>${text(summary.catalog)}.${text(summary.schema)}</code></p>
-      </section>
+      </div>
 
-      <section class="card">
-        <h3>1 · Upload workspace metadata</h3>
-        <p class="small muted">Produced by <code>schema-extractor/extract_schemas.py</code>,
-          which runs on your machine under your own credentials so it reaches
-          workspaces this app cannot. Metadata only — no table contents.</p>
-        <div class="row" style="margin-top:10px">
-          <button class="action secondary" data-act="bootstrap" data-busy="Creating…">
-            Create discovery tables</button>
+      <!-- 3. enrich -->
+      <div class="step ${hasInventory ? "" : "locked"}">
+        ${stepNum(3, hasEnrichment ? "done" : (hasInventory ? "active" : ""))}
+        <div class="card">
+          <h3>3 · Enrich and normalize</h3>
+          <p class="step-why">Raw table names don't say what a system is. Enrichment
+            names each table in business terms; normalization then collapses the
+            free-text labels — otherwise ~1,000 distinct strings describe ~50 real
+            systems and every rollup is noise.</p>
+          ${hasInventory ? `
+            <div class="row">
+              <div><label for="company">Company name (prompt context)</label>
+                <input id="company" placeholder="e.g. Eversource Energy"></div>
+              <div><label for="maxrows">Cap tables (blank = all)</label>
+                <input id="maxrows" type="number" min="1" placeholder="500"
+                  style="width:120px"></div>
+            </div>
+            <div class="row" style="margin-top:10px">
+              <button class="action secondary" data-act="enrich-schemas" data-busy="Enriching…">
+                Enrich schemas</button>
+              <button class="action" data-act="enrich-tables" data-busy="Enriching…">
+                Enrich tables</button>
+              <button class="action secondary" data-act="canonicalize" data-busy="Normalizing…">
+                Normalize sources</button>
+            </div>
+            <p class="small muted" style="margin:10px 0 0">Enrichment spend scales
+              with table count — cap the first run to check quality and cost. Only the
+              long tail of normalization costs an LLM call.</p>`
+            : `<p class="small muted">Upload an inventory in step 2 first.</p>`}
         </div>
-        <div style="margin-top:12px" class="row">
-          <div><label for="f-schemas">all_schemas.csv</label>
-            <input type="file" id="f-schemas" accept=".csv"></div>
-          <button class="action" data-act="up-schemas" data-busy="Uploading…">Upload</button>
-        </div>
-        <div style="margin-top:8px" class="row">
-          <div><label for="f-tables">all_tables.csv</label>
-            <input type="file" id="f-tables" accept=".csv"></div>
-          <button class="action" data-act="up-tables" data-busy="Uploading…">Upload</button>
-        </div>
-        <div style="margin-top:8px" class="row">
-          <div><label for="f-columns">all_columns.csv <span class="muted">(optional, improves AI accuracy)</span></label>
-            <input type="file" id="f-columns" accept=".csv"></div>
-          <button class="action" data-act="up-columns" data-busy="Uploading…">Upload</button>
-        </div>
-      </section>
+      </div>
 
-      <section class="card">
-        <h3>2 · AI enrichment</h3>
-        <p class="small muted">Generates a business name, definition, and source
-          system per table. Costs model-serving spend proportional to table count,
-          so start with a capped run on a large estate.</p>
-        <div class="row" style="margin-top:10px">
-          <div><label for="company">Company name (prompt context)</label>
-            <input id="company" placeholder="e.g. Eversource Energy"></div>
-          <div><label for="maxrows">Max tables (blank = all)</label>
-            <input id="maxrows" type="number" min="1" placeholder="500" style="width:120px"></div>
+      <!-- 4. attribute -->
+      <div class="step ${hasEnrichment ? "" : "locked"}">
+        ${stepNum(4, hasEnrichment ? "active" : "")}
+        <div class="card">
+          <h3>4 · Connect it to the portfolio</h3>
+          <p class="step-why">This is the step that makes the rest of the app move:
+            attributing discovered tables to catalog modules is what turns "we have
+            40,000 tables" into "these use cases are now shovel-ready".</p>
+          ${hasEnrichment ? `
+            <div class="row">
+              <label class="row small" style="margin:0">
+                <input type="checkbox" id="advance" style="width:auto">
+                Advance ingestion status to “landed”</label>
+            </div>
+            <div class="row" style="margin-top:10px">
+              <button class="action" data-act="attribute" data-busy="Attributing…">
+                Attribute to the catalog</button>
+            </div>
+            <p class="small muted" style="margin:10px 0 0">Advancing status moves
+              readiness and therefore the roadmap, so it is off by default — and caps
+              at <em>landed</em>, because finding tables proves data exists, not that
+              it is curated.</p>`
+            : `<p class="small muted">Run enrichment in step 3 first.</p>`}
         </div>
-        <div class="row" style="margin-top:10px">
-          <button class="action secondary" data-act="enrich-schemas" data-busy="Enriching…">
-            Enrich schemas</button>
-          <button class="action" data-act="enrich-tables" data-busy="Enriching…">
-            Enrich tables</button>
-        </div>
-      </section>
+      </div>
 
-      <section class="card">
-        <h3>3 · Normalize source systems</h3>
-        <p class="small muted">Collapses free-text labels to your canonical
-          vocabulary. Without this, ~1,000 distinct strings describe ~50 real
-          systems and every rollup is noise. Deterministic matching runs first;
-          only the remainder costs an LLM call.</p>
-        <div class="row" style="margin-top:10px">
-          <button class="action" data-act="canonicalize" data-busy="Normalizing…">
-            Normalize</button>
-          <button class="action secondary" data-act="canonicalize-nollm"
-            data-busy="Normalizing…">Deterministic only (free)</button>
+      <!-- 5. what next -->
+      <div class="step">
+        ${stepNum(5, "")}
+        <div class="card">
+          <h3>5 · Then what</h3>
+          <p class="step-why">Once data is registered, the rest of the app has
+            something to reason about.</p>
+          <ul class="tight small">
+            <li><a href="#coverage">Coverage &amp; gaps</a> — which data needs are
+              met per line of business, and what you already have that nothing uses.</li>
+            <li><a href="#generate">Generate use cases</a> — propose new ones
+              grounded in what is actually landed.</li>
+            <li><a href="#taxonomy">Taxonomy</a> — classify how sources arrive and how
+              critical they are.</li>
+            <li><a href="/">Portfolio</a> — readiness, value, and the roadmap.</li>
+          </ul>
         </div>
-      </section>
-
-      <section class="card">
-        <h3>4 · Attribute to the catalog</h3>
-        <p class="small muted">Links discovered tables to catalog modules. Advancing
-          ingestion status moves readiness and therefore the roadmap, so it is off
-          by default — and capped at <em>landed</em>, because finding tables proves
-          data exists, not that it is curated or governed.</p>
-        <div class="row" style="margin-top:10px">
-          <label class="row small" style="margin:0">
-            <input type="checkbox" id="advance" style="width:auto">
-            Advance ingestion status to “landed”</label>
-        </div>
-        <div class="row" style="margin-top:10px">
-          <button class="action" data-act="attribute" data-busy="Attributing…">
-            Attribute</button>
-        </div>
-      </section>
-
-      <div id="result"></div>
-
-      <section>
-        <h3 class="small muted">Recent runs</h3>
-        ${runs.length ? `<table>
-          <thead><tr><th>Started</th><th>Step</th><th>Status</th><th>Detail</th></tr></thead>
-          <tbody>${runs.map((run) => `<tr>
-            <td class="mono small">${text((run.started_at || "").slice(0, 19).replace("T", " "))}</td>
-            <td>${text(run.kind)}</td>
-            <td><span class="pill ${run.status === "succeeded" ? "ok"
-              : run.status === "failed" ? "bad" : "warn"}">${text(run.status)}</span></td>
-            <td class="small muted">${text(run.error || JSON.stringify(run.stats_json || {}))}</td>
-          </tr>`).join("")}</tbody></table>`
-          : `<p class="muted small">No runs yet.</p>`}
-      </section>`;
+      </div>`;
 
     const upload = async (inputId, path, label) => {
       const input = $(`#${inputId}`);
-      if (!input.files || !input.files[0]) {
+      if (!input || !input.files || !input.files[0]) {
         throw new Error(`Choose a ${label} file first.`);
       }
       const form = new FormData();
@@ -320,74 +367,182 @@
     };
 
     const enrichBody = () => {
-      const maxRows = $("#maxrows").value;
+      const maxRows = $("#maxrows") ? $("#maxrows").value : "";
       return {
-        company_name: $("#company").value || null,
+        company_name: ($("#company") && $("#company").value) || null,
         max_rows: maxRows ? Number(maxRows) : null,
       };
     };
 
+    const workbook = async (apply) => {
+      const input = $("#f-workbook");
+      if (!input.files || !input.files[0]) throw new Error("Choose a workbook first.");
+      const form = new FormData();
+      form.append("file", input.files[0]);
+      const r = await api(`/onboarding/import?apply=${apply}`,
+        { method: "POST", body: form });
+      const changes = r.changes || {};
+      const lines = Object.entries(changes)
+        .filter(([, v]) => (v || []).length)
+        .map(([k, v]) => `<li>${text(k.replace(/_/g, " "))}: ${v.length} change(s)</li>`)
+        .join("");
+      $("#result").innerHTML = banner(apply ? "ok" : "info",
+        apply ? `Applied ${num(r.applied)} change(s).`
+              : `${num((r.summary || {}).data_sources)} data source(s), `
+                + `${num((r.summary || {}).use_cases)} use case(s), `
+                + `${num((r.summary || {}).assumptions)} assumption(s) would change.`)
+        + (lines ? `<div class="card"><ul class="tight small">${lines}</ul></div>` : "")
+        + ((r.errors || []).length
+          ? `<div class="card"><h3>Problems</h3><ul class="tight small muted">${
+              r.errors.slice(0, 8).map((e) => `<li>${text(e)}</li>`).join("")}</ul></div>`
+          : "");
+    };
+
     onActions(main, {
+      recheck: () => viewStart(),
+      grants: async () => {
+        const payload = await api("/setup/grants");
+        $("#result").innerHTML = `<div class="card"><h3>Unity Catalog privileges</h3>
+          <p class="small muted">Run as a metastore admin or catalog owner. Steps that
+            cannot be expressed as SQL are included as comments.</p>
+          <pre class="sql">${text(payload.sql)}</pre></div>`;
+      },
       bootstrap: async () => {
-        const result = await api("/ingestion/bootstrap", { method: "POST" });
+        const r = await api("/ingestion/bootstrap", { method: "POST" });
         $("#result").innerHTML = banner("ok",
-          `Discovery tables ready in ${result.catalog}.${result.schema}.`);
+          `Discovery tables ready in ${text(r.catalog)}.${text(r.schema)}.`);
       },
       "up-schemas": () => upload("f-schemas", "/ingestion/upload/schemas", "Schemas"),
       "up-tables": () => upload("f-tables", "/ingestion/upload/tables", "Tables"),
       "up-columns": () => upload("f-columns", "/ingestion/upload/columns", "Columns"),
+      "wb-preview": () => workbook(false),
+      "wb-apply": () => workbook(true),
+      "sync-dry": () => runSync(false),
+      "sync-apply": () => runSync(true),
       "enrich-schemas": async () => {
-        const result = await api("/ingestion/enrich/schemas",
+        const r = await api("/ingestion/enrich/schemas",
           { method: "POST", body: JSON.stringify(enrichBody()) });
         $("#result").innerHTML = banner("ok",
-          `${num(result.schemas_enriched_total)} schema(s) now enriched.`);
+          `${num(r.schemas_enriched_total)} schema(s) now enriched.`);
       },
       "enrich-tables": async () => {
-        const result = await api("/ingestion/enrich/tables",
+        const r = await api("/ingestion/enrich/tables",
           { method: "POST", body: JSON.stringify(enrichBody()) });
-        $("#result").innerHTML = banner(result.staged_errors ? "warn" : "ok",
-          `${num(result.tables_enriched_total)} table(s) enriched`
-          + (result.staged_rows ? ` (${num(result.staged_ok)} of ${num(result.staged_rows)} `
-            + `model calls succeeded this run` : "")
-          + (result.staged_errors ? `, ${num(result.staged_errors)} failed).` : ")."));
+        $("#result").innerHTML = banner(r.staged_errors ? "warn" : "ok",
+          `${num(r.tables_enriched_total)} table(s) enriched`
+          + (r.staged_rows ? ` (${num(r.staged_ok)} of ${num(r.staged_rows)} model `
+            + `calls succeeded this run` : "")
+          + (r.staged_errors ? `, ${num(r.staged_errors)} failed).` : ")."));
       },
-      canonicalize: () => runCanonicalize(false),
-      "canonicalize-nollm": () => runCanonicalize(true),
+      canonicalize: async () => {
+        const r = await api("/ingestion/canonicalize",
+          { method: "POST", body: JSON.stringify({}) });
+        $("#result").innerHTML = banner("ok",
+          `${num(r.distinct_labels)} distinct label(s); ${num(r.newly_resolved)} newly `
+          + `resolved (exact ${num(r.exact)}, normalized ${num(r.normalized)}, `
+          + `AI ${num(r.llm)}, unmapped ${num(r.other)}).`
+          + (r.other ? " Review the unmapped ones under Source mapping." : ""));
+      },
       attribute: async () => {
-        const result = await api("/ingestion/attribute", {
+        const r = await api("/ingestion/attribute", {
           method: "POST",
           body: JSON.stringify({ advance_status: $("#advance").checked }),
         });
-        const advanced = (result.advanced || []).map((a) =>
+        const advanced = (r.advanced || []).map((a) =>
           `<li>${text(a.label)}: ${text(a.from)} → ${text(a.to)}</li>`).join("");
         $("#result").innerHTML = banner("ok",
-          `${num(result.assets_matched)} catalog module(s) matched from `
-          + `${num(result.canonicals_discovered)} discovered source system(s).`)
+          `${num(r.assets_matched)} catalog module(s) matched from `
+          + `${num(r.canonicals_discovered)} discovered source system(s).`)
           + (advanced ? `<div class="card"><h3>Status advanced</h3>
               <ul class="tight small">${advanced}</ul></div>` : "")
-          + ((result.unmatched_canonicals || []).length
+          + ((r.unmatched_canonicals || []).length
             ? `<div class="card"><h3>Discovered but not in the catalog</h3>
                 <p class="small muted">Add these as data assets, or map them under
                   Source mapping.</p>
-                <p class="small mono">${text(result.unmatched_canonicals.join(", "))}</p>
+                <p class="small mono">${text(r.unmatched_canonicals.join(", "))}</p>
               </div>` : "");
       },
     });
 
-    async function runCanonicalize(skipLlm) {
-      const result = await api("/ingestion/canonicalize", {
-        method: "POST",
-        body: JSON.stringify({ skip_llm: skipLlm }),
-      });
-      $("#result").innerHTML = banner("ok",
-        `${num(result.distinct_labels)} distinct label(s); `
-        + `${num(result.newly_resolved)} newly resolved `
-        + `(exact ${num(result.exact)}, normalized ${num(result.normalized)}, `
-        + `AI ${num(result.llm)}, unmapped ${num(result.other)}). `
-        + (result.skipped_manual ? `${num(result.skipped_manual)} manual mapping(s) left untouched.` : ""));
+    async function runSync(apply) {
+      const r = await api(`/live/sync?apply=${apply ? "true" : "false"}`,
+        { method: "POST" });
+      $("#result").innerHTML = banner(apply ? "ok" : "info",
+        `${apply ? "Applied" : "Would change"}: `
+        + `${(r.asset_changes || []).length} data source(s), `
+        + `${(r.uc_changes || []).length} use case(s).`)
+        + ((r.notes || []).length
+          ? `<div class="card"><ul class="tight small muted">${
+              r.notes.map((n) => `<li>${text(n)}</li>`).join("")}</ul></div>` : "");
     }
   }
 
+  // ---------------------------------------------------------------------
+  // Coverage & gaps — domains x lines of business
+  // ---------------------------------------------------------------------
+  async function viewCoverage() {
+    main.innerHTML = `<p class="muted"><span class="spin"></span> Building the matrix…</p>`;
+    const data = await api("/domains/coverage-matrix");
+    const lobs = data.lobs || [];
+    const s = data.summary || {};
+
+    // "available" is the interesting state: data you already have that no use case
+    // in that LOB asks for. Nothing else in the app surfaces that.
+    const rows = (data.rows || []).map((row) => `
+      <tr>
+        <td>
+          <strong>${text(row.domain.label)}</strong>
+          ${row.universal_gap ? `<span class="pill bad">universal gap</span>` : ""}
+          <div class="small muted mono">${text(row.domain.category || "")}
+            · ${row.ready_asset_count}/${row.serving_asset_count} landed</div>
+        </td>
+        ${row.cells.map((cell) => `
+          <td class="cell">
+            <span class="swatch sw-${cell.state}" title="${text(row.domain.label)} × ${text(cell.lob_name)} — ${text(cell.state)}${
+              cell.use_case_count ? `; ${cell.use_case_count} use case(s), $${cell.value_mm}M` : ""}">
+              ${cell.use_case_count || ""}</span>
+          </td>`).join("")}
+      </tr>`).join("");
+
+    main.innerHTML = `
+      <h2>Coverage &amp; gaps</h2>
+      <p class="lede">Every data need against every line of business. Numbers are the
+        use cases in that cell; colour is whether the need is met.</p>
+
+      <div class="stat" style="margin-bottom:16px">
+        <div><span class="k">Covered</span><span class="v">${num(s.covered)}</span></div>
+        <div><span class="k">Gaps</span><span class="v">${num(s.gaps)}</span></div>
+        <div><span class="k">Have but unused</span><span class="v">${num(s.available_unused)}</span></div>
+        <div><span class="k">Universal gaps</span><span class="v">${num(s.universal_gaps)}</span></div>
+        <div><span class="k">Value at risk</span><span class="v">$${num(s.value_at_risk_mm)}M</span></div>
+      </div>
+
+      <div class="legend">
+        <span><span class="key sw-covered"></span>Covered — needed and landed</span>
+        <span><span class="key sw-gap"></span>Gap — needed, not landed</span>
+        <span><span class="key sw-available"></span>Have it, nothing uses it</span>
+        <span><span class="key sw-unused"></span>Not needed here</span>
+      </div>
+
+      ${s.available_unused
+        ? banner("info", `${s.available_unused} cell(s) are data you have already `
+            + `landed that no use case in that line of business asks for — the `
+            + `cheapest place to look for a new use case, since the data is there.`)
+        : ""}
+      ${s.universal_gaps
+        ? banner("err", `${s.universal_gaps} data need(s) are unmet in EVERY line of `
+            + `business that requires them. Nothing in the estate provides these, so `
+            + `they are acquisition decisions rather than ingestion backlog.`)
+        : ""}
+
+      ${lobs.length ? `
+        <table class="matrix">
+          <thead><tr><th style="min-width:230px">Data need</th>
+            ${lobs.map((l) => `<th class="rot">${text(l.name)}</th>`).join("")}</tr></thead>
+          <tbody>${rows}</tbody>
+        </table>`
+        : banner("info", "No lines of business defined yet.")}`;
+  }
   // ---------------------------------------------------------------------
   // Source mapping review
   // ---------------------------------------------------------------------
@@ -725,19 +880,169 @@
   }
 
   // ---------------------------------------------------------------------
+  // Admin — Demo Mode + instance state
+  // ---------------------------------------------------------------------
+  async function viewAdmin() {
+    main.innerHTML = `<p class="muted"><span class="spin"></span> Loading…</p>`;
+    const [health, demo] = await Promise.all([
+      api("/health").catch((e) => ({ error: e.message })),
+      // 404 here is the designed answer when DEMO_MODE is off, not a failure.
+      api("/demo/status").then((d) => ({ ...d, available: true }))
+        .catch(() => ({ available: false })),
+    ]);
+
+    const demoCard = demo.available
+      ? `<div class="card">
+          <h3>Demo Mode</h3>
+          <p class="small muted">Flips this instance's Lakebase between the two
+            seeded states. Runs DML inside one transaction — a failure rolls back
+            rather than leaving the portfolio half-populated.</p>
+          <p class="small" style="margin:10px 0 0">Current state:
+            <span class="pill ${demo.mode === "demo" ? "warn" : "ok"}">
+              ${text(demo.mode || "unknown")}</span></p>
+          <div class="row" style="margin-top:12px">
+            <button class="action" data-act="demo-load" data-busy="Loading…">
+              Load showcase data</button>
+            <button class="action secondary" data-act="demo-reset" data-busy="Resetting…">
+              Reset to clean day-1</button>
+          </div>
+          <p class="small muted" style="margin:10px 0 0">
+            <strong>Both are destructive</strong> — they replace the portfolio.
+            Don't run them on an instance holding a customer's real data.</p>
+        </div>`
+      : `<div class="card">
+          <h3>Demo Mode</h3>
+          ${banner("info", "Disabled on this instance. It is gated behind the "
+            + "DEMO_MODE env var, which ships 'off' so a customer install cannot "
+            + "reset its own portfolio. To enable it here, redeploy with "
+            + "scripts/deploy.py --demo-mode on.")}
+        </div>`;
+
+    main.innerHTML = `
+      <h2>Admin</h2>
+      <p class="lede">Instance state and the controls that change it. Everything
+        here affects live data, so each action says what it will do first.</p>
+      <div id="result"></div>
+
+      <section class="card">
+        <h3>This instance</h3>
+        <div class="stat">
+          <div><span class="k">Lakebase</span><span class="v">
+            ${health.db_connected ? "connected" : "demo mode"}</span></div>
+          <div><span class="k">Use cases</span><span class="v">
+            ${num((health.counts || {}).use_cases)}</span></div>
+          <div><span class="k">Data assets</span><span class="v">
+            ${num((health.counts || {}).data_assets)}</span></div>
+        </div>
+        <p class="small muted" style="margin:12px 0 0">
+          Environment <code>${text(health.environment)}</code> ·
+          Model <code>${text(health.serving_endpoint)}</code> ·
+          Genie ${health.genie_space_configured ? "configured" : "not configured"}</p>
+      </section>
+
+      ${demoCard}
+
+      <section class="card">
+        <h3>Genie mirror</h3>
+        <p class="small muted">Copies the portfolio into Unity Catalog so a Genie
+          space can answer questions over it. Read-only projection — it never
+          changes portfolio data.</p>
+        <div class="row" style="margin-top:10px">
+          <button class="action secondary" data-act="sync-genie" data-busy="Syncing…">
+            Sync Genie mirror</button>
+        </div>
+      </section>
+
+      <section class="card">
+        <h3>Databricks sync</h3>
+        <p class="small muted">Reads system tables to auto-advance data sources that
+          show real lineage, and use cases whose linked jobs are running. Read-only
+          against Databricks; writes only to this app's own state.</p>
+        <div class="row" style="margin-top:10px">
+          <button class="action secondary" data-act="sync-dry" data-busy="Checking…">
+            Preview changes</button>
+          <button class="action" data-act="sync-apply" data-busy="Syncing…">
+            Apply</button>
+        </div>
+      </section>
+
+      <section class="card">
+        <h3>Housekeeping</h3>
+        <p class="small muted">Deletes expired generation previews and consumed
+          confirm tokens. Safe — expiry is already enforced at read time, so this
+          only reclaims space.</p>
+        <div class="row" style="margin-top:10px">
+          <button class="action secondary" data-act="cleanup" data-busy="Cleaning…">
+            Clean up expired records</button>
+        </div>
+      </section>`;
+
+    onActions(main, {
+      "demo-load": async () => {
+        if (!confirm("Replace the portfolio with the showcase dataset?")) return;
+        const r = await api("/demo/load", { method: "POST" });
+        $("#result").innerHTML = banner("ok",
+          `Showcase data loaded (${num((r.counts || {}).use_cases)} use cases).`);
+        setTimeout(viewAdmin, 1200);
+      },
+      "demo-reset": async () => {
+        if (!confirm("Reset the portfolio to pristine day-1?")) return;
+        const r = await api("/demo/reset", { method: "POST" });
+        $("#result").innerHTML = banner("ok",
+          `Reset to clean day-1 (${num((r.counts || {}).use_cases)} use cases).`);
+        setTimeout(viewAdmin, 1200);
+      },
+      "sync-genie": async () => {
+        const r = await api("/live/sync-genie", { method: "POST" });
+        $("#result").innerHTML = r.ok
+          ? banner("ok", `Mirrored to ${text(r.schema)}: ${(r.created || []).join(", ")}`)
+          : banner("err", r.error || "Sync failed.");
+      },
+      "sync-dry": () => runSync(false),
+      "sync-apply": () => runSync(true),
+      cleanup: async () => {
+        const r = await api("/generate/cleanup", { method: "POST" });
+        $("#result").innerHTML = banner("ok",
+          `Removed ${text(r.previews_deleted)} preview(s) and `
+          + `${text(r.tokens_deleted)} token(s).`);
+      },
+    });
+
+    async function runSync(apply) {
+      const r = await api(`/live/sync?apply=${apply ? "true" : "false"}`,
+        { method: "POST" });
+      const assets = r.asset_changes || [];
+      const ucs = r.uc_changes || [];
+      $("#result").innerHTML = banner(apply ? "ok" : "info",
+        `${apply ? "Applied" : "Would change"}: ${assets.length} data source(s), `
+        + `${ucs.length} use case(s).`)
+        + ((r.notes || []).length
+          ? `<div class="card"><h3>Notes</h3><ul class="tight small muted">${
+              r.notes.map((n) => `<li>${text(n)}</li>`).join("")}</ul></div>`
+          : "");
+    }
+  }
+
+  // ---------------------------------------------------------------------
   // Router
   // ---------------------------------------------------------------------
   const VIEWS = {
-    setup: viewSetup,
-    discovery: viewDiscovery,
+    start: viewStart,
     aliases: viewAliases,
     domains: viewDomains,
+    coverage: viewCoverage,
     taxonomy: viewTaxonomy,
     generate: viewGenerate,
+    admin: viewAdmin,
+    // Back-compat: the merged onboarding flow replaced these two separate views,
+    // so old bookmarks and the /console#setup links in the docs still land
+    // somewhere sensible instead of silently falling through to the default.
+    setup: viewStart,
+    discovery: viewStart,
   };
 
   async function show(name) {
-    const render = VIEWS[name] || viewSetup;
+    const render = VIEWS[name] || viewStart;
     document.querySelectorAll("#nav button").forEach((button) => {
       if (button.dataset.view === name) button.setAttribute("aria-current", "page");
       else button.removeAttribute("aria-current");
@@ -755,7 +1060,7 @@
   document.querySelectorAll("#nav button").forEach((button) => {
     button.addEventListener("click", () => show(button.dataset.view));
   });
-  window.addEventListener("hashchange", () => show(location.hash.slice(1) || "setup"));
+  window.addEventListener("hashchange", () => show(location.hash.slice(1) || "start"));
 
-  show(location.hash.slice(1) || "setup");
+  show(location.hash.slice(1) || "start");
 })();

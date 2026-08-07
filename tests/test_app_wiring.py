@@ -86,6 +86,17 @@ class TestDomainRoutes(unittest.TestCase):
         self.assertIn("GET", methods)
         self.assertIn("PUT", methods)
 
+    def test_coverage_matrix_registered(self):
+        self.assertIn("/api/domains/coverage-matrix", _paths())
+
+    def test_literal_domain_routes_precede_the_id_route(self):
+        """/domains/gaps and /domains/coverage-matrix must be declared before
+        /domains/{domain_id}, or the literal path is captured as an id and 422s."""
+        order = [r.path for r in app.routes if hasattr(r, "path")]
+        id_route = order.index("/api/domains/{domain_id}")
+        for literal in ("/api/domains/gaps", "/api/domains/coverage-matrix"):
+            self.assertLess(order.index(literal), id_route, literal)
+
     def test_gaps_route_not_shadowed_by_the_id_route(self):
         """/domains/gaps must be declared before /domains/{domain_id}, or the
         literal path is captured as an id and 422s on int parsing."""

@@ -8,7 +8,7 @@ from contextlib import asynccontextmanager
 from pathlib import Path
 
 from fastapi import FastAPI
-from fastapi.responses import FileResponse, JSONResponse
+from fastapi.responses import FileResponse, JSONResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
 
 from server.config import IS_DATABRICKS_APP, SERVING_ENDPOINT, GENIE_SPACE_ID
@@ -144,6 +144,14 @@ async def health():
 # Mounted BEFORE the SPA's catch-all, which matches every path and would
 # otherwise return index.html for /console.
 if CONSOLE_DIR.exists():
+    # `/console` (no trailing slash) does NOT hit the mount below — it falls
+    # through to the SPA catch-all, which serves index.html and silently shows the
+    # portfolio instead. Redirecting makes both spellings work, so a typed URL or
+    # a stale bookmark still lands on the console.
+    @app.get("/console", include_in_schema=False)
+    async def console_redirect():
+        return RedirectResponse(url="/console/", status_code=308)
+
     app.mount("/console", StaticFiles(directory=str(CONSOLE_DIR), html=True),
               name="console")
 

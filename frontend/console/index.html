@@ -154,6 +154,43 @@
       .hidden { display: none !important; }
       ul.tight { margin: 6px 0 0; padding-left: 20px; }
       ul.tight li { margin-bottom: 3px; }
+
+      /* Guided steps. The number badge doubles as a state indicator so the
+         sequence reads at a glance without a separate legend. */
+      .step { display: flex; gap: 14px; margin-bottom: 14px; }
+      .step-num {
+        flex-shrink: 0; width: 26px; height: 26px; border-radius: 50%;
+        display: flex; align-items: center; justify-content: center;
+        font-size: 12px; font-weight: 600; font-family: "DM Mono", monospace;
+        background: var(--navy-600); color: var(--navy-300);
+        border: 1px solid var(--navy-500); margin-top: 14px;
+      }
+      .step-num.done { background: rgba(0,169,114,0.18); color: var(--success-300);
+                       border-color: rgba(0,169,114,0.5); }
+      .step-num.active { background: rgba(255,54,33,0.16); color: var(--lava-400);
+                         border-color: var(--lava); }
+      .step .card { flex: 1; margin-bottom: 0; }
+      .step.locked .card { opacity: 0.55; }
+      .step-why {
+        font-size: 12px; color: var(--navy-400); margin: 0 0 10px;
+        padding-left: 10px; border-left: 2px solid var(--navy-600);
+      }
+
+      /* Coverage matrix */
+      table.matrix { font-size: 12px; }
+      table.matrix th.rot { writing-mode: vertical-rl; text-orientation: mixed;
+                            height: 96px; padding: 6px 3px; white-space: nowrap; }
+      table.matrix td.cell { text-align: center; padding: 4px; cursor: default; }
+      .swatch { display: inline-block; width: 100%; height: 20px; border-radius: 3px;
+                line-height: 20px; font-size: 10px; font-family: "DM Mono", monospace; }
+      .sw-covered   { background: rgba(0,169,114,0.30); color: var(--success-300); }
+      .sw-gap       { background: rgba(255,54,33,0.28);  color: var(--lava-400); }
+      .sw-available { background: rgba(34,114,180,0.28); color: var(--info-400); }
+      .sw-unused    { background: var(--navy-700); color: var(--navy-500); }
+      .legend { display: flex; gap: 16px; flex-wrap: wrap; font-size: 12px;
+                margin-bottom: 14px; }
+      .legend span.key { display: inline-block; width: 13px; height: 13px;
+                         border-radius: 3px; vertical-align: -2px; margin-right: 5px; }
     </style>
   </head>
   <body>
@@ -170,12 +207,22 @@
 
     <div class="layout">
       <nav id="nav" aria-label="Console sections">
-        <button data-view="setup" aria-current="page">Setup &amp; health</button>
-        <button data-view="discovery">Discovery</button>
+        <!--
+          ONE onboarding surface. The portfolio SPA used to have a "Get Started"
+          tab (Excel bulk-populate + auto-populate from system tables) while the
+          console had "Setup & health" and "Discovery" — three places answering the
+          same question, "how do I get my data in?". They are merged into the
+          guided "Get started" flow below, which keeps the best of each: health
+          probes with copy-pastable GRANTs, the Excel round-trip for offline bulk
+          entry, and the multi-workspace sweep + AI enrichment.
+        -->
+        <button data-view="start" aria-current="page">Get started</button>
         <button data-view="aliases">Source mapping</button>
         <button data-view="domains">Data domains</button>
+        <button data-view="coverage">Coverage &amp; gaps</button>
         <button data-view="taxonomy">Taxonomy</button>
         <button data-view="generate">Generate use cases</button>
+        <button data-view="admin">Admin</button>
       </nav>
       <main id="main" aria-live="polite">
         <p class="muted"><span class="spin"></span> Loading…</p>
