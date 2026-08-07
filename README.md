@@ -390,6 +390,22 @@ the SPA buildable again.
 
 ---
 
+### The SPA's nav is patched, not built
+
+`frontend/dist` is committed and its React source is not in this repo, so two edits
+to the SPA live in re-runnable scripts rather than in source:
+
+| Script | What it changes |
+|---|---|
+| [`scripts/patch_spa_nav.py`](scripts/patch_spa_nav.py) | Product name and subtitle in the header. |
+| [`scripts/patch_spa_grouped_nav.py`](scripts/patch_spa_grouped_nav.py) | Collapses the nine flat tabs into `Portfolio · Analyze ▾ · Plan ▾`, and adds links to the knowledge base and the proposal agent. |
+
+**If you ever rebuild the SPA, re-run both.** A fresh build reverts them, which
+silently hides the knowledge base and the proposal agent from the app's front door
+without anything failing. `scripts/check.py` gates on this (`--check` reports status
+without modifying anything), and the patch refuses to write a bundle that does not
+parse — an unparseable bundle is a blank page for every user.
+
 ## License
 
 See [`LICENSE.md`](LICENSE.md). Application code is provided as-is for evaluation
