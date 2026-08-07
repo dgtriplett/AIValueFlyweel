@@ -19,9 +19,23 @@ resort, and only ever sees labels that nothing cheaper could resolve.
                    table). This is why a label costs at most one LLM call ever.
   3. normalized  — strip vendor noise (parentheticals, version suffixes,
                    punctuation, known vendor prefixes) and re-match.
-  4. llm         — ONE batched call for whatever is left, with the canonical list
+  4. vendor      — a product or vendor name from scripts/pu_vendors.py. Added
+                   after measuring the cascade against realistic Unity Catalog
+                   names: only 20% resolved, because the canonical vocabulary is
+                   the nineteen source-CATEGORY names and nobody names a schema
+                   "Data Historian" — they name it `osisoft_pi` or `maximo`.
+  5. keyword     — a per-module keyword from the shipped catalog. The catalog
+                   already carries 584 of them and the cascade was ignoring all
+                   of them, so `oms_prod` and `lims_results` were paying for an
+                   LLM call to learn what the catalog already stated.
+  6. llm         — ONE batched call for whatever is left, with the canonical list
                    supplied as a closed vocabulary.
-  5. Other       — no confident fit. Surfaced in the UI for a human to map.
+  7. Other       — no confident fit. Surfaced in the UI for a human to map.
+
+Stages 4 and 5 sit AFTER fuzzy matching and BEFORE the model deliberately. They are
+knowledge claims about the world ("maximo means EAM"), so an exact or
+already-corrected match must still win; but they are deterministic, free, and
+auditable, so they belong ahead of a paid nondeterministic call.
 
 INVARIANTS
 ----------
@@ -58,6 +72,10 @@ _STOPWORDS = {
 
 _VERSION_RE = re.compile(r"\b(v|ver|version|release|r)?\s*\d+(\.\d+)*\b", re.IGNORECASE)
 _NON_ALNUM_RE = re.compile(r"[^a-z0-9]+")
+# camelCase / PascalCase boundary: a lowercase or digit followed by an
+# uppercase letter. Applied BEFORE lowercasing, which is the only point the
+# boundary still exists.
+_CAMEL_RE = re.compile(r"([a-z0-9])([A-Z])")
 
 OTHER = "Other"
 
@@ -159,7 +177,109 @@ def resolve_deterministic(
     if key and key in index:
         return index[key], "normalized", "medium"
 
+    # Stages 4 and 5: vendor/product names and catalog keywords.
+    #
+    # Only asserted when the result is actually in `canonicals`. The tables know
+    # more than any one instance's vocabulary — a customer whose catalog has no
+    # LIMS should not have a schema resolved to one just because the shipped table
+    # mentions it.
+    tokens = _tokens(raw)
+    if tokens:
+        vendor = _vendor_hit(tokens)
+        if vendor and vendor[0] in canonicals:
+            # 'medium': a product name is strong evidence of the category, but the
+            # module it implies is a convention, not a certainty.
+            return vendor[0], "vendor", "medium"
+
+        keyword = _keyword_hit(tokens)
+        if keyword and keyword[0] in canonicals:
+            # 'low': a keyword match is the weakest deterministic signal — the word
+            # appeared, which is not the same as the schema being that system. Low
+            # confidence is what routes it to the review queue in the UI.
+            return keyword[0], "keyword", "low"
+
     return None, None, None
+
+
+# Abbreviations that appear constantly in schema names. Expanded to their full form
+# AND kept as-is, so "meter_data_mgmt" matches a "management" keyword while
+# "mgmt" alone still works.
+_ABBREVIATIONS = {
+    "mgmt": "management", "mgt": "management", "mngmt": "management",
+    "mgr": "manager", "sys": "system", "svc": "service", "svcs": "services",
+    "cust": "customer", "acct": "account", "acctg": "accounting",
+    "eqpt": "equipment", "equip": "equipment", "maint": "maintenance",
+    "inv": "inventory", "wo": "work", "hist": "history", "xfmr": "transformer",
+    "dist": "distribution", "trans": "transmission", "sub": "substation",
+    "gen": "generation", "fcst": "forecast", "mtr": "meter", "rdg": "reading",
+    "intvl": "interval", "cfg": "configuration", "attr": "attribute",
+    "geo": "geospatial", "doc": "document", "docs": "documents",
+    "veg": "vegetation", "insp": "inspection", "calc": "calculation",
+    "sched": "schedule", "dept": "department", "org": "organization",
+}
+
+# Suffixes glued onto a system name by a naming convention rather than meaning
+# anything: `emsdb`, `oms_tbl`, `pi_stg`. Stripped so the system name is visible.
+_GLUED_SUFFIXES = ("db", "tbl", "tab", "stg", "stage", "raw", "src", "ext",
+                   "vw", "view", "tmp", "wrk", "hist", "arch", "bkp")
+
+
+def _tokens(value: str) -> set[str]:
+    """Word set for alias and keyword matching.
+
+    Deliberately NOT canonical_key(): that strips vendor names, which are exactly
+    what stage 4 needs to see.
+
+    Three transformations, each added because a realistic name missed without it:
+      - camelCase and PascalCase are split. "OutageManagement" is one token to a
+        punctuation splitter, and no alias or keyword will ever equal it.
+      - common abbreviations are expanded alongside the original, so
+        "meter_data_mgmt" can match a "management" keyword.
+      - naming-convention suffixes are peeled off, so "emsdb" yields "ems".
+    """
+    text = _VERSION_RE.sub(" ", value or "")
+    # Split camelCase / PascalCase before lowercasing, while the boundary is visible.
+    text = _CAMEL_RE.sub(r"\1 \2", text).lower()
+    tokens = {t for t in _NON_ALNUM_RE.split(text) if t and t not in _STOPWORDS}
+
+    expanded = set(tokens)
+    for token in tokens:
+        # Naive singular, so "capital_projects" reaches the "capital project" pair
+        # and "meter_readings" reaches "meter reading". Both forms are kept, so a
+        # keyword that is genuinely plural still matches.
+        if len(token) > 4 and token.endswith("s") and not token.endswith("ss"):
+            expanded.add(token[:-1])
+        full = _ABBREVIATIONS.get(token)
+        if full:
+            expanded.add(full)
+        for suffix in _GLUED_SUFFIXES:
+            # Only peel when a real stem survives, so "db" itself is not reduced to "".
+            if token.endswith(suffix) and len(token) > len(suffix) + 1:
+                expanded.add(token[: -len(suffix)])
+    return expanded
+
+
+def _vendor_hit(tokens: set[str]) -> tuple[str, str | None, str] | None:
+    """Stage 4. Imported lazily so the tables stay optional.
+
+    scripts/ is not a package the server imports at module scope, and the server
+    must keep working if the tables are absent — a missing alias table means fewer
+    deterministic hits, not a broken pipeline.
+    """
+    try:
+        from .pu_tables import alias_lookup
+    except Exception:  # noqa: BLE001
+        return None
+    return alias_lookup(tokens)
+
+
+def _keyword_hit(tokens: set[str]) -> tuple[str, str | None, str] | None:
+    """Stage 5. See _vendor_hit for why this is lazy and failure-tolerant."""
+    try:
+        from .pu_tables import keyword_lookup
+    except Exception:  # noqa: BLE001
+        return None
+    return keyword_lookup(tokens)
 
 
 def build_llm_prompt(unresolved: list[str], canonicals: list[str]) -> str:

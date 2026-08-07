@@ -46,16 +46,24 @@ class TestCanonicalKey(unittest.TestCase):
         keys = {norm.canonical_key(v) for v in variants}
         self.assertEqual(len(keys), 1, f"expected one fingerprint, got {keys}")
 
-    def test_bare_vendor_token_defers_to_the_llm(self):
+    def test_bare_vendor_token_is_not_unified_by_FINGERPRINT(self):
         """"AVEVA PI" shares no discriminating word with "PI Historian".
-        Deliberately NOT unified: inferring that a bare vendor token implies a
-        capability is the judgement the cascade defers to the LLM stage, and
-        forcing a match here would mean guessing."""
+
+        The FUZZY stage must not unify them: it works on token overlap, and
+        inferring that a bare vendor token implies a capability would be guessing.
+
+        It DOES now resolve, one stage later, from the curated vendor table — see
+        tests/test_source_resolution.py. That is not the same thing. The fingerprint
+        stage guesses from word overlap; the vendor table states a fact a P&U data
+        architect knows ("AVEVA PI is a historian"), carries medium confidence, and
+        is correctable in the UI. This test pins the fingerprint behaviour, which is
+        still what it always was.
+        """
         self.assertNotEqual(norm.canonical_key("AVEVA PI"),
                             norm.canonical_key("PI Historian"))
-        self.assertEqual(
-            norm.resolve_deterministic("AVEVA PI", CANONICALS),
-            (None, None, None))
+        # The fuzzy index alone does not contain it.
+        index = norm.build_canonical_index(CANONICALS)
+        self.assertNotIn(norm.canonical_key("AVEVA PI"), index)
 
     def test_parenthetical_content_is_discriminating(self):
         """These canonicals differ ONLY inside the parens, so dropping the

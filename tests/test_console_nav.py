@@ -268,10 +268,26 @@ class TestKnowledgeBaseView(unittest.TestCase):
         survive a cold load — verified in a browser against the live app."""
         self.assertIn('name.startsWith("kb/")', JS)
 
-    def test_slug_hash_is_not_collapsed(self):
-        """The router rewrites the hash to the view name; that would turn
-        #kb/<slug> back into #kb and lose the address."""
-        self.assertIn('name === "kb" && current.startsWith("kb/")', JS)
+    def test_parameterized_hash_is_not_collapsed(self):
+        """The router rewrites the hash to the view name, which would turn
+        #kb/<slug> back into #kb and lose the address.
+
+        Generalized from a kb-only special case after the same bug hit
+        #proposals/<id>: the SPA drawer's "Write proposal" link arrived with an
+        empty form because the id was rewritten away before the handler read it.
+        Any `view/parameter` hash must survive.
+        """
+        self.assertIn('current.startsWith(name + "/")', JS)
+        self.assertIn("parameterized", JS)
+
+    def test_proposals_accepts_a_use_case_id(self):
+        """#proposals/<id> pre-fills the form and runs the free context check.
+
+        Without this, the SPA drawer could only link to a form that asks which use
+        case — which is the step the drawer button exists to remove.
+        """
+        self.assertIn('name.startsWith("proposals/")', JS)
+        self.assertIn("proposalPrefill", JS)
 
     def test_markdown_escapes_before_parsing(self):
         """THE security property of the renderer.
@@ -399,6 +415,24 @@ class TestSpaGroupedNav(unittest.TestCase):
                              "the patched SPA bundle does not parse")
         finally:
             os.unlink(temp)
+
+    def test_the_drawer_has_a_proposal_action(self):
+        """Reachability, not just existence.
+
+        The proposal agent was only reachable by navigating to the console and
+        typing a use-case id into a box. You decide to write a proposal while
+        looking AT a use case, so the action belongs in its detail drawer.
+        """
+        self.assertIn("gaProposalBtn", self.bundle,
+                      "the use-case drawer has no Write proposal action — run "
+                      "scripts/patch_spa_proposal_button.py")
+        self.assertIn("/console/#proposals/", self.bundle,
+                      "the drawer link must carry the use case id across")
+
+    def test_the_drawer_link_guards_a_missing_id(self):
+        """The drawer renders briefly before its data arrives; a link built then
+        would read #proposals/undefined and open the console on nothing."""
+        self.assertIn("m&&m.id?", self.bundle)
 
     def test_the_patch_script_is_idempotent_and_checkable(self):
         source = (ROOT / "scripts" / "patch_spa_grouped_nav.py").read_text()

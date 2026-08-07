@@ -134,6 +134,13 @@ def main() -> int:
                            [sys.executable, str(ROOT / "scripts"
                                                 / "patch_spa_grouped_nav.py"),
                             "--check"]))
+        # Same reasoning: an unpatched bundle silently removes the drawer's
+        # "Write proposal" action, and the feature goes back to being reachable
+        # only by typing an id into a form.
+        results.append(run("SPA proposal button applied",
+                           [sys.executable, str(ROOT / "scripts"
+                                                / "patch_spa_proposal_button.py"),
+                            "--check"]))
 
     print("\n" + "=" * 62)
     for result in results:

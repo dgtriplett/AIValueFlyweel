@@ -29,6 +29,7 @@ that has never talked to Databricks.
 | `test_readiness.py` | `classify()` truth table and the **dual-path** selection in `readiness_map()` (module vs. domain vs. `requires_locked`), driven by a fake DB. |
 | `test_value_engine.py` | The parameterized value model: component arithmetic, low/high bands, realized value, and the shipped catalog (every assumption key it references is seeded, so nothing silently evaluates to $0). |
 | `test_normalization.py` | Deterministic canonical matching (exact / alias / normalized) and that manual mappings are never overwritten. |
+| `test_source_resolution.py` | The discovery→catalog join: 100% of a realistic corpus of customer schema names (`maximo`, `osisoft_pi`, `sap_isu`) resolves deterministically, and **zero** analytics-noise names (`dim_date`, `bronze`, `poc_project`) resolve. Both corpora are the test — a resolver that matches everything makes the coverage numbers fiction. |
 | `test_generation.py` | Use-case candidate parsing: strict-schema validation, closed-vocab filtering, name-collision de-dupe, stable candidate ids. |
 | `test_confirm.py` | Propose/confirm token lifecycle — single use, TTL expiry, payload integrity. |
 | `test_taxonomy.py` | Taxonomy dimension vocabularies and effective-dating. |

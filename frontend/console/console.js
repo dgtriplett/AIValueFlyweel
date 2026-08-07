@@ -2362,6 +2362,9 @@
   // ---------------------------------------------------------------------
   // Proposal agent
   // ---------------------------------------------------------------------
+  // Set when the hash was #proposals/<id>, so the form opens pre-filled.
+  let proposalPrefill = null;
+
   async function viewProposals() {
     main.innerHTML = `
       <h2>Use-case proposals</h2>
@@ -2381,6 +2384,15 @@
         exactly what the agent would be told, so you can spot a missing value model
         before spending a generation on it.</p>
       <div id="result" style="margin-top:16px"></div>`;
+
+    if (proposalPrefill) {
+      $("#p-id").value = String(proposalPrefill);
+      // Show the context immediately. It costs nothing (no model call) and answers
+      // "is this use case worth generating for?" before any spend.
+      const trigger = main.querySelector('[data-act="context"]');
+      if (trigger) setTimeout(() => trigger.click(), 0);
+      proposalPrefill = null;   // one-shot, so a later visit starts clean
+    }
 
     onActions(main, {
       context: async () => {
@@ -2664,6 +2676,13 @@
       name = "kb";
     } else if (name === "kb") {
       kbSlug = null;
+    } else if (name.startsWith("proposals/")) {
+      // Arrived from the SPA's use-case drawer, which carries the id across so the
+      // console opens already pointed at that use case. Deciding to write a proposal
+      // happens while looking AT a use case, not at a form asking which one.
+      const id = parseInt(name.slice(10), 10);
+      proposalPrefill = Number.isFinite(id) ? id : null;
+      name = "proposals";
     }
     const render = VIEWS[name] || viewStart;
 
@@ -2685,9 +2704,13 @@
 
     // The hash is the source of truth so a view survives a reload and can be
     // linked to — useful when handing a colleague "the GRANTs page".
-    // Don't collapse #kb/<slug> back to #kb: the slug IS the address.
+    // Don't collapse a PARAMETERIZED hash back to its bare view name. #kb/<slug>
+    // is the address of an article, and #proposals/<id> carries the use case the
+    // SPA drawer sent us to — rewriting either loses the parameter, which is how
+    // the drawer's "Write proposal" link first arrived with an empty form.
     const current = location.hash.slice(1);
-    if (current !== name && !(name === "kb" && current.startsWith("kb/"))) {
+    const parameterized = current.startsWith(name + "/");
+    if (current !== name && !parameterized) {
       location.hash = name;
     }
     try {
