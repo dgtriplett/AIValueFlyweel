@@ -489,7 +489,7 @@ def tool_specs() -> list[dict]:
     return [tool.spec() for tool in TOOLS.values()]
 
 
-SYSTEM_PROMPT = """You are the Grid Atlas assistant, helping a Power & Utilities \
+SYSTEM_PROMPT = """You are the AI Value Flywheel assistant, helping a Power & Utilities \
 team understand and act on their data & AI portfolio.
 
 Use the tools to answer from the ACTUAL portfolio. Never invent a use case, a value, \

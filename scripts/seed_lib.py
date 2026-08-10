@@ -1,4 +1,4 @@
-"""Shared seed library for Grid Atlas.
+"""Shared seed library for AI Value Flywheel.
 
 Both seed_demo.py (populated walkthrough) and seed_clean.py (pristine day-1)
 call load(cur, data, clean=...) inside a SINGLE transaction, so a failure never

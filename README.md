@@ -1,4 +1,4 @@
-# Grid Atlas — P&U Data & AI Catalog, Value & Roadmap
+# AI Value Flywheel — P&U Data & AI Catalog, Value & Roadmap
 
 A Databricks App for **Power & Utilities** organizations that connects two halves
 of the same question:

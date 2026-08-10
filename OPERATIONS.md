@@ -1,6 +1,6 @@
 # Operations
 
-Running Grid Atlas for someone other than yourself: how to apply a schema change,
+Running AI Value Flywheel for someone other than yourself: how to apply a schema change,
 read the logs, diagnose a report, and answer the questions that come up first.
 
 - [Applying migrations](#applying-migrations)

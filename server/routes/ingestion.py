@@ -103,13 +103,13 @@ def _run_instructions() -> str:
         host = get_workspace_host()
     except Exception:  # noqa: BLE001 - the ZIP must build even if host lookup fails
         host = ""
-    target = "Grid Atlas → Get started → step 2A"
-    return f"""Grid Atlas — workspace metadata extractor
+    target = "AI Value Flywheel → Get started → step 2A"
+    return f"""AI Value Flywheel — workspace metadata extractor
 =========================================
 
 WHY YOU ARE RUNNING THIS LOCALLY
 --------------------------------
-Grid Atlas authenticates as a service principal that only has credentials for the
+AI Value Flywheel authenticates as a service principal that only has credentials for the
 one workspace it is deployed in. Your data is probably spread across more than
 that. This script runs under YOUR credentials, so it reaches every workspace you
 can reach, and produces files you upload back once.
@@ -266,7 +266,7 @@ async def bootstrap(request: Request):
             is_user_edited BOOLEAN, is_present BOOLEAN,
             first_seen_at TIMESTAMP, last_seen_at TIMESTAMP
         ) USING DELTA
-        COMMENT 'Grid Atlas: discovered Unity Catalog schemas across workspaces.'
+        COMMENT 'AI Value Flywheel: discovered Unity Catalog schemas across workspaces.'
     """)
     await _sql(f"""
         CREATE TABLE IF NOT EXISTS {atlas_fqn('discovered_tables')} (
@@ -281,7 +281,7 @@ async def bootstrap(request: Request):
             is_user_edited BOOLEAN, is_present BOOLEAN,
             first_seen_at TIMESTAMP, last_seen_at TIMESTAMP
         ) USING DELTA
-        COMMENT 'Grid Atlas: discovered Unity Catalog tables + AI enrichment.'
+        COMMENT 'AI Value Flywheel: discovered Unity Catalog tables + AI enrichment.'
     """)
     await write_audit("ingestion", None, "bootstrap", actor,
                       {"catalog": ATLAS_CATALOG, "schema": ATLAS_SCHEMA})

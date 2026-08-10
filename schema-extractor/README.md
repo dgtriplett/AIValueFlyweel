@@ -1,11 +1,11 @@
-# Grid Atlas — Metadata Extractor
+# AI Value Flywheel — Metadata Extractor
 
 A standalone utility that pulls Unity Catalog **metadata** from one or more
-Databricks workspaces into CSVs you upload to Grid Atlas.
+Databricks workspaces into CSVs you upload to AI Value Flywheel.
 
 ## Why this exists
 
-The Grid Atlas app authenticates as a service principal in the single workspace
+The AI Value Flywheel app authenticates as a service principal in the single workspace
 it is deployed to. Most utilities run several — prod/dev, per-operating-company,
 per-region — and the question worth answering ("what data do we have as an
 enterprise?") spans all of them.

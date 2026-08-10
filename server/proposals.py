@@ -185,7 +185,7 @@ def assemble_markdown(use_case: dict, sections: dict[str, str],
     value = context.get("value") or {}
     lines: list[str] = []
 
-    lines.append(f"> **Generated proposal** for {company}. Drafted by the Grid Atlas "
+    lines.append(f"> **Generated proposal** for {company}. Drafted by the AI Value Flywheel "
                  "proposal agent from this instance's portfolio data.")
     lines.append("> Value figures come from the value engine and the calibrated "
                  "assumptions, not from the model. Review before sharing.")

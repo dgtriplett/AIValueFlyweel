@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Apply Grid Atlas migrations to a Lakebase database.
+"""Apply AI Value Flywheel migrations to a Lakebase database.
 
     python3 scripts/migrate.py --profile <cli-profile> --project <lakebase-project>
     python3 scripts/migrate.py --status          # read-only: what would change
@@ -164,7 +164,7 @@ def main() -> None:
     if not args.project:
         sys.exit("--project is required (the Lakebase project holding app state)")
 
-    print("Grid Atlas — migrations")
+    print("AI Value Flywheel — migrations")
     connection = connect(args.profile, args.project, args.db)
     cursor = connection.cursor()
     pending, drifted = show_status(cursor)

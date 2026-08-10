@@ -1,5 +1,5 @@
 /*
- * Grid Atlas — Setup & Discovery Console
+ * AI Value Flywheel — Setup & Discovery Console
  *
  * A dependency-free operator console for the workflows added by the discovery
  * and agent layers. See index.html's comment for why this is plain JS rather

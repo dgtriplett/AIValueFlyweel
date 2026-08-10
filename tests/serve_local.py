@@ -177,7 +177,7 @@ def main() -> None:
 
     from app import app
 
-    print("\n  Grid Atlas (local, stubbed drivers)")
+    print("\n  AI Value Flywheel (local, stubbed drivers)")
     print(f"  Console:   http://{args.host}:{args.port}/console")
     print(f"  API docs:  http://{args.host}:{args.port}/docs")
     print(f"  Portfolio: http://{args.host}:{args.port}/  (built SPA)\n")

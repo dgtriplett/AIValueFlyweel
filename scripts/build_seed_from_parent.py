@@ -1,10 +1,10 @@
-"""Build Grid Atlas seed_data.json from the parent app's P&U content.
+"""Build AI Value Flywheel seed_data.json from the parent app's P&U content.
 
 Source (read-only, exported): data-ai-maturity-assessment
   - backend/industries/pu/use_cases_seed.json  (198 use cases, valueModel)
   - frontend/src/data/businessValue.ts          (34 global assumptions)
 
-Mapping into Grid Atlas's schema:
+Mapping into AI Value Flywheel's schema:
   domain (6)            -> lobs
   use case              -> use_cases (phase, status, category, effort, priority,
                                       hypothesized_value_json = valueModel)

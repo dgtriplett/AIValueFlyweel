@@ -451,6 +451,35 @@ class TestSpaGroupedNav(unittest.TestCase):
         self.assertIn("e?a.jsx", self.bundle[index - 40:index],
                       "the link is not guarded on the id being present")
 
+    def test_the_product_name_is_current(self):
+        """The user-visible name must be AI Value Flywheel everywhere.
+
+        The product has been renamed twice (Value Flywheel -> Grid Atlas ->
+        AI Value Flywheel) and the SPA bundle can only be rebranded by a patch
+        script, so a rebuild silently reverts it. This asserts the CURRENT name
+        and the absence of the superseded one.
+
+        Deliberately checks the display name only. `grid-atlas` / `grid_atlas`
+        remain as identifiers — the app name, the UC schemas, the Lakebase project
+        and the bundle target — because renaming those is a data migration, not a
+        rebrand.
+        """
+        self.assertIn("AI Value Flywheel", self.bundle,
+                      "the SPA bundle does not carry the current product name — "
+                      "run scripts/rebrand_bundle.py")
+        self.assertNotIn("Grid Atlas", self.bundle,
+                         "the superseded product name is back in the bundle")
+
+    def test_the_feature_name_survives_the_rebrand(self):
+        """"Value Flywheel" is also a real FEATURE (the flywheel tab, blast radius).
+
+        The rebrand must not consume it: a rule that replaced every occurrence
+        would rename the tab to "AI Value Flywheel" and lose the distinction
+        between the product and one of its views.
+        """
+        self.assertIn('label:"Value Flywheel"', self.bundle,
+                      "the Value Flywheel TAB lost its name to the rebrand")
+
     def test_the_patch_script_is_idempotent_and_checkable(self):
         source = (ROOT / "scripts" / "patch_spa_grouped_nav.py").read_text()
         self.assertIn("--check", source, "needs a no-op status mode for CI")

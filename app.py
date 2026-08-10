@@ -1,4 +1,4 @@
-"""Grid Atlas - FastAPI entry point.
+"""AI Value Flywheel - FastAPI entry point.
 
 Serves the REST API under /api/* and the built React SPA from frontend/dist.
 """
@@ -95,7 +95,7 @@ async def lifespan(app: FastAPI):
     await db.close()
 
 
-app = FastAPI(title="Grid Atlas", version="0.1.0", lifespan=lifespan)
+app = FastAPI(title="AI Value Flywheel", version="0.1.0", lifespan=lifespan)
 
 # Correlates every log line emitted while handling a request, and emits one line per
 # request with status + duration. Added before the routers so it wraps all of them.
@@ -188,5 +188,5 @@ if FRONTEND_DIST.exists():
 else:
     @app.get("/")
     async def root():
-        return {"message": "Grid Atlas API. Frontend build not found.",
+        return {"message": "AI Value Flywheel API. Frontend build not found.",
                 "console": "/console", "docs": "/docs"}

@@ -175,7 +175,7 @@ def build_staging_sql(
     return f"""
         CREATE OR REPLACE TABLE {staging}
         USING DELTA
-        COMMENT 'Grid Atlas AI enrichment staging: one raw ai_query() response per candidate table. Built by server/enrichment.py. Safe to drop; rebuilding re-pays for inference.'
+        COMMENT 'AI Value Flywheel AI enrichment staging: one raw ai_query() response per candidate table. Built by server/enrichment.py. Safe to drop; rebuilding re-pays for inference.'
         AS
         WITH candidates AS (
             SELECT t.workspace_id, t.catalog_name, t.schema_name, t.table_name,

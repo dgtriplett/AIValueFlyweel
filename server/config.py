@@ -1,4 +1,4 @@
-"""Dual-mode authentication and environment configuration for Grid Atlas.
+"""Dual-mode authentication and environment configuration for AI Value Flywheel.
 
 Detects whether the app is running inside Databricks Apps (service principal
 credentials auto-injected) or locally (uses a Databricks CLI profile).

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""One-shot deploy for Grid Atlas.
+"""One-shot deploy for AI Value Flywheel.
 
     python3 scripts/deploy.py                 # interactive
     python3 scripts/deploy.py --yes ...        # scripted / CI
@@ -533,7 +533,7 @@ def main() -> None:
     global DRY_RUN
 
     parser = argparse.ArgumentParser(
-        description="Deploy Grid Atlas into a Databricks workspace.",
+        description="Deploy AI Value Flywheel into a Databricks workspace.",
         formatter_class=argparse.ArgumentDefaultsHelpFormatter)
     parser.add_argument("--yes", "-y", action="store_true",
                         help="non-interactive; use flags and cached values")
@@ -570,7 +570,7 @@ def main() -> None:
     cache = load_cache()
     total = 8
 
-    print(bold("\nGrid Atlas — deploy"))
+    print(bold("\nAI Value Flywheel — deploy"))
     if DRY_RUN:
         print(yellow("dry run: nothing will be changed"))
 

@@ -33,7 +33,7 @@ ignore = [
 [project]
 name = "grid-atlas"
 version = "0.1.0"
-description = "Grid Atlas - Power & Utilities Use Case, Value & Roadmap portfolio management on Databricks"
+description = "AI Value Flywheel - Power & Utilities Use Case, Value & Roadmap portfolio management on Databricks"
 readme = "README.md"
 requires-python = ">=3.11"
 dependencies = [

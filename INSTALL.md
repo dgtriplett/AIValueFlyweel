@@ -1,4 +1,4 @@
-# Install — Grid Atlas
+# Install — AI Value Flywheel
 
 Deploy into **your own** Databricks workspace.
 
@@ -89,7 +89,7 @@ databricks postgres list-endpoints projects/grid-atlas-db/branches/production \
 > - `databricks database ...` manages **database instances**, which is what an App
 >   `database` resource binds to.
 >
-> Grid Atlas deliberately declares **no** `database` app resource. Binding an
+> AI Value Flywheel deliberately declares **no** `database` app resource. Binding an
 > instance the app never connects to creates a Postgres role that OAuth token auth
 > then rejects, and the app starts in demo mode with *"External authorization
 > failed"* — which looks like a credentials problem and is not one.

@@ -1,4 +1,4 @@
-# License & Terms — Grid Atlas
+# License & Terms — AI Value Flywheel
 
 **Powered by Databricks.** This is a Databricks Field Engineering reference application.
 

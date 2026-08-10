@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
-"""Grid Atlas — multi-workspace Unity Catalog metadata extractor.
+"""AI Value Flywheel — multi-workspace Unity Catalog metadata extractor.
 
 Sweeps `system.information_schema` across one or more Databricks workspaces and
-writes consolidated CSVs that the Grid Atlas app ingests to build its data-asset
+writes consolidated CSVs that the AI Value Flywheel app ingests to build its data-asset
 inventory.
 
 WHY THIS RUNS OUTSIDE THE APP
@@ -302,7 +302,7 @@ def main() -> None:
 
     urls = read_workspace_list(input_path)
     print("=" * 64)
-    print("Grid Atlas — Databricks metadata extractor")
+    print("AI Value Flywheel — Databricks metadata extractor")
     print("=" * 64)
     print(f"workspaces: {len(urls)}   columns: {'no' if args.no_columns else 'yes'}")
     print(f"output:     {OUTPUT_DIR}")
@@ -338,7 +338,7 @@ def main() -> None:
     print(f"schemas:    {len(totals['schemas'])}")
     print(f"tables:     {len(totals['tables'])}")
     print(f"columns:    {len(totals['columns'])}")
-    print("\nUpload these to Grid Atlas → Setup → Data Sources:")
+    print("\nUpload these to AI Value Flywheel → Setup → Data Sources:")
     for key in ("schemas", "tables", "columns"):
         if totals[key]:
             print(f"  {OUTPUT_DIR / f'all_{key}.csv'}")

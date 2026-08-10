@@ -38,7 +38,7 @@ async def export_template():
     ws0 = wb.active
     ws0.title = "Instructions"
     for i, line in enumerate([
-        ["Grid Atlas — Onboarding Workbook"],
+        ["AI Value Flywheel — Onboarding Workbook"],
         [""],
         ["Fill the highlighted (yellow) columns and re-upload via Data → Onboarding → Upload."],
         ["Do NOT edit the 'id' / 'key' columns — they map your edits back to the app."],

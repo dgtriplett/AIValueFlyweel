@@ -1,4 +1,4 @@
-# Architecture — Grid Atlas
+# Architecture — AI Value Flywheel
 
 ## Overview
 
