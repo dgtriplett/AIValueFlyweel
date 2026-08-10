@@ -255,6 +255,128 @@ class TestScopeClause(AccountTestCase):
         self.assertEqual((clause, params), ("true", []))
 
 
+class TestNoCrossTenantStatusLeak(unittest.TestCase):
+    """A new account must NOT inherit another customer's landed sources.
+
+    FOUND ON THE LIVE INSTANCE. Migration 009's view read
+
+        COALESCE(s.ingestion_status, da.ingestion_status, 'not_started')
+
+    intending the shared column as a fallback for the DEFAULT account so the upgrade
+    would be invisible. But the COALESCE applies to every account, and a newly created
+    account has no rows at all — so it fell through to the column and reported the
+    first customer's 20 governed sources as its own. Creating 'National Grid' beside
+    'Eversource Energy' produced identical readiness with zero differing assets.
+
+    Nothing would have surfaced it: the new customer's readiness, coverage and
+    portfolio value would all have been computed from someone else's data and every
+    number would have looked plausible. Migration 010 removes the fallback and
+    backfills explicit rows.
+    """
+
+    @classmethod
+    def setUpClass(cls):
+        from pathlib import Path
+        root = Path(__file__).parent.parent / "server" / "migrations"
+        cls.v009 = (root / "009_accounts.sql").read_text()
+        cls.v010 = (root / "010_fix_account_status_leak.sql").read_text()
+
+    def test_the_current_view_has_no_status_fallback(self):
+        """The view in 010 is the one that ships. It must not COALESCE to the
+        shared column for ingestion_status."""
+        view = self.v010[self.v010.index("CREATE OR REPLACE VIEW"):]
+        status_line = [line for line in view.split("\n")
+                       if "AS ingestion_status" in line]
+        self.assertTrue(status_line, "the view no longer selects ingestion_status")
+        self.assertNotIn("da.ingestion_status", status_line[0],
+                         "the cross-tenant fallback is back: a new account would "
+                         "inherit another customer's landed sources")
+
+    def test_it_backfills_every_account(self):
+        """Removing the fallback without backfilling would blank the default
+        account's position — an upgrade that erases the customer's data."""
+        self.assertIn("CROSS JOIN data_assets", self.v010)
+        self.assertIn("ON CONFLICT (account_id, data_asset_id) DO NOTHING",
+                      self.v010)
+
+    def test_the_default_account_keeps_its_position(self):
+        """The upgrade must stay invisible for the existing customer."""
+        self.assertIn("WHEN a.is_default", self.v010)
+        self.assertIn("COALESCE(da.ingestion_status", self.v010)
+
+    def test_new_accounts_start_at_not_started(self):
+        self.assertIn("ELSE 'not_started'", self.v010)
+
+    def test_descriptive_overrides_still_fall_back(self):
+        """display_name / cost / owning LOB SHOULD inherit the catalog.
+
+        Those describe a shared module rather than stating a customer's position: an
+        account that has not renamed its OMS should still see it called
+        "OMS (Outage Management)". Only the STATUS is per-tenant.
+        """
+        view = self.v010[self.v010.index("CREATE OR REPLACE VIEW"):]
+        self.assertIn("COALESCE(s.local_name, da.module)", view)
+        self.assertIn("COALESCE(s.ingest_cost_low, da.ingest_cost_low)", view)
+
+
+class TestNoUnscopedStatusReads(unittest.TestCase):
+    """No query may decide readiness from the SHARED column.
+
+    THE GUARD THAT WAS MISSING. `data_assets.ingestion_status` is shared across
+    tenants, so any query reading it directly answers with the default account's
+    position regardless of who is asking. Nine such reads survived the tenancy
+    migration across five modules — readiness was fixed, but the domain coverage
+    queries, the flow Sankey, the generation lens, the proposal context and two chat
+    tools all still read the shared column, so a second account saw the first
+    account's coverage.
+
+    Every one now takes a resolved `ready_assets()` list as a bind parameter, which is
+    the same pattern readiness.py uses. This test is what stops the tenth from being
+    added — the failure is invisible with one account, which is how nine of them got
+    written.
+    """
+
+    SCOPED_MODULES = ("routes/domains.py", "routes/generate.py", "routes/flow.py",
+                      "routes/proposals.py", "chat_tools.py", "readiness.py")
+
+    def test_no_module_reads_the_shared_status_column(self):
+        from pathlib import Path
+
+        server = Path(__file__).parent.parent / "server"
+        offenders = []
+        for path in server.rglob("*.py"):
+            if "migrations" in path.parts:
+                continue
+            for number, line in enumerate(path.read_text().split("\n"), 1):
+                stripped = line.strip()
+                if stripped.startswith("#") or stripped.startswith("--"):
+                    continue   # a comment explaining the rule is not a violation
+                if "ingestion_status IN ('curated','governed')" in line:
+                    # Reading it FROM the per-account view is correct.
+                    if "acs." in line or "s.ingestion_status" in line:
+                        continue
+                    offenders.append(
+                        f"{path.relative_to(server)}:{number}")
+        self.assertEqual(
+            offenders, [],
+            "these decide readiness from the SHARED data_assets column, so every "
+            "account would see the default account's position. Pass "
+            f"`await ready_assets()` as a parameter instead: {offenders}")
+
+    def test_the_scoped_modules_import_the_resolver(self):
+        """A module that filters on an asset list must get it from one place."""
+        from pathlib import Path
+
+        server = Path(__file__).parent.parent / "server"
+        for relative in self.SCOPED_MODULES:
+            source = (server / relative).read_text()
+            if "::int[])" not in source:
+                continue
+            self.assertIn("ready_assets", source,
+                          f"{relative} filters on an asset list but does not import "
+                          "the resolver, so it is building its own")
+
+
 class TestSimulatorContract(unittest.TestCase):
     """Structural guarantees about the simulator's shape."""
 

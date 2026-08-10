@@ -35,6 +35,7 @@ from .. import generation as gen
 from ..common import current_user, rows_to_list, write_audit
 from ..config import SERVING_ENDPOINT
 from ..db import db
+from ..readiness import ready_assets
 from ..limits import limiter
 
 router = APIRouter(prefix="/generate", tags=["generation"])
@@ -74,7 +75,7 @@ async def _domain_context() -> tuple[list[dict], list[dict], dict[str, dict], se
     rows = await db.fetch("""
         SELECT dd.name, dd.label, dd.description, dd.category,
                COUNT(asd.data_asset_id) FILTER (
-                   WHERE da.ingestion_status IN ('curated','governed')
+                   WHERE asd.data_asset_id = ANY($1::int[])
                ) AS ready_assets
         FROM data_domains dd
         LEFT JOIN asset_serves_domain asd ON asd.domain_id = dd.id
@@ -82,7 +83,7 @@ async def _domain_context() -> tuple[list[dict], list[dict], dict[str, dict], se
         WHERE COALESCE(dd.is_active, true) = true
         GROUP BY dd.id, dd.name, dd.label, dd.description, dd.category
         ORDER BY dd.category NULLS LAST, dd.label
-    """)
+    """, await ready_assets())
     satisfied: list[dict] = []
     unsatisfied: list[dict] = []
     index: dict[str, dict] = {}

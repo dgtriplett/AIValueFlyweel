@@ -28,6 +28,7 @@ from typing import Awaitable, Callable
 
 from . import accounts
 from .db import db
+from .readiness import ready_assets
 
 
 class Tool:
@@ -139,14 +140,14 @@ async def _get_use_case(args: dict, actor: str) -> dict:
     domains = await db.fetch("""
         SELECT dd.label, dd.name, urd.necessity,
                COUNT(asd.data_asset_id) FILTER (
-                   WHERE da.ingestion_status IN ('curated','governed')) AS landed
+                   WHERE asd.data_asset_id = ANY($2::int[])) AS landed
         FROM uc_requires_domain urd
         JOIN data_domains dd ON dd.id = urd.domain_id
         LEFT JOIN asset_serves_domain asd ON asd.domain_id = dd.id
         LEFT JOIN data_assets da ON da.id = asd.data_asset_id
         WHERE urd.use_case_id = $1
         GROUP BY dd.id, dd.label, dd.name, urd.necessity
-    """, uc_id)
+    """, uc_id, await ready_assets())
     return {
         "id": use_case["id"], "title": use_case["title"],
         "description": use_case.get("description"),
@@ -237,10 +238,10 @@ async def _list_data_sources(args: dict, actor: str) -> dict:
     from .common import rows_to_list
     rows = rows_to_list(await db.fetch("""
         SELECT source_category, count(*) AS modules,
-               count(*) FILTER (WHERE ingestion_status IN ('curated','governed')) AS landed,
+               count(*) FILTER (WHERE id = ANY($1::int[])) AS landed,
                count(*) FILTER (WHERE ingestion_status = 'not_started') AS not_started
         FROM data_assets GROUP BY source_category ORDER BY source_category
-    """))
+    """, await ready_assets()))
     return {"count": len(rows), "source_systems": rows}
 
 

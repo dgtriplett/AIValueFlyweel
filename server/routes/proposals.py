@@ -38,7 +38,7 @@ from .. import proposals as pr
 from ..common import current_user, write_audit
 from ..db import db
 from ..limits import limiter
-from ..readiness import BUILT_SQL_LIST, readiness_map
+from ..readiness import ready_assets, BUILT_SQL_LIST, readiness_map
 from ..value_engine import compute_value_range, load_assumptions
 
 logger = logging.getLogger(__name__)
@@ -107,7 +107,7 @@ async def _gather_context(use_case_id: int) -> tuple[dict, dict]:
     # Domain position: satisfied vs gap, by name.
     domain_rows = await db.fetch("""
         SELECT dd.label,
-               COALESCE(bool_or(da.ingestion_status IN ('curated','governed')),
+               COALESCE(bool_or(asd.data_asset_id = ANY($2::int[])),
                         false) AS satisfied
         FROM uc_requires_domain urd
         JOIN data_domains dd ON dd.id = urd.domain_id
@@ -115,7 +115,7 @@ async def _gather_context(use_case_id: int) -> tuple[dict, dict]:
         LEFT JOIN data_assets da ON da.id = asd.data_asset_id
         WHERE urd.use_case_id = $1 AND urd.necessity = 'required'
         GROUP BY dd.label ORDER BY dd.label
-    """, use_case_id)
+    """, use_case_id, await ready_assets())
     satisfied = [r["label"] for r in domain_rows if r["satisfied"]]
     gaps = [r["label"] for r in domain_rows if not r["satisfied"]]
 

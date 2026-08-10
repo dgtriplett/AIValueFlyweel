@@ -35,7 +35,7 @@ from ..common import current_user, row_to_dict, rows_to_list, write_audit
 from ..db import db
 # Import the readiness rule rather than restating it: a local copy would let
 # this module silently disagree with how readiness is actually computed.
-from ..readiness import READY_STATUSES as READY
+from ..readiness import ready_assets, READY_STATUSES as READY
 
 router = APIRouter(prefix="/flow", tags=["flow"])
 
@@ -295,7 +295,7 @@ async def list_glossary(search: str | None = None, include_derived: bool = True)
                        FILTER (WHERE da.id IS NOT NULL), '{}'::text[]
                    ) AS source_systems,
                    COUNT(DISTINCT asd.data_asset_id) FILTER (
-                       WHERE da.ingestion_status IN ('curated','governed')
+                       WHERE asd.data_asset_id = ANY($1::int[])
                    ) AS landed_sources,
                    COUNT(DISTINCT urd.use_case_id) AS use_case_count
             FROM data_domains dd
@@ -305,7 +305,7 @@ async def list_glossary(search: str | None = None, include_derived: bool = True)
             WHERE COALESCE(dd.is_active, true) = true
             GROUP BY dd.id
             ORDER BY dd.label
-        """)
+        """, await ready_assets())
         for raw in rows:
             # Read via a plain dict so a row missing an aggregate column degrades to
             # a default instead of raising. asyncpg Records index-error on an absent

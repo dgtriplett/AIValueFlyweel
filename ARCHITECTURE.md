@@ -86,6 +86,17 @@ written back to Lakebase, which stays the portfolio's system of record.
   query instead of eight copies. A NULL `account_id` means "visible to all", which
   is how a seeded folder or a global glossary term serves every tenant without
   duplication.
+- **Tenancy fix** — `010_fix_account_status_leak.sql`. 009's view read
+  `COALESCE(s.ingestion_status, da.ingestion_status, ...)`, intending the shared column
+  as a fallback for the DEFAULT account so the upgrade would be invisible. But the
+  COALESCE applied to EVERY account, and a newly created account has no rows — so it
+  inherited the first customer's landed sources. Found by creating a second account on
+  the live instance: it reported the same 20 governed sources with zero differing.
+  Every downstream number would have been computed from another tenant's data and
+  looked plausible. 010 backfills explicit rows for every account and drops the status
+  fallback; the DESCRIPTIVE overrides (display name, cost, owning LOB) still inherit
+  the catalog, because those describe a shared module rather than stating a customer's
+  position.
 - **Migration ledger** — `schema_migrations`, created by `server/migrator.py`
   rather than by a numbered migration, since it must exist before the ledger can
   be consulted.
