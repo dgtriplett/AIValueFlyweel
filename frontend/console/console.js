@@ -41,11 +41,21 @@
   }
 
   async function api(path, options = {}) {
+    // The chosen account travels on every request. Deliberately here rather than at
+    // each call site: scoping that depends on each fetch remembering to add a header
+    // fails silently and shows one customer another's numbers. The server falls back
+    // to the default account when the header is absent.
+    const account = localStorage.getItem("avf_account_id");
+    const headers = options.body instanceof FormData
+      ? {}
+      : { "Content-Type": "application/json" };
+    if (account) headers["X-Grid-Atlas-Account"] = account;
     const response = await fetch(`/api${path}`, {
-      headers: options.body instanceof FormData
-        ? {}
-        : { "Content-Type": "application/json" },
+      headers,
       ...options,
+      // Spread order matters: options could carry its own headers and silently
+      // drop the account, so the merged set is reapplied last.
+      ...(options.headers ? { headers: { ...headers, ...options.headers } } : {}),
     });
     let payload = null;
     try {
@@ -2485,6 +2495,304 @@
   }
 
   // ---------------------------------------------------------------------
+  // What-if: land these sources, see what changes
+  // ---------------------------------------------------------------------
+  /*
+   * The screen that answers "what should we do next" rather than "where are we".
+   *
+   * Two modes in one view because they are one decision: browse the ranked
+   * candidates, then select several and compare them. Selection state is
+   * module-level so switching to a detail projection and back does not lose it —
+   * rebuilding a comparison set is the tedious part.
+   */
+  let whatifSelected = new Set();
+  let whatifCandidates = [];
+
+  async function viewWhatIf() {
+    main.innerHTML = `
+      <h2>What if we landed…</h2>
+      <p class="lede">Pick one or more unlanded sources and see exactly which use
+        cases become shovel-ready, what they are worth, and what it would cost.
+        Nothing is written — this is a projection you can run as often as you like.</p>
+      <div id="wi-body"><p class="muted"><span class="spin"></span>
+        Projecting every unlanded source…</p></div>
+      <div id="result"></div>`;
+
+    const body = $("#wi-body");
+    try {
+      const data = await api("/whatif/candidates?limit=40");
+      whatifCandidates = data.candidates || [];
+      if (!whatifCandidates.length) {
+        body.innerHTML = banner("info", text(data.note
+          || "No unlanded source unblocks anything on its own."));
+        return;
+      }
+
+      body.innerHTML = `
+        <div class="stat" style="margin-bottom:16px">
+          <div><span class="k">Unlanded sources</span><span class="v">${
+            num(data.evaluated)}</span></div>
+          <div><span class="k">With impact</span><span class="v">${
+            num(data.with_impact)}</span></div>
+          <div><span class="k">Best value / $M</span><span class="v">${
+            num(whatifCandidates[0].value_per_cost)}</span></div>
+        </div>
+        <p class="small muted">${text(data.note)}</p>
+        <div class="row" style="gap:8px;margin:14px 0">
+          <button class="action" data-act="simulate" data-busy="Projecting…">
+            Project selected</button>
+          <button class="action secondary" data-act="compare" data-busy="Comparing…">
+            Compare selected</button>
+          <button class="action secondary" data-act="clear">Clear</button>
+          <span class="small muted" id="wi-count"></span>
+        </div>
+        <table>
+          <thead><tr>
+            <th style="width:34px"></th><th>Source</th><th>Status</th>
+            <th class="num">Use cases</th><th class="num">Value / yr</th>
+            <th class="num">Cost</th><th class="num">Value per $M</th>
+          </tr></thead>
+          <tbody>${whatifCandidates.map((c) => `
+            <tr>
+              <td><input type="checkbox" data-pick="${c.data_asset_id}"
+                    ${whatifSelected.has(c.data_asset_id) ? "checked" : ""}></td>
+              <td><strong>${text(c.module)}</strong>
+                <div class="small muted">${text(c.source)}${
+                  c.vendor ? " · " + text(c.vendor) : ""}</div></td>
+              <td class="small">${text(c.status)}</td>
+              <td class="num">${num(c.use_cases_unblocked)}</td>
+              <td class="num">$${num(c.value_unblocked_mm)}M</td>
+              <td class="num small muted">$${(c.cost_low / 1e6).toFixed(2)}–${
+                (c.cost_high / 1e6).toFixed(2)}M</td>
+              <td class="num"><strong>${num(c.value_per_cost)}</strong></td>
+            </tr>`).join("")}
+          </tbody></table>`;
+
+      body.querySelectorAll("[data-pick]").forEach((box) => {
+        box.addEventListener("change", () => {
+          const id = parseInt(box.dataset.pick, 10);
+          if (box.checked) whatifSelected.add(id);
+          else whatifSelected.delete(id);
+          updateWhatIfCount();
+        });
+      });
+      updateWhatIfCount();
+
+      onActions(main, {
+        simulate: async () => {
+          const ids = [...whatifSelected];
+          if (!ids.length) throw new Error("Select at least one source.");
+          renderProjection(await api("/whatif/simulate", {
+            method: "POST", body: JSON.stringify({ data_asset_ids: ids }),
+          }));
+        },
+        compare: async () => {
+          const ids = [...whatifSelected];
+          if (ids.length < 2) {
+            throw new Error("Select at least two sources to compare. Each is "
+                            + "compared on its own, then all of them together.");
+          }
+          // Each source alone, plus the whole set — the question is usually
+          // "which one first", not "all or nothing".
+          const options = ids.map((id) => [id]);
+          options.push(ids);
+          renderComparison(await api("/whatif/simulate/compare", {
+            method: "POST", body: JSON.stringify({ options }),
+          }));
+        },
+        clear: () => { whatifSelected.clear(); return viewWhatIf(); },
+      });
+    } catch (error) {
+      body.innerHTML = banner("err", error.message);
+    }
+  }
+
+  function updateWhatIfCount() {
+    const slot = $("#wi-count");
+    if (slot) {
+      slot.textContent = whatifSelected.size
+        ? `${whatifSelected.size} selected`
+        : "Nothing selected";
+    }
+  }
+
+  function renderProjection(d) {
+    const cost = d.cost || {};
+    const base = (d.baseline || {}).shovel_ready;
+    const proj = (d.projected || {}).shovel_ready;
+    $("#result").innerHTML = `
+      <h3>If you landed ${d.sources.map((s) => text(s.module)).join(" + ")}</h3>
+      <div class="stat" style="margin:12px 0">
+        <div><span class="k">Shovel-ready</span><span class="v">${num(base)} → ${
+          num(proj)}</span></div>
+        <div><span class="k">Unlocked</span><span class="v">${
+          num(d.unlocked_count)}</span></div>
+        <div><span class="k">Annual value</span><span class="v">$${
+          num(d.annual_value_mm)}M</span></div>
+        <div><span class="k">Total cost</span><span class="v">$${
+          ((cost.total_mid || 0) / 1e6).toFixed(2)}M</span></div>
+        <div><span class="k">Payback</span><span class="v">${
+          d.payback_months != null ? num(d.payback_months) + " mo" : "—"}</span></div>
+      </div>
+
+      ${d.unlocked.length ? `
+        <section>
+          <h3 class="small muted">Becomes shovel-ready</h3>
+          <table><tbody>${d.unlocked.map((u) => `
+            <tr><td>${text(u.title)}</td>
+                <td class="small muted">${text(u.lob || "")}</td>
+                <td class="small muted">effort ${text(u.effort || "M")}</td>
+                <td class="num">$${num(u.value_mm)}M</td></tr>`).join("")}
+          </tbody></table>
+        </section>` : banner("info", "This combination unblocks nothing on its own.")}
+
+      ${d.awaiting_count ? `
+        <section>
+          <h3 class="small muted">Data would be complete, but prerequisites remain</h3>
+          <p class="small muted">Worth $${num(d.awaiting_value_mm)}M. The data gap
+            closes; what is left is sequencing, not ingestion.</p>
+          <table><tbody>${d.data_complete_awaiting_prerequisites.map((u) => `
+            <tr><td>${text(u.title)}</td>
+                <td class="num">$${num(u.value_mm)}M</td>
+                <td class="small muted">still needs: ${
+                  (u.still_pending || []).map(text).join(", ") || "—"}</td>
+            </tr>`).join("")}
+          </tbody></table>
+        </section>` : ""}
+
+      ${Object.keys(d.value_by_lob || {}).length ? `
+        <section>
+          <h3 class="small muted">Value by line of business</h3>
+          <table><tbody>${Object.entries(d.value_by_lob).map(([lob, v]) => `
+            <tr><td>${text(lob)}</td><td class="num">$${num(v)}M</td></tr>`).join("")}
+          </tbody></table>
+        </section>` : ""}
+
+      <p class="small muted">Cost = sources $${num(cost.sources_low)}–$${
+        num(cost.sources_high)} plus $${num(cost.delivery_mid)} to deliver what they
+        unlock. Nobody lands data and stops, so the source price alone is not the
+        investment.</p>
+      ${banner("info", text(d.note || "Projection only — nothing was changed."))}`;
+  }
+
+  function renderComparison(d) {
+    $("#result").innerHTML = `
+      <h3>Options, best value per dollar first</h3>
+      <table>
+        <thead><tr><th>Land</th><th class="num">Unlocks</th>
+          <th class="num">Value / yr</th><th class="num">Cost</th>
+          <th class="num">Value per $M</th><th class="num">Payback</th></tr></thead>
+        <tbody>${(d.options || []).map((o, index) => `
+          <tr${index === 0 ? ' style="background:rgba(255,54,33,.07)"' : ""}>
+            <td>${o.sources.map(text).join(" + ")}
+              ${o.top_unlocked && o.top_unlocked.length ? `
+                <div class="small muted">${o.top_unlocked.slice(0, 3)
+                  .map(text).join(" · ")}</div>` : ""}</td>
+            <td class="num">${num(o.unlocked_count)}</td>
+            <td class="num">$${num(o.annual_value_mm)}M</td>
+            <td class="num">$${((o.total_cost || 0) / 1e6).toFixed(2)}M</td>
+            <td class="num"><strong>${num(o.value_per_cost)}</strong></td>
+            <td class="num small">${o.payback_months != null
+              ? num(o.payback_months) + " mo" : "—"}</td>
+          </tr>`).join("")}
+        </tbody></table>
+      <p class="small muted">${text(d.note || "")}</p>`;
+  }
+
+  // ---------------------------------------------------------------------
+  // Accounts
+  // ---------------------------------------------------------------------
+  /*
+   * The switcher is what makes one deployment serve a territory. Switching writes
+   * the choice to localStorage and reloads, because the account has to be sent on
+   * EVERY request — patching it into each fetch would mean a view that forgot to
+   * would silently read another customer's numbers.
+   */
+  const ACCOUNT_KEY = "avf_account_id";
+
+  async function viewAccounts() {
+    main.innerHTML = `
+      <h2>Accounts</h2>
+      <p class="lede">One deployment, several utilities. Each account owns its own
+        company profile, calibrated assumptions, landed sources, research and
+        knowledge base — the reference library of use cases and sources is shared.</p>
+      <div class="row" style="gap:8px;margin-bottom:16px">
+        <input id="acct-name" placeholder="Utility name" style="flex:1;min-width:200px">
+        <select id="acct-type">
+          <option value="">Type…</option>
+          <option value="investor-owned">Investor-owned</option>
+          <option value="municipal">Municipal</option>
+          <option value="cooperative">Cooperative</option>
+          <option value="generation-only">Generation-only</option>
+        </select>
+        <button class="action" data-act="create">Add account</button>
+      </div>
+      <div id="acct-body"><p class="muted"><span class="spin"></span> Loading…</p></div>
+      <div id="result"></div>`;
+
+    const body = $("#acct-body");
+    try {
+      const data = await api("/accounts?include_inactive=true");
+      if (data.note && !(data.accounts || []).length) {
+        body.innerHTML = banner("warn", text(data.note));
+        return;
+      }
+      const currentId = data.current_account_id;
+      body.innerHTML = `
+        <table>
+          <thead><tr><th>Account</th><th>Type</th><th class="num">Sources ready</th>
+            <th>Researched</th><th class="num">KB</th><th></th></tr></thead>
+          <tbody>${(data.accounts || []).map((a) => `
+            <tr${a.id === currentId ? ' style="background:rgba(255,54,33,.07)"' : ""}>
+              <td><strong>${text(a.name)}</strong>
+                ${a.is_default ? ' <em class="small muted">default</em>' : ""}
+                ${!a.is_active ? ' <em class="small muted">archived</em>' : ""}
+                <div class="small muted">${text(a.slug)}</div></td>
+              <td class="small">${text(a.utility_type || "—")}</td>
+              <td class="num">${num(a.sources_ready)} / ${num(a.sources_tracked)}</td>
+              <td class="small">${a.researched ? "yes" : "no"}</td>
+              <td class="num small">${num(a.kb_articles)}</td>
+              <td class="num">
+                ${a.id === currentId
+                  ? '<em class="small">viewing</em>'
+                  : `<button class="action secondary" data-act="switch"
+                       data-id="${a.id}">Switch to</button>`}
+                ${!a.is_default && a.is_active
+                  ? `<button class="action secondary" data-act="makedefault"
+                       data-id="${a.id}">Make default</button>` : ""}
+              </td>
+            </tr>`).join("")}
+          </tbody></table>
+        <p class="small muted">Switching reloads the page: the account is sent on
+          every request, so it cannot be changed for one view only.</p>`;
+
+      onActions(main, {
+        create: async () => {
+          const name = $("#acct-name").value.trim();
+          if (!name) throw new Error("Give the utility a name.");
+          await api("/accounts", {
+            method: "POST",
+            body: JSON.stringify({ name, utility_type: $("#acct-type").value || null }),
+          });
+          return viewAccounts();
+        },
+        switch: (button) => {
+          localStorage.setItem(ACCOUNT_KEY, button.dataset.id);
+          location.reload();
+        },
+        makedefault: async (button) => {
+          await api(`/accounts/${button.dataset.id}`, {
+            method: "PATCH", body: JSON.stringify({ make_default: true }),
+          });
+          return viewAccounts();
+        },
+      });
+    } catch (error) {
+      body.innerHTML = banner("err", error.message);
+    }
+  }
+
+  // ---------------------------------------------------------------------
   // Router
   // ---------------------------------------------------------------------
   const VIEWS = {
@@ -2495,6 +2803,8 @@
     flow: viewFlow,
     catalog: viewCatalog,
     generate: viewGenerate,
+    whatif: viewWhatIf,
+    accounts: viewAccounts,
     kb: viewKnowledge,
     proposals: viewProposals,
     admin: viewAdmin,
@@ -2554,6 +2864,7 @@
       items: [
         ["ask", "Ask"],
         ["coverage", "Coverage & readiness"],
+        ["whatif", "What if we landed\u2026"],
         ["flow", "Value flow"],
         ["research", "Company research"],
       ],
@@ -2575,6 +2886,7 @@
 
   // Sits apart from the groups: settings, not a workflow stage.
   const NAV_ADMIN = [
+    ["accounts", "Accounts"],
     ["admin", "Admin & audit"],
     ["branding", "Branding"],
   ];
