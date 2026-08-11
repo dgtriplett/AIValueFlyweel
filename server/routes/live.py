@@ -18,8 +18,21 @@ async def status():
 async def sync(request: Request, apply: bool = True):
     """Reconcile ingestion_status + UC live-status from system tables.
     Returns a diff of what changed (or would change if apply=false)."""
-    _ = current_user(request)
-    return await reconcile(apply=apply)
+    actor = current_user(request)
+    result = await reconcile(apply=apply)
+
+    # A sync that actually CHANGED something moved readiness, and therefore buildable
+    # value. Only snapshot when apply=true and something changed: a dry run and a
+    # no-op sync are not events, and charting them would fill the trend with
+    # duplicate points that imply activity where there was none.
+    if apply and (result.get("asset_changes") or result.get("uc_changes")):
+        from .. import snapshots as snap
+        changed = len(result.get("asset_changes") or []) + \
+            len(result.get("uc_changes") or [])
+        await snap.capture_quietly(
+            snap.REASON_SOURCE, actor=actor,
+            detail=f"live sync advanced {changed} record(s) from system tables")
+    return result
 
 
 @router.post("/sync-genie", dependencies=[Depends(limiter("sweep"))])

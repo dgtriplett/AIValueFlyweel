@@ -2793,6 +2793,187 @@
   }
 
   // ---------------------------------------------------------------------
+  // Trend — the portfolio over time
+  // ---------------------------------------------------------------------
+  /*
+   * An inline SVG sparkline rather than a charting library: the console ships with no
+   * dependencies, and one line chart is not worth changing that. The series is short
+   * (one point per real event, not per day), so a hand-drawn polyline is legible and
+   * the whole view is ~120 lines.
+   */
+  async function viewTrend() {
+    main.innerHTML = `
+      <h2>Trend</h2>
+      <p class="lede">How the portfolio has moved. Each point is a real event —
+        assumptions calibrated, a source landed, a sync that changed something — so
+        the chart explains itself rather than needing a changelog.</p>
+      <div class="row" style="gap:8px;margin-bottom:16px">
+        <button class="action" data-act="capture" data-busy="Capturing…">
+          Snapshot now</button>
+        <button class="action secondary" data-act="current" data-busy="Computing…">
+          What would it say?</button>
+      </div>
+      <div id="tr-body"><p class="muted"><span class="spin"></span> Loading…</p></div>
+      <div id="result"></div>`;
+
+    onActions(main, {
+      capture: async () => {
+        await api("/snapshots", {
+          method: "POST",
+          body: JSON.stringify({ reason: "manual", detail: "captured from the console" }),
+        });
+        return viewTrend();
+      },
+      current: async () => {
+        const d = await api("/snapshots/current");
+        const m = d.metrics || {};
+        $("#result").innerHTML = `
+          <h3 class="small muted">Right now — not stored</h3>
+          <div class="stat" style="margin:10px 0">
+            ${metricCell("Total value", "$" + num(m.total_value_mm) + "M")}
+            ${metricCell("Buildable", "$" + num(m.buildable_value_mm) + "M")}
+            ${metricCell("Shovel-ready", num(m.shovel_ready))}
+            ${metricCell("Sources", num(m.sources_ready) + " / " + num(m.sources_total))}
+            ${metricCell("Domains met", num(m.domains_satisfied) + " / " + num(m.domains_total))}
+          </div>`;
+      },
+    });
+
+    const body = $("#tr-body");
+    try {
+      const d = await api("/snapshots?limit=500");
+      const series = d.snapshots || [];
+      if (series.length === 0) {
+        body.innerHTML = banner("info", text(d.note || "No snapshots yet."));
+        return;
+      }
+      if (series.length === 1) {
+        body.innerHTML = banner("info",
+          "One snapshot so far — a trend needs at least two points. The next one is "
+          + "captured automatically when something moves the portfolio.")
+          + renderTrendTable(series, d);
+        return;
+      }
+
+      const change = d.change_since_first || {};
+      body.innerHTML = `
+        <div class="stat" style="margin-bottom:18px">
+          ${metricCell("Buildable value",
+            "$" + num((d.latest || {}).buildable_value_mm) + "M",
+            change.buildable_value_mm)}
+          ${metricCell("Shovel-ready", num((d.latest || {}).shovel_ready),
+            change.shovel_ready)}
+          ${metricCell("Sources landed", num((d.latest || {}).sources_ready),
+            change.sources_ready)}
+          ${metricCell("Domains met", num((d.latest || {}).domains_satisfied),
+            change.domains_satisfied)}
+          ${metricCell("Blocked", num((d.latest || {}).blocked), change.blocked, true)}
+        </div>
+        ${sparkline(series, "buildable_value_mm", "Buildable value ($M)")}
+        ${sparkline(series, "shovel_ready", "Shovel-ready use cases")}
+        ${renderTrendTable(series, d)}`;
+
+      main.querySelectorAll("[data-drop]").forEach((button) => {
+        button.addEventListener("click", async () => {
+          if (!confirm("Remove this point? A snapshot taken mid-migration is "
+                       + "misleading and cannot be corrected — the state it recorded "
+                       + "is gone.")) return;
+          await api(`/snapshots/${button.dataset.drop}`, { method: "DELETE" });
+          viewTrend();
+        });
+      });
+    } catch (error) {
+      body.innerHTML = banner("err", error.message);
+    }
+  }
+
+  /** A stat cell with an optional signed delta. `lowerIsBetter` flips the colour. */
+  function metricCell(label, value, change, lowerIsBetter) {
+    let badge = "";
+    if (change !== undefined && change !== null && change !== 0) {
+      const good = lowerIsBetter ? change < 0 : change > 0;
+      const sign = change > 0 ? "+" : "";
+      badge = ` <span style="font-size:11px;color:${
+        good ? "var(--success)" : "var(--warning)"}">${sign}${num(change)}</span>`;
+    }
+    return `<div><span class="k">${text(label)}</span>
+              <span class="v">${value}${badge}</span></div>`;
+  }
+
+  /**
+   * Minimal SVG line chart.
+   *
+   * Points are evenly spaced by INDEX, not by timestamp. Deliberate: snapshots are
+   * event-triggered, so real time between them is arbitrary — three in one afternoon
+   * then nothing for a month. Spacing by time would squash the interesting cluster
+   * into a few pixels; spacing by event makes each change equally readable, and the
+   * table below carries the actual dates.
+   */
+  function sparkline(series, field, label) {
+    const values = series.map((s) => Number(s[field] || 0));
+    const max = Math.max(...values, 1);
+    const min = Math.min(...values, 0);
+    const span = (max - min) || 1;
+    const width = 720;
+    const height = 130;
+    const pad = 8;
+    const step = values.length > 1 ? (width - pad * 2) / (values.length - 1) : 0;
+
+    const points = values.map((v, i) => {
+      const x = pad + i * step;
+      const y = height - pad - ((v - min) / span) * (height - pad * 2);
+      return `${x.toFixed(1)},${y.toFixed(1)}`;
+    });
+
+    return `
+      <section>
+        <h3 class="small muted">${text(label)}</h3>
+        <svg viewBox="0 0 ${width} ${height}" style="width:100%;max-width:${width}px;
+             height:auto;background:var(--navy-800);border:1px solid var(--navy-600);
+             border-radius:8px" role="img"
+             aria-label="${text(label)}: ${values[0]} to ${values[values.length - 1]}">
+          <polyline fill="none" stroke="var(--lava)" stroke-width="2"
+                    points="${points.join(" ")}"/>
+          ${points.map((p) => {
+            const [x, y] = p.split(",");
+            return `<circle cx="${x}" cy="${y}" r="3" fill="var(--lava-400)"/>`;
+          }).join("")}
+          <text x="${pad}" y="14" fill="#618794" font-size="11">${num(max)}</text>
+          <text x="${pad}" y="${height - 2}" fill="#618794" font-size="11">${num(min)}</text>
+        </svg>
+      </section>`;
+  }
+
+  function renderTrendTable(series, d) {
+    // Newest first in the table: the chart reads left-to-right chronologically, but a
+    // list is scanned from the top and the recent events are the interesting ones.
+    const rows = [...series].reverse();
+    return `
+      <section>
+        <h3 class="small muted">Every point</h3>
+        <table>
+          <thead><tr><th>When</th><th>Why</th><th class="num">Buildable</th>
+            <th class="num">Shovel-ready</th><th class="num">Sources</th>
+            <th></th></tr></thead>
+          <tbody>${rows.map((s) => `
+            <tr>
+              <td class="small">${text((s.captured_at || "").slice(0, 16)
+                .replace("T", " "))}</td>
+              <td class="small">${text((s.reason || "").replace(/_/g, " "))}
+                ${s.detail ? `<div class="small muted">${text(s.detail)}</div>` : ""}</td>
+              <td class="num">$${num(s.buildable_value_mm)}M</td>
+              <td class="num">${num(s.shovel_ready)}</td>
+              <td class="num">${num(s.sources_ready)}</td>
+              <td class="num"><button class="action secondary"
+                    data-drop="${s.id}">Remove</button></td>
+            </tr>`).join("")}
+          </tbody></table>
+        <p class="small muted">${num(series.length)} point(s) since
+          ${text((d.first_captured_at || "").slice(0, 10))}.</p>
+      </section>`;
+  }
+
+  // ---------------------------------------------------------------------
   // Router
   // ---------------------------------------------------------------------
   const VIEWS = {
@@ -2804,6 +2985,7 @@
     catalog: viewCatalog,
     generate: viewGenerate,
     whatif: viewWhatIf,
+    trend: viewTrend,
     accounts: viewAccounts,
     kb: viewKnowledge,
     proposals: viewProposals,
@@ -2865,6 +3047,7 @@
         ["ask", "Ask"],
         ["coverage", "Coverage & readiness"],
         ["whatif", "What if we landed\u2026"],
+        ["trend", "Trend over time"],
         ["flow", "Value flow"],
         ["research", "Company research"],
       ],

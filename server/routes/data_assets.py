@@ -3,6 +3,7 @@ from fastapi import APIRouter, HTTPException, Request
 from pydantic import BaseModel
 
 from ..common import current_user, row_to_dict, rows_to_list, write_audit
+from .. import accounts
 from ..db import db
 
 router = APIRouter(prefix="/data-assets", tags=["data_assets"])
@@ -34,7 +35,18 @@ async def _attach_benefiting(asset: dict) -> dict:
 
 @router.get("")
 async def list_data_assets():
-    rows = await db.fetch("SELECT * FROM data_assets ORDER BY id")
+    # The catalog row is shared; the STATUS is per-account. Overlaid here so the list
+    # shows this customer's position rather than the catalog default — otherwise a new
+    # account sees another tenant's landed sources in the very first screen.
+    rows = await db.fetch("""
+        SELECT da.*,
+               COALESCE(acs.ingestion_status, da.ingestion_status) AS ingestion_status,
+               COALESCE(acs.is_user_edited, false) AS status_user_edited
+        FROM data_assets da
+        LEFT JOIN account_asset_status acs
+               ON acs.data_asset_id = da.id AND acs.account_id = $1
+        ORDER BY da.id
+    """, await accounts.current())
     assets = rows_to_list(rows)
     for a in assets:
         await _attach_benefiting(a)
@@ -43,7 +55,15 @@ async def list_data_assets():
 
 @router.get("/{asset_id}")
 async def get_data_asset(asset_id: int):
-    row = await db.fetchrow("SELECT * FROM data_assets WHERE id = $1", asset_id)
+    row = await db.fetchrow("""
+        SELECT da.*,
+               COALESCE(acs.ingestion_status, da.ingestion_status) AS ingestion_status,
+               COALESCE(acs.is_user_edited, false) AS status_user_edited
+        FROM data_assets da
+        LEFT JOIN account_asset_status acs
+               ON acs.data_asset_id = da.id AND acs.account_id = $2
+        WHERE da.id = $1
+    """, asset_id, await accounts.current())
     if row is None:
         raise HTTPException(404, "Data asset not found")
     return await _attach_benefiting(row_to_dict(row))
@@ -82,20 +102,60 @@ class StatusIn(BaseModel):
 
 @router.patch("/{asset_id}/status")
 async def set_status(asset_id: int, body: StatusIn, request: Request):
-    """One-click ingestion-status setter for the curated catalog checklist."""
+    """One-click ingestion-status setter for the curated catalog checklist.
+
+    Writes to account_asset_status, NOT to data_assets. Whether a source is landed is
+    a statement about ONE customer; data_assets is the shared catalog. Writing there
+    would mean one utility marking their OMS governed did so for every tenant — the
+    write-side twin of the read leak migration 010 fixed.
+
+    `is_user_edited` is set so a later system-table sweep does not silently revert a
+    human's judgement, which is the same rule the rest of the app follows.
+    """
     if body.ingestion_status not in _STATUSES:
         raise HTTPException(422, f"ingestion_status must be one of {_STATUSES}")
     actor = current_user(request)
-    row = await db.fetchrow(
-        "UPDATE data_assets SET ingestion_status=$1, auto_captured=false, updated_at=now() "
-        "WHERE id=$2 RETURNING *",
-        body.ingestion_status, asset_id,
-    )
-    if row is None:
+
+    asset = await db.fetchrow("SELECT id FROM data_assets WHERE id = $1", asset_id)
+    if asset is None:
         raise HTTPException(404, "Data asset not found")
+
+    account_id = await accounts.current()
+    if account_id is None:
+        # Pre-migration install: the shared column is still the only place there is.
+        await db.execute(
+            "UPDATE data_assets SET ingestion_status=$1, auto_captured=false, "
+            "updated_at=now() WHERE id=$2", body.ingestion_status, asset_id)
+    else:
+        await db.execute("""
+            INSERT INTO account_asset_status
+                (account_id, data_asset_id, ingestion_status, is_user_edited,
+                 updated_by, updated_at)
+            VALUES ($1,$2,$3,true,$4,now())
+            ON CONFLICT (account_id, data_asset_id) DO UPDATE SET
+                ingestion_status = EXCLUDED.ingestion_status,
+                is_user_edited = true,
+                updated_by = EXCLUDED.updated_by,
+                updated_at = now()
+        """, account_id, asset_id, body.ingestion_status, actor)
+
     await write_audit("data_asset", asset_id, "set_status", actor,
-                      {"ingestion_status": body.ingestion_status})
-    return await _attach_benefiting(row_to_dict(row))
+                      {"ingestion_status": body.ingestion_status,
+                       "account_id": account_id})
+
+    # Landing or unlanding a source changes readiness and therefore buildable value.
+    # This is the event the trend chart exists to record.
+    from .. import snapshots as snap
+    await snap.capture_quietly(
+        snap.REASON_SOURCE, actor=actor,
+        detail=f"source {asset_id} set to {body.ingestion_status}")
+
+    fresh = await db.fetchrow("SELECT * FROM data_assets WHERE id = $1", asset_id)
+    result = await _attach_benefiting(row_to_dict(fresh))
+    # Report the ACCOUNT's status, not the catalog default, or the UI would show the
+    # value it just overwrote.
+    result["ingestion_status"] = body.ingestion_status
+    return result
 
 
 @router.put("/{asset_id}")

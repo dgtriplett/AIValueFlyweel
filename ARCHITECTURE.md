@@ -97,6 +97,16 @@ written back to Lakebase, which stays the portfolio's system of record.
   fallback; the DESCRIPTIVE overrides (display name, cost, owning LOB) still inherit
   the catalog, because those describe a shared module rather than stating a customer's
   position.
+- **Snapshots** — `011_snapshots.sql`: value_snapshots, one denormalized row per
+  account per event. Deliberately stores computed FIGURES rather than foreign keys: a
+  snapshot must stay readable after a use case is renamed or an assumption recalibrated,
+  and a view over current state would retroactively rewrite every historical point,
+  making the trend a straight line by construction. Captured on the events that move
+  the number (research applied, a source landed, a live sync that changed something)
+  plus a manual button, so every point corresponds to a real event and `reason` says
+  which. De-duplicated to one row per account/minute/reason via a GENERATED UTC minute
+  column — a functional index on `date_trunc` is rejected because that is only STABLE
+  on a timestamptz, not IMMUTABLE.
 - **Migration ledger** — `schema_migrations`, created by `server/migrator.py`
   rather than by a numbered migration, since it must exist before the ledger can
   be consulted.

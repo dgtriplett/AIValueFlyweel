@@ -402,6 +402,16 @@ async def execute_apply_research(payload: dict, actor: str) -> dict:
     await write_audit("value_assumptions", None, "apply_research", actor,
                       {"run_id": run_id, "applied": len(applied)})
 
+    # Applying calibrated assumptions re-quantifies every use case at once, which is
+    # the single largest move the portfolio value ever makes. Capturing here is what
+    # puts the before/after on the trend chart. Quietly: the assumptions ARE applied,
+    # and failing to chart that must not report the apply as failed.
+    from .. import snapshots as snap
+    await snap.capture_quietly(
+        snap.REASON_RESEARCH, actor=actor,
+        detail=f"applied {len(applied)} calibrated assumption(s) from research run "
+               f"{run_id}")
+
     return {
         "applied_count": len(applied),
         "applied": applied,
