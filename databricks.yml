@@ -30,9 +30,10 @@ variables:
   atlas_schema:
     description: "Schema inside atlas_catalog for the discovery layer."
     default: grid_atlas_discovery
-  genie_space_id:
-    description: "Genie space ID over the portfolio mirror (optional; set after creating a space)."
-    default: ""
+  # NOTE: there is deliberately no genie_space_id variable here. The id is written
+  # directly into app.yaml's GENIE_SPACE_ID (by scripts/deploy.py --genie-space-id),
+  # because a bundle variable that nothing interpolates looks settable and silently
+  # does nothing. The space is created by POST /api/genie/provision.
   genie_mirror_catalog:
     description: "Unity Catalog catalog the app may write the Genie mirror into."
     default: grid_ops_demo_catalog

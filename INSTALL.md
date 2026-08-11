@@ -278,12 +278,39 @@ correcting it pins that mapping permanently.
 
 ## Step 6 — Genie space (optional)
 
-Natural-language Q&A over the portfolio.
+Natural-language Q&A over the portfolio. The app creates the space for you.
 
-1. In the app: **Sync → Genie mirror** (or `POST /api/live/sync-genie`) to
-   materialize the portfolio into `GENIE_MIRROR_CATALOG.GENIE_MIRROR_SCHEMA`.
-2. In Databricks: **Genie → New space**, add those tables.
-3. Copy the space id into `GENIE_SPACE_ID` in `app.yaml` and redeploy.
+1. In the console: **Admin → Genie → Create the Genie space**
+   (or `POST /api/genie/provision`).
+
+   It mirrors the portfolio into `GENIE_MIRROR_CATALOG.GENIE_MIRROR_SCHEMA` and
+   builds a space over those tables, seeded with the things Genie cannot infer
+   from the schema — that value figures are $M per year, what the four readiness
+   values mean, that `use_cases` and `data_assets` have no join key — plus a set
+   of starter questions.
+
+2. Set the returned space id and redeploy:
+
+   ```bash
+   python3 scripts/deploy.py --genie-space-id <space_id>
+   ```
+
+   This step is manual because an app cannot rewrite its own `app.yaml` and
+   redeploy itself. Until it is done, Ask still reports Genie as unconfigured
+   even though the space exists.
+
+Notes:
+
+- **Requires a bound SQL warehouse.** A Genie space runs its queries on one, so
+  there is nothing to point it at otherwise. `GET /api/genie/status` reports
+  `can_provision: false` when no warehouse is bound.
+- **It never replaces an existing space.** With `GENIE_SPACE_ID` already set,
+  provisioning returns `409` — a space accumulates instructions and saved
+  questions that get tuned by hand, and this app does not store them, so an
+  overwrite could not be undone. Clear `GENIE_SPACE_ID` first if you want a new
+  one.
+- **The mirror is a snapshot, not a view.** Re-run **Refresh the mirror** after
+  the portfolio changes materially, or Genie answers from stale figures.
 
 ---
 

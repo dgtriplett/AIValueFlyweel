@@ -1771,11 +1771,12 @@
   // ---------------------------------------------------------------------
   async function viewAdmin() {
     main.innerHTML = `<p class="muted"><span class="spin"></span> Loading…</p>`;
-    const [health, demo] = await Promise.all([
+    const [health, demo, genie] = await Promise.all([
       api("/health").catch((e) => ({ error: e.message })),
       // 404 here is the designed answer when DEMO_MODE is off, not a failure.
       api("/demo/status").then((d) => ({ ...d, available: true }))
         .catch(() => ({ available: false })),
+      api("/genie/status").catch(() => ({})),
     ]);
 
     const demoCard = demo.available
@@ -1805,6 +1806,56 @@
             + "scripts/deploy.py --demo-mode on.")}
         </div>`;
 
+    /*
+     * Three genuinely different states, so three different cards rather than one card
+     * with a disabled button. A disabled button with a tooltip is the usual shortcut
+     * here and it is the wrong one: "no warehouse bound" is fixed by a redeploy, not
+     * by clicking harder, and the operator needs to be told that in words.
+     */
+    const genieCard = genie.configured
+      ? `<section class="card">
+          <h3>Genie</h3>
+          <p class="small muted">Ask answers questions in natural language over the
+            mirrored portfolio.</p>
+          <p class="small" style="margin:10px 0 0">Space
+            <code>${text(genie.space_id)}</code>
+            ${genie.space_url
+              ? `· <a href="${text(genie.space_url)}" target="_blank"
+                     rel="noopener">open in the workspace</a>` : ""}</p>
+          <div class="row" style="margin-top:12px">
+            <button class="action secondary" data-act="sync-genie" data-busy="Syncing…">
+              Refresh the mirror</button>
+          </div>
+          <p class="small muted" style="margin:10px 0 0">Refresh after the portfolio
+            changes — the mirror is a snapshot, not a live view. To rebuild the space
+            itself, clear GENIE_SPACE_ID and redeploy; it is not replaced automatically
+            because the instructions and saved questions in it are not stored here.</p>
+        </section>`
+      : genie.can_provision
+        ? `<section class="card">
+            <h3>Genie</h3>
+            ${banner("info", "No Genie space yet, so Ask returns a placeholder. This "
+              + "can create one — it mirrors the portfolio into "
+              + `${text(genie.mirror_target)} and builds a space over it, seeded with `
+              + "the units, the readiness vocabulary and a set of starter questions.")}
+            <div class="row" style="margin-top:12px">
+              <button class="action" data-act="genie-provision"
+                      data-busy="Creating the space…">Create the Genie space</button>
+            </div>
+            <p class="small muted" style="margin:10px 0 0">Takes about a minute — most
+              of it is the mirror. One manual step is left at the end: an app cannot
+              rewrite its own configuration, so you will need to set the returned
+              space id and redeploy.</p>
+          </section>`
+        : `<section class="card">
+            <h3>Genie</h3>
+            ${banner("warn", "No Genie space, and none can be created from here: "
+              + "no SQL warehouse is bound to this app. Bind one in the app's "
+              + "resources (or set DATABRICKS_WAREHOUSE_ID) and redeploy — a Genie "
+              + "space runs its queries on a warehouse, so there is nothing to point "
+              + "it at until then.")}
+          </section>`;
+
     main.innerHTML = `
       <h2>Admin</h2>
       <p class="lede">Instance state and the controls that change it. Everything
@@ -1829,16 +1880,7 @@
 
       ${demoCard}
 
-      <section class="card">
-        <h3>Genie mirror</h3>
-        <p class="small muted">Copies the portfolio into Unity Catalog so a Genie
-          space can answer questions over it. Read-only projection — it never
-          changes portfolio data.</p>
-        <div class="row" style="margin-top:10px">
-          <button class="action secondary" data-act="sync-genie" data-busy="Syncing…">
-            Sync Genie mirror</button>
-        </div>
-      </section>
+      ${genieCard}
 
       <section class="card">
         <h3>Databricks sync</h3>
@@ -1884,6 +1926,26 @@
         $("#result").innerHTML = r.ok
           ? banner("ok", `Mirrored to ${text(r.schema)}: ${(r.created || []).join(", ")}`)
           : banner("err", r.error || "Sync failed.");
+      },
+      "genie-provision": async () => {
+        const r = await api("/genie/provision", { method: "POST", body: "{}" });
+        // The space id is the whole payload as far as the operator is concerned, and
+        // the next thing they do is paste it into app.yaml — so it goes in a <code>
+        // block they can select, and the view is NOT auto-refreshed out from under it.
+        $("#result").innerHTML = `
+          <div class="card">
+            ${banner("ok", `Created "${text(r.title)}" over `
+              + `${(r.tables || []).length} table(s), seeded with ${num(r.rules)} `
+              + `rules and ${num(r.starter_questions)} starter questions.`)}
+            <h3 style="margin-top:14px">Space id</h3>
+            <p><code style="font-size:14px;user-select:all">${text(r.space_id)}</code></p>
+            ${r.url ? `<p class="small"><a href="${text(r.url)}" target="_blank"
+                          rel="noopener">Open it in the workspace →</a></p>` : ""}
+            <h3 style="margin-top:14px">One step left</h3>
+            <p class="small muted">${text(r.next_step)}</p>
+            <p class="small muted">Tables: ${(r.tables || [])
+              .map((t) => `<code>${text(t)}</code>`).join(" · ")}</p>
+          </div>`;
       },
       "sync-dry": () => runSync(false),
       "sync-apply": () => runSync(true),

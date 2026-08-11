@@ -128,11 +128,22 @@ async def mirror_to_uc() -> dict:
     created = []
 
     # pull denormalized rows from Lakebase
+    #
+    # hypothesized_value_json is carried whole, not pre-reduced to its stored `mid_mm`.
+    # FOUND BY ASKING GENIE: the mirror used to select (hypothesized_value_json->>'mid_mm'),
+    # which is the value computed against the DEFAULT assumptions and frozen at seed
+    # time. Everywhere else in the app the value is recomputed through
+    # value_engine.compute_value_range() against this account's calibrated assumptions.
+    # On the live instance those two disagreed by 77% — $1,978.61M in the mirror against
+    # $3,498.25M in the app — so Genie confidently reported a portfolio total that no
+    # screen in the product agrees with. A mirror that is merely stale is a bug; one
+    # that answers a different question than the UI is a credibility problem.
     ucs = await db.fetch("""
         SELECT uc.id, uc.title, uc.description, l.name AS domain, uc.sub_vertical, uc.phase,
                uc.status, uc.category, uc.effort_tshirt, uc.priority_score,
-               uc.realized_value_amount,
-               (uc.hypothesized_value_json->>'mid_mm')::numeric AS hyp_value_mm
+               uc.realized_value_amount, uc.hypothesized_value_json,
+               uc.realized_value_json, uc.realized_override_enabled,
+               uc.realized_override_amount, uc.realized_override_note
         FROM use_cases uc LEFT JOIN lobs l ON l.id = uc.lob_id ORDER BY uc.id""")
     assets = await db.fetch("""
         SELECT da.id, da.source_category, da.vendor, da.module, da.ingestion_status,
@@ -141,6 +152,11 @@ async def mirror_to_uc() -> dict:
     # readiness per UC
     from .readiness import readiness_map
     rmap = await readiness_map()
+
+    # The same assumptions and the same engine the UI uses, so the mirror cannot drift
+    # into answering a different question.
+    from .value_engine import compute_realized, compute_value_range, load_assumptions
+    assumptions = await load_assumptions()
 
     def esc(v):
         if v is None:
@@ -170,11 +186,15 @@ async def mirror_to_uc() -> dict:
     rows = []
     for u in ucs:
         rd = (rmap.get(u["id"]) or {}).get("readiness")
+        # Recomputed against this account's assumptions — see the note on the query.
+        value_range = compute_value_range(u["hypothesized_value_json"], assumptions)
+        hyp = (value_range or {}).get("mid")
+        realized = compute_realized(dict(u), assumptions).get("value")
         rows.append("(" + ",".join([esc(u["id"]), esc(u["title"]), esc((u["description"] or "")[:900]),
                      esc(u["domain"]), esc(u["sub_vertical"]), esc(u["phase"]), esc(u["status"]),
                      esc(u["category"]), esc(u["effort_tshirt"]), esc(float(u["priority_score"]) if u["priority_score"] else None),
-                     esc(float(u["hyp_value_mm"]) if u["hyp_value_mm"] else None),
-                     esc(float(u["realized_value_amount"]) if u["realized_value_amount"] else None), esc(rd)]) + ")")
+                     esc(float(hyp) if hyp else None),
+                     esc(float(realized) if realized else None), esc(rd)]) + ")")
     # insert in batches
     for i in range(0, len(rows), 50):
         batch = ",".join(rows[i:i + 50])

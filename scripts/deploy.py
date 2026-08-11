@@ -286,17 +286,26 @@ def build_frontend(skip: bool) -> None:
 # ---------------------------------------------------------------------------
 # Step 5/6 — deploy + grants
 # ---------------------------------------------------------------------------
+def bundle_vars(settings: dict) -> list[str]:
+    """The --var flags every bundle command needs.
+
+    Shared rather than written out at each call site. EVERY bundle subcommand
+    re-resolves the whole variable set, so `bundle run` fails with "no value assigned
+    to required variable warehouse_id" unless it gets the same flags as `bundle deploy`
+    — which is exactly the bug this function exists to prevent: step 8 was passing none
+    of them, so it failed every time, and because it ran with check=False the failure
+    was silent. Files uploaded, app never restarted, and the deploy printed "Done."
+    while continuing to serve the previous build.
+    """
+    return [f"--var={name}={settings[name]}" for name in (
+        "warehouse_id", "atlas_catalog", "atlas_schema", "serving_endpoint",
+        "genie_mirror_catalog", "genie_mirror_schema", "lakebase_project",
+        "pg_database", "demo_mode")]
+
+
 def bundle_deploy(profile: str, target: str, settings: dict) -> None:
     run(["databricks", "bundle", "deploy", "-t", target, "-p", profile,
-         f"--var=warehouse_id={settings['warehouse_id']}",
-         f"--var=atlas_catalog={settings['atlas_catalog']}",
-         f"--var=atlas_schema={settings['atlas_schema']}",
-         f"--var=serving_endpoint={settings['serving_endpoint']}",
-         f"--var=genie_mirror_catalog={settings['genie_mirror_catalog']}",
-         f"--var=genie_mirror_schema={settings['genie_mirror_schema']}",
-         f"--var=lakebase_project={settings['lakebase_project']}",
-         f"--var=pg_database={settings['pg_database']}",
-         f"--var=demo_mode={settings['demo_mode']}"])
+         *bundle_vars(settings)])
     print(f"  {green('ok')} bundle deployed")
 
 
@@ -548,6 +557,11 @@ def main() -> None:
     parser.add_argument("--serving-endpoint", default=None)
     parser.add_argument("--genie-mirror-catalog", default=None)
     parser.add_argument("--genie-mirror-schema", default=None)
+    # The one step POST /api/genie/provision cannot do for itself: an app cannot
+    # rewrite its own app.yaml and redeploy, so it returns the new space id and the
+    # operator passes it back through here.
+    parser.add_argument("--genie-space-id", default=None,
+                        help="Genie space id (from POST /api/genie/provision)")
     parser.add_argument("--lakebase-project", default=None)
     parser.add_argument("--lakebase-host", default=None,
                         help="Lakebase endpoint host (auto-detected if omitted)")
@@ -618,7 +632,11 @@ def main() -> None:
         "genie_mirror_catalog": genie_mirror_catalog,
         "genie_mirror_schema": genie_mirror_schema,
         "lakebase_project": lakebase_project, "pg_database": pg_database,
-        "genie_space_id": cache.get("genie_space_id", ""),
+        # Not prompted for: on a first install there is no space yet, and asking
+        # would imply the operator was supposed to have made one by hand — which is
+        # exactly the manual step provisioning removed. Supplied by flag afterwards,
+        # then remembered.
+        "genie_space_id": args.genie_space_id or cache.get("genie_space_id", ""),
         "demo_mode": demo_mode,
     }
 
@@ -704,12 +722,29 @@ def main() -> None:
             grant_lakebase_dml(profile, lakebase_project, pg_database, sp)
 
     # -- 8. start --
+    #
+    # This is the step that makes the uploaded code actually run: `bundle deploy` puts
+    # the files in the workspace, `bundle run` creates the app deployment that serves
+    # them. Skipping it — or letting it fail quietly — leaves the app serving the
+    # PREVIOUS build while the script prints "Done." That happened: it was missing the
+    # --var flags, failed on every invocation, and check=False swallowed it.
     step(8, total, "Start the app")
     if args.skip_start:
         print(f"  {dim('skipped (--skip-start)')}")
+        print(f"  {yellow('note:')} the app is still serving the previous build. "
+              "Run `databricks bundle run` to pick up this one.")
     else:
-        run(["databricks", "bundle", "run", BUNDLE_RESOURCE, "-t", target,
-             "-p", profile], check=False)
+        started = run(["databricks", "bundle", "run", BUNDLE_RESOURCE, "-t", target,
+                       "-p", profile, *bundle_vars(settings)], check=False)
+        # Checked explicitly instead of check=True: a failure here does not invalidate
+        # the seven steps that already succeeded, so the right response is a loud
+        # warning and a non-zero exit, not a traceback that hides them.
+        if started is not None and getattr(started, "returncode", 0) != 0:
+            print(f"\n  {red('The app did not restart.')} The new code is uploaded but "
+                  "the app is still\n  serving the previous build. Re-run:\n"
+                  f"    databricks bundle run {BUNDLE_RESOURCE} -t {target} "
+                  f"-p {profile} {' '.join(bundle_vars(settings))}")
+            sys.exit(1)
 
     url = (app or {}).get("url") if isinstance(app, dict) else None
     print(f"\n{green(bold('Done.'))}")

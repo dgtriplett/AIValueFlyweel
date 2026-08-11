@@ -51,7 +51,7 @@ catalog, 63 data domains, 34 value assumptions** — so day one is populated.
 | **Roadmap** | AI-sequenced now/next/later waves, dependency-respecting, drag-to-edit, board-ready one-pager. |
 | **Joint Funding** | Finds sources benefiting ≥2 LOBs, with combined cross-LOB value and co-funding requests. |
 | **Get Started** | Excel export/import for bulk offline population. |
-| **Genie assistant** | NL Q&A over the portfolio (needs a Genie space — see [`INSTALL.md`](INSTALL.md)). |
+| **Genie assistant** | NL Q&A over the portfolio. The app creates the Genie space itself (**Admin → Genie**), seeded with the units, the readiness vocabulary and starter questions — see [`INSTALL.md`](INSTALL.md). |
 
 ### Discovery & agents *(the console, at `/console`)*
 | Area | What it does |
