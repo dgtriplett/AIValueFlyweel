@@ -488,5 +488,54 @@ class TestSpaGroupedNav(unittest.TestCase):
                       "must refuse to WRITE a bundle that does not parse")
 
 
+
+
+class TestSyncResultIsVisible(unittest.TestCase):
+    """Reported as "clicking Preview/Apply does nothing".
+
+    Two separate causes, both real:
+
+      1. The shared `#result` slot is at the TOP of the Get-started view, and section C
+         is the last card on a ~1,500px page — so the outcome rendered far off-screen.
+         Section C now has its own slot, and the result is scrolled into view.
+      2. "0 changes" is the COMMON outcome (the sweep only advances a source that
+         Databricks lineage shows real activity against), and the message read
+         "Would change: 0 data source(s)" — indistinguishable from a broken button. The
+         live endpoint was returning HTTP 200 having scanned 5,000 tables.
+    """
+
+    @classmethod
+    def setUpClass(cls):
+        from pathlib import Path
+        cls.console = (Path(__file__).parent.parent / "frontend" / "console"
+                       / "console.js").read_text()
+
+    def test_section_c_has_its_own_result_slot(self):
+        self.assertIn('<div id="sync-result"></div>', self.console)
+
+    def test_the_result_is_scrolled_into_view(self):
+        """Both call sites are near the bottom of a long page."""
+        self.assertIn("slot.scrollIntoView(", self.console)
+
+    def test_a_zero_change_scan_says_it_succeeded(self):
+        """The whole point: a successful scan that found nothing must not look like a
+        no-op."""
+        self.assertIn("Scanned successfully", self.console)
+
+    def test_unreadable_system_tables_are_distinguished(self):
+        """Nothing-to-do and cannot-look are different problems with different fixes."""
+        self.assertIn("System tables are not readable", self.console)
+
+    def test_preview_says_nothing_was_written(self):
+        self.assertIn("Nothing has been written yet", self.console)
+
+    def test_only_one_definition_of_the_renderer(self):
+        """Get-started and Admin had two near-identical copies with the same defect.
+        Fixing it twice is how they drift apart."""
+        self.assertEqual(self.console.count("function renderSyncResult("), 1)
+        self.assertEqual(self.console.count("renderSyncResult("), 3,
+                         "expected one definition and two call sites")
+
+
 if __name__ == "__main__":
     unittest.main()

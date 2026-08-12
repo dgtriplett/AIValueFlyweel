@@ -106,6 +106,57 @@
     });
   }
 
+
+  /**
+   * Render the outcome of a system-table sweep into `slot`.
+   *
+   * Shared by "Get started → C" and Admin because they were two near-identical copies
+   * with the same defect, and fixing it twice is how they drift apart.
+   *
+   * The defect: "0 changes" is the COMMON result and it is not a failure. The sweep only
+   * advances a source when Databricks lineage or job history shows real activity against
+   * it, so on an estate whose tables are not yet mapped to portfolio sources the honest
+   * answer is "scanned, nothing to advance". The old message — "Would change: 0 data
+   * source(s)" — read exactly like a button that did nothing, which is how it was
+   * reported. It now says so in words, and always shows the scan notes as evidence that
+   * work actually happened.
+   */
+  function renderSyncResult(slot, result, apply) {
+    const assets = (result.asset_changes || []).length;
+    const useCases = (result.uc_changes || []).length;
+    const probes = result.available || {};
+    const anyReadable = Object.keys(probes).length === 0
+      || Object.values(probes).some(Boolean);
+
+    let message;
+    if (!anyReadable) {
+      message = banner("warn",
+        "System tables are not readable by this app's service principal, so there is "
+        + "nothing to detect from. The Setup checks show the GRANT that fixes it.");
+    } else if (assets === 0 && useCases === 0) {
+      message = banner("info",
+        "Scanned successfully — no sources to advance. This only promotes a source when "
+        + "Databricks lineage or job history shows real activity against it, so nothing "
+        + "changing usually means the estate's tables are not yet mapped to sources in "
+        + "this portfolio.");
+    } else {
+      message = banner("ok",
+        `${apply ? "Applied" : "Would change"}: ${assets} data source(s), `
+        + `${useCases} use case(s).`
+        + (apply ? "" : " Nothing has been written yet — use Apply to commit."));
+    }
+
+    slot.innerHTML = message
+      + ((result.notes || []).length
+        ? `<div class="card"><h3 class="small muted">What the scan looked at</h3>
+           <ul class="tight small muted">${
+            result.notes.map((n) => `<li>${text(n)}</li>`).join("")}</ul></div>`
+        : "");
+    // Both call sites sit near the bottom of a long page, and the shared #result slot is
+    // at the top — the original bug was the answer rendering ~1,500px off-screen.
+    slot.scrollIntoView({ behavior: "smooth", block: "nearest" });
+  }
+
   // ---------------------------------------------------------------------
   // Get started — the SINGLE onboarding surface
   //
@@ -288,6 +339,12 @@
               <button class="action secondary" data-act="sync-apply" data-busy="Syncing…">
                 Apply</button>
             </div>
+            <!--
+              Its own result slot. The shared #result sits at the TOP of this view, and
+              this card is the last thing on a ~1,500px page — so the outcome rendered
+              far off-screen and clicking Preview looked like it did nothing at all.
+            -->
+            <div id="sync-result"></div>
           </div>
         </div>
       </div>
@@ -491,15 +548,10 @@
     });
 
     async function runSync(apply) {
-      const r = await api(`/live/sync?apply=${apply ? "true" : "false"}`,
-        { method: "POST" });
-      $("#result").innerHTML = banner(apply ? "ok" : "info",
-        `${apply ? "Applied" : "Would change"}: `
-        + `${(r.asset_changes || []).length} data source(s), `
-        + `${(r.uc_changes || []).length} use case(s).`)
-        + ((r.notes || []).length
-          ? `<div class="card"><ul class="tight small muted">${
-              r.notes.map((n) => `<li>${text(n)}</li>`).join("")}</ul></div>` : "");
+      renderSyncResult(
+        $("#sync-result") || $("#result"),
+        await api(`/live/sync?apply=${apply ? "true" : "false"}`, { method: "POST" }),
+        apply);
     }
   }
 
@@ -1958,17 +2010,10 @@
     });
 
     async function runSync(apply) {
-      const r = await api(`/live/sync?apply=${apply ? "true" : "false"}`,
-        { method: "POST" });
-      const assets = r.asset_changes || [];
-      const ucs = r.uc_changes || [];
-      $("#result").innerHTML = banner(apply ? "ok" : "info",
-        `${apply ? "Applied" : "Would change"}: ${assets.length} data source(s), `
-        + `${ucs.length} use case(s).`)
-        + ((r.notes || []).length
-          ? `<div class="card"><h3>Notes</h3><ul class="tight small muted">${
-              r.notes.map((n) => `<li>${text(n)}</li>`).join("")}</ul></div>`
-          : "");
+      renderSyncResult(
+        $("#result"),
+        await api(`/live/sync?apply=${apply ? "true" : "false"}`, { method: "POST" }),
+        apply);
     }
   }
 
