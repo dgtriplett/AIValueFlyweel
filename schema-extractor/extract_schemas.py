@@ -291,6 +291,15 @@ def main() -> None:
                              "a running one (must exist in every listed workspace)")
     parser.add_argument("--output-dir", default=None,
                         help="where to write CSVs (default: ./output)")
+    # Push is additive: the CSVs are always written to disk first, so the manual
+    # upload path (and an air-gapped estate) is unaffected by this flag existing.
+    parser.add_argument("--push", nargs="?", const="", default=None,
+                        metavar="APP_URL",
+                        help="after extracting, upload the CSVs straight to AI Value "
+                             "Flywheel (e.g. --push https://my-app.aws.databricksapps.com). "
+                             "Defaults to $AI_VALUE_FLYWHEEL_HOST.")
+    parser.add_argument("--push-dry-run", action="store_true",
+                        help="with --push, show what would be uploaded and stop")
     args = parser.parse_args()
 
     check_prerequisites()
@@ -342,6 +351,17 @@ def main() -> None:
     for key in ("schemas", "tables", "columns"):
         if totals[key]:
             print(f"  {OUTPUT_DIR / f'all_{key}.csv'}")
+    # Push AFTER the summary, so the file list is on screen even if the upload fails.
+    if args.push is not None:
+        import push as push_module
+
+        host = args.push or push_module.host_from_env() or ""
+        code = push_module.push(OUTPUT_DIR, host, dry_run=args.push_dry_run)
+        if code:
+            # A failed push does not invalidate the extract, but it must not look like
+            # success either — the CSVs are on disk and the message says what to do.
+            sys.exit(code)
+
     if succeeded < len(urls):
         # Non-zero exit so a scheduled run surfaces partial failure to CI.
         sys.exit(2)

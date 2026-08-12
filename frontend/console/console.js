@@ -3035,6 +3035,242 @@
       </section>`;
   }
 
+
+  // ---------------------------------------------------------------------
+  // Dependencies — editing the graph the whole model derives from
+  //
+  // Readiness, phase, the roadmap and the what-if simulator all read this graph,
+  // and until now it was only editable by API call: the mappings came from the
+  // deterministic deriver and the agent, and a wrong edge could be seen (Coverage
+  // shows it) but not fixed. That is the one place where "the tool disagrees with
+  // me and I cannot do anything about it" was true.
+  //
+  // Deliberately one use case at a time rather than a canvas. A force-directed
+  // graph of 239 nodes and 1,000 edges is a demo, not a tool — the actual question
+  // a person has is "what does THIS use case need, and is that right", which is a
+  // list. The graph shape is already visible in Coverage and Value flow.
+  //
+  // Edits are marked manual, which locks the use case's mapping so a later
+  // deterministic remap or agent pass cannot silently revert a human's judgement.
+  // ---------------------------------------------------------------------
+  let depsUseCaseId = null;
+
+  async function viewDependencies() {
+    main.innerHTML = `
+      <h2>Dependencies</h2>
+      <p class="lede">The data each use case needs, and which use cases must be
+        built first. Readiness, phase and the roadmap are all derived from this —
+        so correcting an edge here changes what the app recommends.</p>
+      <div id="result"></div>
+      <section class="card">
+        <h3>Pick a use case</h3>
+        <input id="dep-search" type="search" placeholder="Search use cases…"
+               autocomplete="off" style="width:100%;max-width:520px">
+        <div id="dep-list" style="margin-top:12px"><p class="muted">
+          <span class="spin"></span> Loading…</p></div>
+      </section>
+      <div id="dep-detail"></div>`;
+
+    let useCases = [];
+    try {
+      const data = await api("/use-cases?limit=500");
+      useCases = data.items || [];
+    } catch (error) {
+      $("#dep-list").innerHTML = banner("err", error.message);
+      return;
+    }
+
+    const search = $("#dep-search");
+    const renderList = () => {
+      const term = (search.value || "").trim().toLowerCase();
+      // Capped at 40: this is a picker, not a browser. A term that matches half the
+      // catalog means the person should type more, not scroll further.
+      const hits = (term
+        ? useCases.filter((u) => (u.title || "").toLowerCase().includes(term))
+        : useCases).slice(0, 40);
+      $("#dep-list").innerHTML = hits.length
+        ? `<div class="row" style="flex-wrap:wrap;gap:6px">${hits.map((u) => `
+            <button class="action secondary" data-pick="${u.id}"
+                    style="${u.id === depsUseCaseId ? "border-color:var(--lava)" : ""}"
+              >${text(u.title)}</button>`).join("")}</div>
+           ${useCases.length > hits.length && !term
+             ? `<p class="small muted" style="margin:8px 0 0">Showing 40 of
+                ${num(useCases.length)} — search to narrow.</p>` : ""}`
+        : `<p class="muted">No use case matches “${text(term)}”.</p>`;
+      $("#dep-list").querySelectorAll("[data-pick]").forEach((button) => {
+        button.addEventListener("click", () => {
+          depsUseCaseId = Number(button.dataset.pick);
+          renderList();
+          renderDetail();
+        });
+      });
+    };
+
+    search.addEventListener("input", renderList);
+    renderList();
+    if (depsUseCaseId) renderDetail();
+
+    async function renderDetail() {
+      const slot = $("#dep-detail");
+      slot.innerHTML = `<p class="muted"><span class="spin"></span> Loading…</p>`;
+      const useCase = useCases.find((u) => u.id === depsUseCaseId);
+      if (!useCase) { slot.innerHTML = ""; return; }
+
+      let requires = [];
+      let enables = [];
+      let prereqs = [];
+      let assets = [];
+      try {
+        [requires, enables, prereqs, assets] = await Promise.all([
+          api(`/dependencies/requires?use_case_id=${depsUseCaseId}`),
+          api(`/dependencies/enables?from_use_case_id=${depsUseCaseId}`),
+          api(`/dependencies/enables?to_use_case_id=${depsUseCaseId}`),
+          api("/data-assets?limit=500").then((d) => d.items || d || []),
+        ]);
+      } catch (error) {
+        slot.innerHTML = banner("err", error.message);
+        return;
+      }
+
+      const assetName = (id) => {
+        const asset = (assets || []).find((a) => a.id === id);
+        return asset
+          ? `${asset.source_category || "?"}${asset.module ? " · " + asset.module : ""}`
+          : `#${id}`;
+      };
+      const ucTitle = (id) => {
+        const found = useCases.find((u) => u.id === id);
+        return found ? found.title : `#${id}`;
+      };
+
+      slot.innerHTML = `
+        <section class="card">
+          <h3>${text(useCase.title)}</h3>
+          ${useCase.requires_locked
+            ? banner("info", "This use case's data mapping is LOCKED because it has "
+              + "been hand-edited. The deterministic remap and the agent will leave it "
+              + "alone — which is the point, but it also means they will not add "
+              + "newly-relevant sources for you.")
+            : ""}
+
+          <h4 class="small muted" style="margin-top:14px">Requires data (${num(requires.length)})</h4>
+          ${requires.length ? `<table><tbody>${requires.map((r) => `
+            <tr>
+              <td>${text(assetName(r.data_asset_id))}</td>
+              <td><span class="pill ${r.criticality === "required" ? "warn" : ""}">
+                ${text(r.criticality)}</span></td>
+              <td class="small muted">${r.manual ? "hand-edited" : "derived"}</td>
+              <td class="num"><button class="action secondary"
+                    data-drop-req="${r.data_asset_id}">Remove</button></td>
+            </tr>`).join("")}</tbody></table>`
+            : `<p class="small muted">No data requirements recorded — this use case
+               will always read as shovel-ready, which is usually wrong.</p>`}
+          <div class="row" style="gap:8px;margin-top:10px">
+            <select id="dep-add-asset" style="max-width:340px">
+              <option value="">Add a required source…</option>
+              ${(assets || []).filter((a) =>
+                  !requires.some((r) => r.data_asset_id === a.id))
+                .map((a) => `<option value="${a.id}">${text(assetName(a.id))}</option>`)
+                .join("")}
+            </select>
+            <select id="dep-add-crit" style="max-width:140px">
+              <option value="required">required</option>
+              <option value="helpful">helpful</option>
+            </select>
+            <button class="action" data-act="add-req" data-busy="Adding…">Add</button>
+          </div>
+
+          <h4 class="small muted" style="margin-top:22px">Must be built first (${num(prereqs.length)})</h4>
+          ${prereqs.length ? `<table><tbody>${prereqs.map((e) => `
+            <tr>
+              <td>${text(ucTitle(e.from_use_case_id))}</td>
+              <td class="small muted">${e.detected_by_agent ? "agent" : "derived"}</td>
+              <td class="num"><button class="action secondary"
+                    data-drop-pre="${e.from_use_case_id}">Remove</button></td>
+            </tr>`).join("")}</tbody></table>`
+            : `<p class="small muted">No prerequisites — this can start as soon as its
+               data lands.</p>`}
+          <div class="row" style="gap:8px;margin-top:10px">
+            <select id="dep-add-pre" style="max-width:420px">
+              <option value="">Add a prerequisite use case…</option>
+              ${useCases.filter((u) => u.id !== depsUseCaseId
+                  && !prereqs.some((e) => e.from_use_case_id === u.id))
+                .map((u) => `<option value="${u.id}">${text(u.title)}</option>`)
+                .join("")}
+            </select>
+            <button class="action" data-act="add-pre" data-busy="Adding…">Add</button>
+          </div>
+
+          <h4 class="small muted" style="margin-top:22px">This unlocks (${num(enables.length)})</h4>
+          ${enables.length ? `<ul class="tight small">${enables.map((e) =>
+              `<li>${text(ucTitle(e.to_use_case_id))}</li>`).join("")}</ul>`
+            : `<p class="small muted">Nothing downstream depends on this yet.</p>`}
+          <p class="small muted">Edit those from the other use case's own page, so the
+            direction of the edge is always the one you are looking at.</p>
+        </section>`;
+
+      onActions(slot, {
+        "add-req": async () => {
+          const assetId = Number($("#dep-add-asset").value);
+          if (!assetId) return;
+          await api("/dependencies/requires", {
+            method: "POST",
+            body: JSON.stringify({
+              use_case_id: depsUseCaseId,
+              data_asset_id: assetId,
+              criticality: $("#dep-add-crit").value,
+              // manual=true locks the mapping. Without it the next deterministic
+              // remap silently deletes what the person just added.
+              manual: true,
+            }),
+          });
+          return renderDetail();
+        },
+        "add-pre": async () => {
+          const fromId = Number($("#dep-add-pre").value);
+          if (!fromId) return;
+          await api("/dependencies/enables", {
+            method: "POST",
+            body: JSON.stringify({
+              from_use_case_id: fromId,
+              to_use_case_id: depsUseCaseId,
+            }),
+          });
+          return renderDetail();
+        },
+      });
+
+      slot.querySelectorAll("[data-drop-req]").forEach((button) => {
+        button.addEventListener("click", async () => {
+          const restore = busy(button, "Removing…");
+          try {
+            await api(`/dependencies/requires?use_case_id=${depsUseCaseId}`
+              + `&data_asset_id=${button.dataset.dropReq}&manual=true`,
+              { method: "DELETE" });
+            await renderDetail();
+          } catch (error) {
+            $("#result").innerHTML = banner("err", error.message);
+            restore();
+          }
+        });
+      });
+
+      slot.querySelectorAll("[data-drop-pre]").forEach((button) => {
+        button.addEventListener("click", async () => {
+          const restore = busy(button, "Removing…");
+          try {
+            await api(`/dependencies/enables?from_use_case_id=${button.dataset.dropPre}`
+              + `&to_use_case_id=${depsUseCaseId}`, { method: "DELETE" });
+            await renderDetail();
+          } catch (error) {
+            $("#result").innerHTML = banner("err", error.message);
+            restore();
+          }
+        });
+      });
+    }
+  }
+
   // ---------------------------------------------------------------------
   // Router
   // ---------------------------------------------------------------------
@@ -3047,6 +3283,7 @@
     catalog: viewCatalog,
     generate: viewGenerate,
     whatif: viewWhatIf,
+    dependencies: viewDependencies,
     trend: viewTrend,
     accounts: viewAccounts,
     kb: viewKnowledge,
@@ -3108,6 +3345,7 @@
       items: [
         ["ask", "Ask"],
         ["coverage", "Coverage & readiness"],
+        ["dependencies", "Dependencies"],
         ["whatif", "What if we landed\u2026"],
         ["trend", "Trend over time"],
         ["flow", "Value flow"],

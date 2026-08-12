@@ -84,10 +84,67 @@ async def list_enables(from_use_case_id: int | None = None, to_use_case_id: int 
     return rows_to_list(rows)
 
 
+async def _would_create_cycle(from_id: int, to_id: int) -> list[int] | None:
+    """The prerequisite path from `to_id` back to `from_id`, if one exists.
+
+    Adding `from -enables-> to` makes `from` a prerequisite of `to`. If `to` is already
+    (transitively) a prerequisite of `from`, the new edge closes a loop: each use case
+    waits for the other, neither can ever be shovel-ready, and the roadmap has a set of
+    items that can never start with no visible reason why.
+
+    compute_all_phases() already survives a cycle — it returns depth 0 at the back-edge
+    rather than recursing forever — so this is not a crash guard. It is a data-integrity
+    guard: the graph would be quietly meaningless instead of loudly broken, which is
+    worse. Only self-edges were rejected before, and self-edges are the one cycle nobody
+    accidentally creates.
+
+    Returns the offending path (for the error message) or None.
+    """
+    edges = await db.fetch(
+        "SELECT from_use_case_id, to_use_case_id FROM uc_enables_uc")
+    downstream: dict[int, list[int]] = {}
+    for edge in edges:
+        downstream.setdefault(edge["from_use_case_id"], []).append(
+            edge["to_use_case_id"])
+
+    # Walk forward from `to_id`; reaching `from_id` means the new edge closes a loop.
+    stack = [(to_id, [to_id])]
+    seen = {to_id}
+    while stack:
+        node, path = stack.pop()
+        if node == from_id:
+            return path
+        for nxt in downstream.get(node, []):
+            if nxt not in seen:
+                seen.add(nxt)
+                stack.append((nxt, path + [nxt]))
+    return None
+
+
 @router.post("/enables")
 async def create_enables(body: EnablesIn, request: Request):
     if body.from_use_case_id == body.to_use_case_id:
         raise HTTPException(422, "A use case cannot enable itself")
+
+    cycle = await _would_create_cycle(body.from_use_case_id, body.to_use_case_id)
+    if cycle:
+        # Named, not just numbered: "42 → 87 → 42" is unactionable in a UI.
+        #
+        # `cycle` is the existing path from `to` back to `from`, so it ALREADY ends at
+        # from_use_case_id. The loop is closed by the edge being added, which runs from
+        # `from` back to the head of the path — so the readable form is the path followed
+        # by its own first element. Appending from_use_case_id instead printed the same
+        # title twice ("... → DER & EV → DER & EV"), which read like a self-edge.
+        titles = {row["id"]: row["title"] for row in await db.fetch(
+            "SELECT id, title FROM use_cases WHERE id = ANY($1::int[])", cycle)}
+        loop = cycle + [cycle[0]]
+        chain = " → ".join(titles.get(i, f"#{i}") for i in loop)
+        raise HTTPException(
+            422,
+            f"That would create a circular dependency: {chain}. Each use case would be "
+            "waiting for the other, so neither could ever be shovel-ready. Remove an "
+            "edge in that chain first.")
+
     actor = current_user(request)
     row = await db.fetchrow(
         """INSERT INTO uc_enables_uc
