@@ -3054,6 +3054,8 @@
   // deterministic remap or agent pass cannot silently revert a human's judgement.
   // ---------------------------------------------------------------------
   let depsUseCaseId = null;
+  // Incremented per render so an out-of-order response can be discarded.
+  let depsRenderToken = 0;
 
   async function viewDependencies() {
     main.innerHTML = `
@@ -3111,9 +3113,24 @@
     if (depsUseCaseId) renderDetail();
 
     async function renderDetail() {
+      /*
+       * The id is captured ONCE, here, and every read below uses the local copy.
+       *
+       * Reading the module-level depsUseCaseId later is a silent-corruption bug: pick
+       * use case A, pick B before A's request returns, and A's slow response repaints
+       * the panel while depsUseCaseId is already B. The screen then shows A's
+       * dependencies while every button targets B — so "remove this requirement" edits
+       * a use case the person is not looking at, and both graphs end up wrong with no
+       * error anywhere.
+       *
+       * `renderToken` makes the last click win: a response that is no longer the
+       * current selection is discarded instead of painted.
+       */
+      const useCaseId = depsUseCaseId;
+      const token = ++depsRenderToken;
       const slot = $("#dep-detail");
       slot.innerHTML = `<p class="muted"><span class="spin"></span> Loading…</p>`;
-      const useCase = useCases.find((u) => u.id === depsUseCaseId);
+      const useCase = useCases.find((u) => u.id === useCaseId);
       if (!useCase) { slot.innerHTML = ""; return; }
 
       let requires = [];
@@ -3122,15 +3139,19 @@
       let assets = [];
       try {
         [requires, enables, prereqs, assets] = await Promise.all([
-          api(`/dependencies/requires?use_case_id=${depsUseCaseId}`),
-          api(`/dependencies/enables?from_use_case_id=${depsUseCaseId}`),
-          api(`/dependencies/enables?to_use_case_id=${depsUseCaseId}`),
+          api(`/dependencies/requires?use_case_id=${useCaseId}`),
+          api(`/dependencies/enables?from_use_case_id=${useCaseId}`),
+          api(`/dependencies/enables?to_use_case_id=${useCaseId}`),
           api("/data-assets?limit=500").then((d) => d.items || d || []),
         ]);
       } catch (error) {
+        if (token !== depsRenderToken) return;   // superseded; its error is moot too
         slot.innerHTML = banner("err", error.message);
         return;
       }
+      // A newer selection was made while these four requests were in flight. Painting
+      // now would show this use case's data under the other one's selection.
+      if (token !== depsRenderToken) return;
 
       const assetName = (id) => {
         const asset = (assets || []).find((a) => a.id === id);
@@ -3193,7 +3214,7 @@
           <div class="row" style="gap:8px;margin-top:10px">
             <select id="dep-add-pre" style="max-width:420px">
               <option value="">Add a prerequisite use case…</option>
-              ${useCases.filter((u) => u.id !== depsUseCaseId
+              ${useCases.filter((u) => u.id !== useCaseId
                   && !prereqs.some((e) => e.from_use_case_id === u.id))
                 .map((u) => `<option value="${u.id}">${text(u.title)}</option>`)
                 .join("")}
@@ -3216,7 +3237,7 @@
           await api("/dependencies/requires", {
             method: "POST",
             body: JSON.stringify({
-              use_case_id: depsUseCaseId,
+              use_case_id: useCaseId,
               data_asset_id: assetId,
               criticality: $("#dep-add-crit").value,
               // manual=true locks the mapping. Without it the next deterministic
@@ -3233,7 +3254,7 @@
             method: "POST",
             body: JSON.stringify({
               from_use_case_id: fromId,
-              to_use_case_id: depsUseCaseId,
+              to_use_case_id: useCaseId,
             }),
           });
           return renderDetail();
@@ -3244,12 +3265,15 @@
         button.addEventListener("click", async () => {
           const restore = busy(button, "Removing…");
           try {
-            await api(`/dependencies/requires?use_case_id=${depsUseCaseId}`
+            await api(`/dependencies/requires?use_case_id=${useCaseId}`
               + `&data_asset_id=${button.dataset.dropReq}&manual=true`,
               { method: "DELETE" });
             await renderDetail();
           } catch (error) {
-            $("#result").innerHTML = banner("err", error.message);
+            // Same fallback onActions() uses: #result is created by this view, but a
+            // navigation mid-request can remove it, and losing the error message to a
+            // null dereference would leave the button spinning with no explanation.
+            ($("#result") || slot).innerHTML = banner("err", error.message);
             restore();
           }
         });
@@ -3260,10 +3284,13 @@
           const restore = busy(button, "Removing…");
           try {
             await api(`/dependencies/enables?from_use_case_id=${button.dataset.dropPre}`
-              + `&to_use_case_id=${depsUseCaseId}`, { method: "DELETE" });
+              + `&to_use_case_id=${useCaseId}`, { method: "DELETE" });
             await renderDetail();
           } catch (error) {
-            $("#result").innerHTML = banner("err", error.message);
+            // Same fallback onActions() uses: #result is created by this view, but a
+            // navigation mid-request can remove it, and losing the error message to a
+            // null dereference would leave the button spinning with no explanation.
+            ($("#result") || slot).innerHTML = banner("err", error.message);
             restore();
           }
         });

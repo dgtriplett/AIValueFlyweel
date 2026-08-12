@@ -100,11 +100,22 @@ class TestTheRouteUsesThisAlgorithm(unittest.TestCase):
         self.assertIn("_would_create_cycle", SOURCE)
 
     def test_guard_runs_before_the_insert(self):
-        """Detecting the cycle after writing the row would leave it in place."""
+        """Detecting the cycle after writing the row would leave it in place.
+
+        Searches whichever function performs the INSERT rather than `create_enables` by
+        name: the body moved into `_create_enables_locked` when the write lock was added,
+        and hardcoding the old name would have made this pass vacuously (the earlier
+        version failed loudly instead, which is how the refactor was caught).
+        """
         tree = ast.parse(SOURCE)
-        function = next(node for node in ast.walk(tree)
-                        if isinstance(node, ast.AsyncFunctionDef)
-                        and node.name == "create_enables")
+        functions = [node for node in ast.walk(tree)
+                     if isinstance(node, ast.AsyncFunctionDef)]
+        inserting = [f for f in functions
+                     if "INSERT INTO uc_enables_uc" in ast.dump(f)]
+        self.assertEqual(len(inserting), 1,
+                         "expected exactly one function to insert an enables edge")
+        function = inserting[0]
+
         guard_index = insert_index = None
         for index, statement in enumerate(function.body):
             dumped = ast.dump(statement)
@@ -112,11 +123,41 @@ class TestTheRouteUsesThisAlgorithm(unittest.TestCase):
                 guard_index = index
             if insert_index is None and "INSERT INTO uc_enables_uc" in dumped:
                 insert_index = index
-        self.assertIsNotNone(guard_index, "no cycle guard in create_enables")
+        self.assertIsNotNone(guard_index,
+                             f"no cycle guard in {function.name}, which does the INSERT")
         self.assertIsNotNone(insert_index)
         self.assertLess(guard_index, insert_index,
                         "the cycle check runs after the INSERT, so the bad edge is "
                         "already stored by the time it is rejected")
+
+    def test_check_and_insert_are_serialized(self):
+        """The TOCTOU race: the check and the INSERT are separate round trips.
+
+        Two opposing POSTs arriving together (A→B and B→A) would both pass the check
+        against the pre-insert graph, then both insert — creating exactly the cycle the
+        guard exists to prevent, with two 200 responses and no error anywhere.
+
+        Note the scope this buys: an in-process lock, so it holds for the single uvicorn
+        process a Databricks App runs. A session-level Postgres advisory lock would NOT
+        work here — server/db.py takes a fresh pooled connection per call, so the lock
+        would be acquired on one connection and released on another.
+        """
+        self.assertIn("asyncio.Lock()", SOURCE)
+        self.assertIn("async with _enables_write_lock:", SOURCE)
+
+    def test_the_lock_covers_the_guard_and_the_write(self):
+        """A lock held only around the INSERT would not close the race at all."""
+        tree = ast.parse(SOURCE)
+        entry = next(node for node in ast.walk(tree)
+                     if isinstance(node, ast.AsyncFunctionDef)
+                     and node.name == "create_enables")
+        locked = [statement for statement in entry.body
+                  if isinstance(statement, ast.AsyncWith)]
+        self.assertEqual(len(locked), 1, "create_enables does not take the write lock")
+        # Everything that checks or writes must be inside the `async with`.
+        dumped = ast.dump(locked[0])
+        self.assertIn("_create_enables_locked", dumped,
+                      "the guarded work is not inside the lock")
 
     def test_self_edge_is_still_rejected(self):
         """The original guard must survive the new one."""

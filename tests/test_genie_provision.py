@@ -215,17 +215,36 @@ class TestSerializedSpace(unittest.TestCase):
         identifiers = [t["identifier"] for t in payload["data_sources"]["tables"]]
         self.assertEqual(len(identifiers), len(gp.MIRROR_TABLES))
 
-    def test_every_instruction_is_carried(self):
-        """All of them must survive the join into the single document.
+    def test_the_join_loses_nothing(self):
+        """The join into one document must not drop or truncate a rule.
 
-        Counting entries cannot check this any more (there is always exactly one), so
-        the text itself is searched — which is the property that actually matters.
+        Deliberately NOT `for i in INSTRUCTIONS: assertIn(i, document)` — that is
+        tautological, since the document is built from INSTRUCTIONS and deleting a rule
+        changes both sides together. (Verified: removing a rule leaves that form green.
+        Removal is caught instead by the content tests below, which name each rule.)
+
+        What this checks is the join itself: every rule's full text reaches the payload
+        intact, byte-for-byte, and the count of bulleted lines matches the count of rules
+        — so a join that silently truncated, deduplicated or reordered would fail here.
         """
-        document = "".join(
-            self.payload["instructions"]["text_instructions"][0]["content"])
+        content = self.payload["instructions"]["text_instructions"][0]["content"]
+        document = "".join(content)
+
+        bulleted = [line for line in content if line.startswith("- ")]
+        self.assertEqual(
+            len(bulleted), len(gp.INSTRUCTIONS) + len(gp.STARTER_QUESTIONS),
+            "the number of bulleted lines does not match the rules plus the starter "
+            "questions, so the join dropped or duplicated something")
+
+        # Full text, not a prefix: a truncating join would still pass a substring check
+        # on a short rule.
         for instruction in gp.INSTRUCTIONS:
-            self.assertIn(instruction, document,
-                          "an instruction was dropped when joining the document")
+            self.assertIn(f"- {instruction}\n", document,
+                          "a rule reached the payload altered or truncated")
+
+        # And the document must not have collapsed to just its header.
+        self.assertGreater(len(document), sum(len(i) for i in gp.INSTRUCTIONS),
+                           "the joined document is shorter than its own inputs")
 
 
 class TestInstructionsCoverTheAmbiguities(unittest.TestCase):

@@ -25,6 +25,7 @@ landed (confirmed via /api/ingestion/summary). During that run a real DNS blip h
 third upload and the transient-retry path recovered it, which is the behaviour case 2
 must not break.
 """
+import ast
 import os
 import sys
 import unittest
@@ -111,8 +112,41 @@ class TestRateLimitAwareness(unittest.TestCase):
             f"the sweep limit (burst {sweep.burst}, {sweep.per_minute}/min)")
 
     def test_spacing_is_actually_applied(self):
-        source = (EXTRACTOR / "push.py").read_text()
-        self.assertIn("time.sleep(_SPACING_SECONDS)", source)
+        """Behavioural, not a text search.
+
+        The earlier version asserted `"time.sleep(_SPACING_SECONDS)" in source`, and a
+        mutation test showed that passes with the call commented out — the string still
+        appears in the comment above it. This drives the real code path with sleep and the
+        network stubbed, and asserts on what was slept.
+        """
+        import tempfile
+        from unittest import mock
+
+        slept = []
+        posted = []
+
+        with tempfile.TemporaryDirectory() as tmp:
+            directory = Path(tmp)
+            for name, _, _ in push.UPLOADS:
+                (directory / name).write_text("catalog_name,schema_name\na,b\n")
+
+            with mock.patch.object(push.time, "sleep", slept.append), \
+                 mock.patch.object(push, "_token", lambda host: "Bearer x"), \
+                 mock.patch.object(push, "_post",
+                                   lambda url, path, auth: posted.append(url) or {}):
+                code = push.push(directory, "example.com")
+
+        self.assertEqual(code, 0)
+        self.assertEqual(len(posted), len(push.UPLOADS),
+                         "not every file was uploaded")
+        # One pause BETWEEN each pair of uploads, and none before the first.
+        self.assertEqual(len(slept), len(push.UPLOADS) - 1,
+                         f"expected {len(push.UPLOADS) - 1} pauses, got {slept}")
+        for interval in slept:
+            self.assertGreaterEqual(
+                interval, push._SPACING_SECONDS,
+                "the pause is shorter than the configured spacing, so a three-file "
+                "push can outrun the server's sweep limit")
 
     def test_retry_after_is_honoured(self):
         """The server sends Retry-After with its 429. Guessing instead would either
@@ -152,12 +186,46 @@ class TestManualPathIsPreserved(unittest.TestCase):
 
     def test_csvs_are_written_before_any_push(self):
         """The files must exist on disk regardless, so an air-gapped run is unaffected
-        and a failed push loses nothing."""
-        save_position = self.extract.index(
-            'save_csv(rows, OUTPUT_DIR / f"all_{key}.csv"')
-        push_position = self.extract.index("if args.push is not None:")
-        self.assertLess(save_position, push_position,
-                        "the push runs before the CSVs are saved")
+        and a failed push loses nothing.
+
+        AST-based rather than a string-position comparison. The earlier version compared
+        `.index()` offsets, which only proves the save appears earlier in the FILE — a
+        mutation test showed it still passed with the save moved inside the push branch.
+        This asserts both statements are siblings at the top level of main(), and that the
+        save comes first, so the save cannot be made conditional on pushing.
+        """
+        tree = ast.parse(self.extract)
+        main = next(node for node in ast.walk(tree)
+                    if isinstance(node, ast.FunctionDef) and node.name == "main")
+
+        save_index = push_index = None
+        save_statement = None
+        for index, statement in enumerate(main.body):
+            dumped = ast.dump(statement)
+            # Matched on the call and the "all_" prefix: the f-string is stored as a
+            # JoinedStr, so the literal "all_{key}.csv" never appears in the AST dump.
+            if save_index is None and "save_csv" in dumped and "'all_'" in dumped:
+                save_index, save_statement = index, statement
+            if push_index is None and "push_module" in dumped:
+                push_index = index
+
+        self.assertIsNotNone(save_index, "main() never writes the all_*.csv files")
+        self.assertIsNotNone(push_index, "main() never reaches the push")
+        self.assertLess(save_index, push_index,
+                        "the push runs before the CSVs are saved, so a push failure "
+                        "would lose the whole sweep")
+
+        # The save must be UNCONDITIONAL, which the ordering check alone cannot show:
+        # wrapping it in `if args.push is not None:` keeps it earlier in main.body and
+        # still passes the comparison above (verified by mutation), while making the
+        # air-gapped path write nothing at all.
+        for node in ast.walk(save_statement):
+            if isinstance(node, ast.If):
+                condition = ast.dump(node.test)
+                self.assertNotIn(
+                    "push", condition.lower(),
+                    "the CSV save is gated on the --push flag, so a run without --push "
+                    "would write no files and an air-gapped estate gets nothing")
 
     def test_push_is_opt_in(self):
         """default=None, so omitting the flag changes nothing about the old behaviour."""

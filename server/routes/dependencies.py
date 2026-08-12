@@ -1,4 +1,6 @@
 """Dependency edges: UseCase->requires->DataAsset and UseCase->enables->UseCase."""
+import asyncio
+
 from fastapi import APIRouter, HTTPException, Request
 from pydantic import BaseModel
 
@@ -121,11 +123,36 @@ async def _would_create_cycle(from_id: int, to_id: int) -> list[int] | None:
     return None
 
 
+# Serializes cycle-check-then-insert. The check and the INSERT are separate round trips,
+# and server/db.py acquires a fresh pooled connection per call, so they cannot share a
+# transaction without new plumbing. Two opposing POSTs arriving together would otherwise
+# BOTH pass the check and both insert — producing exactly the cycle the guard prevents.
+#
+# An in-process asyncio.Lock is the right scope here, not a Postgres advisory lock: a
+# SESSION-level advisory lock binds to a connection, and because each db call takes a
+# different connection from the pool it would be acquired on one and released on another.
+# (That was this code's first fix, and it was wrong.) A transaction-level lock would need
+# the whole sequence inside one transaction, which is the plumbing being avoided.
+#
+# The tradeoff, stated plainly: this serializes edge creation within ONE app process. A
+# Databricks App runs a single uvicorn process, so that covers the deployment as it
+# exists. If this is ever scaled to multiple replicas, the guard needs to move into the
+# database — either a transaction around check+insert, or a trigger.
+_enables_write_lock = asyncio.Lock()
+
+
 @router.post("/enables")
 async def create_enables(body: EnablesIn, request: Request):
     if body.from_use_case_id == body.to_use_case_id:
         raise HTTPException(422, "A use case cannot enable itself")
 
+    # Edge creation is a human-scale operation, so serializing it costs nothing
+    # noticeable and removes the race entirely.
+    async with _enables_write_lock:
+        return await _create_enables_locked(body, request)
+
+
+async def _create_enables_locked(body: EnablesIn, request: Request):
     cycle = await _would_create_cycle(body.from_use_case_id, body.to_use_case_id)
     if cycle:
         # Named, not just numbered: "42 → 87 → 42" is unactionable in a UI.
