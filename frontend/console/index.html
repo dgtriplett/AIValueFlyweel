@@ -227,6 +227,19 @@
       .pill.warn { background: rgba(255,171,0,0.13); color: var(--warning-300);
                    border-color: rgba(255,171,0,0.4); }
       .dot { width: 7px; height: 7px; border-radius: 50%; background: currentColor; }
+      .env-pill {
+        position: fixed; right: 14px; bottom: 14px; z-index: 2147483647;
+        padding: 5px 10px; border-radius: 999px;
+        font-family: "DM Mono", ui-monospace, monospace;
+        font-size: 11px; font-weight: 700; letter-spacing: 0.08em;
+        pointer-events: none; box-shadow: 0 8px 24px rgba(0, 0, 0, 0.35);
+      }
+      .env-pill.prod {
+        color: var(--success-300); background: #123c2f; border: 1px solid var(--success);
+      }
+      .env-pill.dev {
+        color: var(--warning-300); background: #3b2c06; border: 1px solid var(--warning);
+      }
 
       table { width: 100%; border-collapse: collapse; font-size: 13px; }
       th, td { text-align: left; padding: 8px 10px; border-bottom: 1px solid var(--navy-700); }
@@ -332,6 +345,7 @@
     </style>
   </head>
   <body>
+    <div id="app-env-pill" class="env-pill dev" aria-label="Application environment">DEV</div>
     <!--
       The header and tab row mirror the SPA's chrome so the two halves of the app
       read as one product. The portfolio tabs are real links into the SPA (its tab

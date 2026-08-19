@@ -5,6 +5,8 @@ the dashboards react live to assumption edits.
 """
 from fastapi import APIRouter
 
+from .. import accounts
+from .. import portfolio
 from ..db import db
 from ..readiness import readiness_map
 from ..value_engine import compute_realized, compute_value_range, load_assumptions
@@ -15,9 +17,11 @@ router = APIRouter(prefix="/analytics", tags=["analytics"])
 @router.get("/dashboard")
 async def dashboard():
     assumptions = await load_assumptions()
+    account_id = await accounts.current()
     # Portfolio-scoped: dashboards reflect the customer's confirmed set only.
+    condition, params = await portfolio.portfolio_condition("uc")
     ucs = [dict(u) for u in await db.fetch(
-        "SELECT * FROM use_cases WHERE in_portfolio = true ORDER BY id")]
+        f"SELECT uc.* FROM use_cases uc WHERE {condition} ORDER BY uc.id", *params)]
     lobs = {lob["id"]: lob["name"] for lob in await db.fetch("SELECT id, name FROM lobs")}
     rmap = await readiness_map()
 
@@ -72,21 +76,40 @@ async def dashboard():
         status_dist[u["status"]] = status_dist.get(u["status"], 0) + 1
 
     # data-asset utilization: how many UCs require each asset (top 15)
-    util = await db.fetch(
-        """SELECT da.id, da.source_category, da.module, da.ingestion_status,
-                  COUNT(ura.use_case_id) AS uc_count
-           FROM data_assets da
-           LEFT JOIN uc_requires_asset ura ON ura.data_asset_id = da.id
-           GROUP BY da.id, da.source_category, da.module, da.ingestion_status
-           ORDER BY uc_count DESC, da.id LIMIT 15""")
+    if account_id is not None:
+        util = await db.fetch(
+            """SELECT da.id, da.source_category, da.module,
+                      s.ingestion_status,
+                      COUNT(ura.use_case_id) AS uc_count
+               FROM data_assets da
+               LEFT JOIN asset_status_by_account s
+                      ON s.data_asset_id = da.id AND s.account_id = $1
+               LEFT JOIN uc_requires_asset ura ON ura.data_asset_id = da.id
+               GROUP BY da.id, da.source_category, da.module, s.ingestion_status
+               ORDER BY uc_count DESC, da.id LIMIT 15""",
+            account_id)
+    else:
+        util = await db.fetch(
+            """SELECT da.id, da.source_category, da.module, da.ingestion_status,
+                      COUNT(ura.use_case_id) AS uc_count
+               FROM data_assets da
+               LEFT JOIN uc_requires_asset ura ON ura.data_asset_id = da.id
+               GROUP BY da.id, da.source_category, da.module, da.ingestion_status
+               ORDER BY uc_count DESC, da.id LIMIT 15""")
     utilization = [{"label": f"{r['source_category'] or ''} · {r['module']}",
                     "uc_count": int(r["uc_count"] or 0), "ingestion_status": r["ingestion_status"]}
                    for r in util]
 
     # cumulative realized by fiscal period (from value_records)
-    vr = await db.fetch(
-        "SELECT fiscal_period, COALESCE(SUM(amount),0) AS amt FROM value_records "
-        "WHERE kind='realized' GROUP BY fiscal_period ORDER BY fiscal_period")
+    if account_id is not None:
+        vr = await db.fetch(
+            "SELECT fiscal_period, COALESCE(SUM(amount),0) AS amt FROM value_records "
+            "WHERE account_id=$1 AND kind='realized' GROUP BY fiscal_period ORDER BY fiscal_period",
+            account_id)
+    else:
+        vr = await db.fetch(
+            "SELECT fiscal_period, COALESCE(SUM(amount),0) AS amt FROM value_records "
+            "WHERE kind='realized' GROUP BY fiscal_period ORDER BY fiscal_period")
     realized_by_period = [{"period": r["fiscal_period"] or "—", "amount": float(r["amt"])} for r in vr]
 
     return {

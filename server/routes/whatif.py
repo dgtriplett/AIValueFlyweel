@@ -39,6 +39,7 @@ from pydantic import BaseModel, Field
 
 from ..common import rows_to_list
 from ..db import db
+from .. import accounts, portfolio
 from ..readiness import READY_STATUSES, readiness_map
 from ..value_engine import EFFORT_COST, asset_cost, load_assumptions, use_case_value
 
@@ -75,25 +76,28 @@ async def candidates(limit: int = Query(default=20, ge=1, le=100)):
     a better first move than an $80M unlock costing $12M, and a list sorted by value
     alone quietly recommends the expensive one.
     """
+    account_id = await accounts.current()
     assets = rows_to_list(await db.fetch("""
         SELECT da.id, da.source_category, da.module, da.vendor, da.ingest_effort,
                da.ingest_cost_low, da.ingest_cost_high,
-               COALESCE(s.ingestion_status, da.ingestion_status) AS ingestion_status
+               COALESCE(s.ingestion_status, 'not_started') AS ingestion_status
         FROM data_assets da
         LEFT JOIN asset_status_by_account s
                ON s.data_asset_id = da.id
-              AND s.account_id = (SELECT id FROM accounts WHERE is_default)
+              AND s.account_id = $1
         ORDER BY da.id
-    """))
+    """, account_id))
     unlanded = [a for a in assets if a["ingestion_status"] not in READY_STATUSES]
     if not unlanded:
         return {"candidates": [], "note": "Every source is already landed."}
 
     baseline = await readiness_map()
     assumptions = await load_assumptions()
+    condition, params = await portfolio.portfolio_condition("uc")
     use_cases = {u["id"]: dict(u) for u in await db.fetch(
-        "SELECT id, title, lob_id, effort_tshirt, hypothesized_value_json, status "
-        "FROM use_cases WHERE in_portfolio = true")}
+        "SELECT uc.id, uc.title, uc.lob_id, uc.effort_tshirt, "
+        f"uc.hypothesized_value_json, uc.status FROM use_cases uc WHERE {condition}",
+        *params)}
 
     results = []
     for asset in unlanded:
@@ -175,12 +179,13 @@ async def _simulate(asset_ids: list[int]) -> dict:
     projected = await readiness_map({i: SIMULATED_STATUS for i in asset_ids})
     assumptions = await load_assumptions()
 
-    use_cases = {u["id"]: dict(u) for u in await db.fetch("""
+    condition, params = await portfolio.portfolio_condition("u")
+    use_cases = {u["id"]: dict(u) for u in await db.fetch(f"""
         SELECT u.id, u.title, u.lob_id, u.effort_tshirt, u.status,
                u.hypothesized_value_json, l.name AS lob
         FROM use_cases u LEFT JOIN lobs l ON l.id = u.lob_id
-        WHERE u.in_portfolio = true
-    """)}
+        WHERE {condition}
+    """, *params)}
 
     flipped = _newly_ready(baseline, projected)
     data_only = _newly_unblocked_data(baseline, projected)

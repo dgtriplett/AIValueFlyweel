@@ -22,8 +22,10 @@ produces a meaningless figure.
 """
 from __future__ import annotations
 
+import json
 import logging
 import re
+from pathlib import Path
 
 from fastapi import APIRouter, Depends, HTTPException, Request
 from pydantic import BaseModel, Field
@@ -38,10 +40,43 @@ logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/accounts", tags=["accounts"])
 
 _SLUG_RE = re.compile(r"[^a-z0-9]+")
+_SEED_DATA = Path(__file__).resolve().parents[2] / "scripts" / "seed_data.json"
 
 
 def slugify(name: str) -> str:
     return _SLUG_RE.sub("-", (name or "").strip().lower()).strip("-")[:60] or "account"
+
+
+async def _seed_assumptions_for_account(account_id: int, actor: str) -> int:
+    """Give a new account its own baseline assumptions from the shipped seed.
+
+    A new customer's assumptions must not inherit whichever utility happened to be
+    the default account, because that account may already be research-calibrated.
+    The seed JSON is the product baseline and is deployed with the app.
+    """
+    try:
+        with _SEED_DATA.open("r", encoding="utf-8") as handle:
+            assumptions = json.load(handle).get("value_assumptions") or []
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("could not initialize seeded assumptions for account %s (%s)",
+                       account_id, type(exc).__name__)
+        return 0
+
+    inserted = 0
+    for item in assumptions:
+        row = await db.fetchrow("""
+            INSERT INTO value_assumptions
+                (account_id, key, label, value, unit, category, source, updated_at)
+            VALUES ($1,$2,$3,$4,$5,$6,'seed',now())
+            ON CONFLICT (account_id, key) DO NOTHING
+            RETURNING id
+        """, account_id, item.get("key"), item.get("label"), item.get("value"),
+            item.get("unit"), item.get("category"))
+        if row:
+            inserted += 1
+    await write_audit("account", account_id, "seed_assumptions", actor,
+                      {"count": inserted})
+    return inserted
 
 
 class AccountIn(BaseModel):
@@ -128,11 +163,13 @@ async def create_account(body: AccountIn, request: Request):
     """, slug, body.name.strip(), body.utility_type, body.notes, actor)
 
     acct.invalidate_default()
+    seeded_assumptions = await _seed_assumptions_for_account(row["id"], actor)
     await write_audit("account", row["id"], "create", actor,
                       {"slug": slug, "name": body.name})
     return {**dict(row), "note": "Starts on the shared reference library with the "
                                  "seeded assumptions. Run Company research to "
-                                 "calibrate them for this utility."}
+                                 "calibrate them for this utility.",
+            "seeded_assumptions": seeded_assumptions}
 
 
 @router.patch("/{account_id}", dependencies=[Depends(limiter("write"))])

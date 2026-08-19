@@ -57,9 +57,16 @@ class ApplyIn(BaseModel):
 
 
 async def _start_run(company: str, scope: list[str], actor: str) -> int | None:
-    row = await db.fetchrow(
-        "INSERT INTO research_runs (company_name, scope, actor) "
-        "VALUES ($1,$2,$3) RETURNING id", company, scope, actor)
+    account_id = await accounts.current()
+    if account_id is not None:
+        row = await db.fetchrow(
+            "INSERT INTO research_runs (account_id, company_name, scope, actor) "
+            "VALUES ($1,$2,$3,$4) RETURNING id",
+            account_id, company, scope, actor)
+    else:
+        row = await db.fetchrow(
+            "INSERT INTO research_runs (company_name, scope, actor) "
+            "VALUES ($1,$2,$3) RETURNING id", company, scope, actor)
     return row["id"] if row else None
 
 
@@ -115,9 +122,10 @@ async def research_company(body: ResearchIn, request: Request):
 
         # The profile IS stored: it is a statement about the world, not a change to
         # the portfolio, and every later pass needs it as grounding.
+        account_id = await accounts.current()
         await db.execute(
             """INSERT INTO company_profile
-               (id, company_name, utility_type, segments, service_territory,
+               (account_id, company_name, utility_type, segments, service_territory,
                 regulator, iso_rto, description, research_notes, researched_at,
                 researched_by, model)
                VALUES ($11,$1,$2,$3,$4,$5,$6,$7,$8,now(),$9,$10)
@@ -134,16 +142,25 @@ async def research_company(body: ResearchIn, request: Request):
             profile["company_name"], profile["utility_type"], profile["segments"],
             profile["service_territory"], profile["regulator"], profile["iso_rto"],
             profile["description"], profile["caveats"], actor,
-            SERVING_ENDPOINT if profile_llm else "heuristic")
+            SERVING_ENDPOINT if profile_llm else "heuristic", account_id)
         stats["profile_confidence"] = profile["confidence"]
 
         # --- 2. assumptions -------------------------------------------------
         proposals: list[dict] = []
         summary: dict = {}
         if body.calibrate_assumptions:
-            current = rows_to_list(await db.fetch(
-                "SELECT key, label, value, unit, category FROM value_assumptions "
-                "ORDER BY category, key"))
+            if account_id is not None:
+                current = rows_to_list(await db.fetch(
+                    """SELECT DISTINCT ON (key) key, label, value, unit, category
+                       FROM value_assumptions
+                       WHERE account_id = $1 OR account_id IS NULL
+                       ORDER BY key, (account_id IS NULL)""",
+                    account_id))
+                current.sort(key=lambda r: (r.get("category") or "", r.get("key") or ""))
+            else:
+                current = rows_to_list(await db.fetch(
+                    "SELECT key, label, value, unit, category FROM value_assumptions "
+                    "ORDER BY category, key"))
             if not current:
                 warnings.append(
                     "No value assumptions exist yet — seed the reference library "
@@ -164,14 +181,24 @@ async def research_company(body: ResearchIn, request: Request):
                 # Proposals are recorded (not applied) so they survive a page
                 # reload and can be reviewed by someone other than the requester.
                 for proposal in proposals:
-                    await db.execute(
-                        """INSERT INTO assumption_research
-                           (key, value_before, value_proposed, confidence,
-                            rationale, basis, research_run)
-                           VALUES ($1,$2,$3,$4,$5,$6,$7)""",
-                        proposal["key"], proposal["value_before"],
-                        proposal["value_proposed"], proposal["confidence"],
-                        proposal["rationale"], proposal["basis"], run_id)
+                    if account_id is not None:
+                        await db.execute(
+                            """INSERT INTO assumption_research
+                               (account_id, key, value_before, value_proposed,
+                                confidence, rationale, basis, research_run)
+                               VALUES ($1,$2,$3,$4,$5,$6,$7,$8)""",
+                            account_id, proposal["key"], proposal["value_before"],
+                            proposal["value_proposed"], proposal["confidence"],
+                            proposal["rationale"], proposal["basis"], run_id)
+                    else:
+                        await db.execute(
+                            """INSERT INTO assumption_research
+                               (key, value_before, value_proposed, confidence,
+                                rationale, basis, research_run)
+                               VALUES ($1,$2,$3,$4,$5,$6,$7)""",
+                            proposal["key"], proposal["value_before"],
+                            proposal["value_proposed"], proposal["confidence"],
+                            proposal["rationale"], proposal["basis"], run_id)
 
         # --- 3. lines of business ------------------------------------------
         lob_proposals: list[dict] = []
@@ -246,21 +273,43 @@ async def get_assumption_research(run_id: int | None = None):
     rather than a mixture of passes.
     """
     if run_id is None:
-        latest = await db.fetchrow(
-            "SELECT id FROM research_runs WHERE status <> 'failed' "
-            "ORDER BY started_at DESC LIMIT 1")
+        account_id = await accounts.current()
+        if account_id is not None:
+            latest = await db.fetchrow(
+                "SELECT id FROM research_runs WHERE account_id=$1 AND status <> 'failed' "
+                "ORDER BY started_at DESC LIMIT 1", account_id)
+        else:
+            latest = await db.fetchrow(
+                "SELECT id FROM research_runs WHERE status <> 'failed' "
+                "ORDER BY started_at DESC LIMIT 1")
         run_id = latest["id"] if latest else None
     if run_id is None:
         return {"run_id": None, "assumptions": [], "summary": {}}
+
+    account_id = await accounts.current()
+    if account_id is not None:
+        owned = await db.fetchrow(
+            "SELECT id FROM research_runs WHERE id=$1 AND account_id=$2",
+            run_id, account_id)
+        if owned is None:
+            raise HTTPException(404, "Research run not found")
 
     rows = await db.fetch("""
         SELECT ar.*, va.label, va.unit, va.category, va.value AS value_current,
                va.source AS current_source
         FROM assumption_research ar
-        LEFT JOIN value_assumptions va ON va.key = ar.key
+        LEFT JOIN LATERAL (
+            SELECT label, unit, category, value, source
+            FROM value_assumptions
+            WHERE key = ar.key
+              AND ($2::int IS NULL OR account_id = $2 OR account_id IS NULL)
+            ORDER BY (account_id IS NULL)
+            LIMIT 1
+        ) va ON true
         WHERE ar.research_run = $1
+          AND ($2::int IS NULL OR ar.account_id = $2)
         ORDER BY va.category NULLS LAST, ar.key
-    """, run_id)
+    """, run_id, account_id)
     proposals = rows_to_list(rows)
     for proposal in proposals:
         before = float(proposal.get("value_before") or 0)
@@ -278,6 +327,19 @@ async def get_assumption_research(run_id: int | None = None):
     }
 
 
+async def _latest_run_id() -> int | None:
+    account_id = await accounts.current()
+    if account_id is not None:
+        latest = await db.fetchrow(
+            "SELECT id FROM research_runs WHERE account_id=$1 AND status <> 'failed' "
+            "ORDER BY started_at DESC LIMIT 1", account_id)
+    else:
+        latest = await db.fetchrow(
+            "SELECT id FROM research_runs WHERE status <> 'failed' "
+            "ORDER BY started_at DESC LIMIT 1")
+    return latest["id"] if latest else None
+
+
 # ---------------------------------------------------------------------------
 # Apply — confirm-gated
 # ---------------------------------------------------------------------------
@@ -291,16 +353,25 @@ async def propose_apply(body: ApplyIn, request: Request):
     actor = current_user(request)
     run_id = body.run_id
     if run_id is None:
-        latest = await db.fetchrow(
-            "SELECT id FROM research_runs WHERE status <> 'failed' "
-            "ORDER BY started_at DESC LIMIT 1")
-        run_id = latest["id"] if latest else None
+        run_id = await _latest_run_id()
     if run_id is None:
         raise HTTPException(404, "No research run to apply. Run research first.")
 
-    rows = await db.fetch(
-        "SELECT key, value_before, value_proposed, confidence, rationale, basis "
-        "FROM assumption_research WHERE research_run = $1", run_id)
+    account_id = await accounts.current()
+    if account_id is not None:
+        owned = await db.fetchrow(
+            "SELECT id FROM research_runs WHERE id=$1 AND account_id=$2",
+            run_id, account_id)
+        if owned is None:
+            raise HTTPException(404, "Research run not found")
+        rows = await db.fetch(
+            "SELECT key, value_before, value_proposed, confidence, rationale, basis "
+            "FROM assumption_research WHERE research_run = $1 AND account_id=$2",
+            run_id, account_id)
+    else:
+        rows = await db.fetch(
+            "SELECT key, value_before, value_proposed, confidence, rationale, basis "
+            "FROM assumption_research WHERE research_run = $1", run_id)
     if not rows:
         raise HTTPException(404, f"Research run {run_id} proposed no assumptions.")
 
@@ -341,8 +412,15 @@ async def propose_apply(body: ApplyIn, request: Request):
 
 
 async def _calibrated_count() -> int:
-    row = await db.fetchrow(
-        "SELECT count(*) AS n FROM value_assumptions WHERE source = 'research'")
+    account_id = await accounts.current()
+    if account_id is not None:
+        row = await db.fetchrow(
+            "SELECT count(*) AS n FROM value_assumptions "
+            "WHERE account_id=$1 AND source = 'research'",
+            account_id)
+    else:
+        row = await db.fetchrow(
+            "SELECT count(*) AS n FROM value_assumptions WHERE source = 'research'")
     return int(row["n"]) if row else 0
 
 
@@ -355,22 +433,59 @@ async def execute_apply_research(payload: dict, actor: str) -> dict:
     """
     run_id = payload.get("run_id")
     keys = payload.get("keys") or []
-    rows = await db.fetch(
-        "SELECT key, value_before, value_proposed, confidence, rationale, basis "
-        "FROM assumption_research WHERE research_run = $1 AND key = ANY($2::text[])",
-        run_id, keys)
+    account_id = await accounts.current()
+    if account_id is not None:
+        rows = await db.fetch(
+            """SELECT key, value_before, value_proposed, confidence, rationale, basis
+               FROM assumption_research
+               WHERE research_run = $1 AND account_id=$2 AND key = ANY($3::text[])""",
+            run_id, account_id, keys)
+    else:
+        rows = await db.fetch(
+            "SELECT key, value_before, value_proposed, confidence, rationale, basis "
+            "FROM assumption_research WHERE research_run = $1 AND key = ANY($2::text[])",
+            run_id, keys)
 
     applied = []
     for row in rows:
         note_parts = [p for p in (row["basis"], row["rationale"]) if p]
-        await db.execute(
-            "UPDATE value_assumptions SET value=$1, source='research', "
-            "source_note=$2, confidence=$3, updated_at=now() WHERE key=$4",
-            row["value_proposed"], " — ".join(note_parts) or None,
-            row["confidence"], row["key"])
-        await db.execute(
-            "UPDATE assumption_research SET applied=true, applied_at=now() "
-            "WHERE research_run=$1 AND key=$2", run_id, row["key"])
+        if account_id is not None:
+            meta = await db.fetchrow(
+                """SELECT label, unit, category
+                   FROM value_assumptions
+                   WHERE key=$1 AND (account_id=$2 OR account_id IS NULL)
+                   ORDER BY (account_id IS NULL) LIMIT 1""",
+                row["key"], account_id)
+            await db.execute(
+                """INSERT INTO value_assumptions
+                   (account_id, key, label, value, unit, category, source,
+                    source_note, confidence, updated_at)
+                   VALUES ($1,$2,$3,$4,$5,$6,'research',$7,$8,now())
+                   ON CONFLICT (account_id, key) DO UPDATE SET
+                     value=EXCLUDED.value,
+                     source='research',
+                     source_note=EXCLUDED.source_note,
+                     confidence=EXCLUDED.confidence,
+                     updated_at=now()""",
+                account_id, row["key"],
+                meta["label"] if meta else row["key"],
+                row["value_proposed"],
+                meta["unit"] if meta else None,
+                meta["category"] if meta else None,
+                " — ".join(note_parts) or None, row["confidence"])
+            await db.execute(
+                "UPDATE assumption_research SET applied=true, applied_at=now() "
+                "WHERE research_run=$1 AND account_id=$2 AND key=$3",
+                run_id, account_id, row["key"])
+        else:
+            await db.execute(
+                "UPDATE value_assumptions SET value=$1, source='research', "
+                "source_note=$2, confidence=$3, updated_at=now() WHERE key=$4",
+                row["value_proposed"], " — ".join(note_parts) or None,
+                row["confidence"], row["key"])
+            await db.execute(
+                "UPDATE assumption_research SET applied=true, applied_at=now() "
+                "WHERE research_run=$1 AND key=$2", run_id, row["key"])
         applied.append({"key": row["key"],
                         "from": float(row["value_before"] or 0),
                         "to": float(row["value_proposed"] or 0),

@@ -163,15 +163,40 @@ async def update_data_asset(asset_id: int, body: DataAssetIn, request: Request):
     if body.ingestion_status not in _STATUSES:
         raise HTTPException(422, f"ingestion_status must be one of {_STATUSES}")
     actor = current_user(request)
-    row = await db.fetchrow(
-        """UPDATE data_assets SET
-           source_category=$1, vendor=$2, source_system=$1, module=$3, description=$4,
-           sub_vertical=COALESCE($5, sub_vertical, 'cross'), ingestion_status=$6,
-           uc_catalog=$7, uc_schema=$8, owning_lob_id=$9, updated_at=now()
-           WHERE id=$10 RETURNING *""",
-        body.source_category, body.vendor, body.module, body.description, body.sub_vertical,
-        body.ingestion_status, body.uc_catalog, body.uc_schema, body.owning_lob_id, asset_id,
-    )
+    account_id = await accounts.current()
+    if account_id is not None:
+        row = await db.fetchrow(
+            """UPDATE data_assets SET
+               source_category=$1, vendor=$2, source_system=$1, module=$3,
+               description=$4, sub_vertical=COALESCE($5, sub_vertical, 'cross'),
+               uc_catalog=$6, uc_schema=$7, updated_at=now()
+               WHERE id=$8 RETURNING *""",
+            body.source_category, body.vendor, body.module, body.description,
+            body.sub_vertical, body.uc_catalog, body.uc_schema, asset_id)
+        if row is not None:
+            await db.execute("""
+                INSERT INTO account_asset_status
+                    (account_id, data_asset_id, ingestion_status, owning_lob_id,
+                     is_user_edited, updated_by, updated_at)
+                VALUES ($1,$2,$3,$4,true,$5,now())
+                ON CONFLICT (account_id, data_asset_id) DO UPDATE SET
+                    ingestion_status = EXCLUDED.ingestion_status,
+                    owning_lob_id = EXCLUDED.owning_lob_id,
+                    is_user_edited = true,
+                    updated_by = EXCLUDED.updated_by,
+                    updated_at = now()
+            """, account_id, asset_id, body.ingestion_status, body.owning_lob_id,
+                actor)
+    else:
+        row = await db.fetchrow(
+            """UPDATE data_assets SET
+               source_category=$1, vendor=$2, source_system=$1, module=$3, description=$4,
+               sub_vertical=COALESCE($5, sub_vertical, 'cross'), ingestion_status=$6,
+               uc_catalog=$7, uc_schema=$8, owning_lob_id=$9, updated_at=now()
+               WHERE id=$10 RETURNING *""",
+            body.source_category, body.vendor, body.module, body.description, body.sub_vertical,
+            body.ingestion_status, body.uc_catalog, body.uc_schema, body.owning_lob_id, asset_id,
+        )
     if row is None:
         raise HTTPException(404, "Data asset not found")
     await db.execute("DELETE FROM data_asset_lobs WHERE data_asset_id = $1", asset_id)
@@ -182,7 +207,11 @@ async def update_data_asset(asset_id: int, body: DataAssetIn, request: Request):
             asset_id, lob_id,
         )
     await write_audit("data_asset", asset_id, "update", actor, body.model_dump())
-    return await _attach_benefiting(row_to_dict(row))
+    result = await _attach_benefiting(row_to_dict(row))
+    if account_id is not None:
+        result["ingestion_status"] = body.ingestion_status
+        result["owning_lob_id"] = body.owning_lob_id
+    return result
 
 
 @router.delete("/{asset_id}")

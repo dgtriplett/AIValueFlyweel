@@ -17,6 +17,10 @@ DATABRICKS_PROFILE = os.environ.get("DATABRICKS_PROFILE") or os.environ.get("DAT
 # Foundation Model endpoint for the AI agents (any chat model your workspace has).
 SERVING_ENDPOINT = os.environ.get("SERVING_ENDPOINT", "databricks-claude-sonnet-4-5")
 
+# SQL ai_query() batch enrichment does not support every chat endpoint. Keep it
+# separate so agent model upgrades do not break the Getting Started discovery flow.
+AI_QUERY_ENDPOINT = os.environ.get("AI_QUERY_ENDPOINT", "databricks-claude-sonnet-4-5")
+
 # Genie space over the portfolio mirror (set after creating the space).
 GENIE_SPACE_ID = os.environ.get("GENIE_SPACE_ID", "")
 

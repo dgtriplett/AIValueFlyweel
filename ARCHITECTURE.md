@@ -107,6 +107,24 @@ written back to Lakebase, which stays the portfolio's system of record.
   which. De-duplicated to one row per account/minute/reason via a GENERATED UTC minute
   column — a functional index on `date_trunc` is rejected because that is only STABLE
   on a timestamptz, not IMMUTABLE.
+- **Tenancy hardening** — `012_harden_account_scoping.sql`: customer-owned tables
+  that must never be global (`value_records`, `roadmap_items`, `funding_requests`,
+  `comments`, `research_runs`, `assumption_research`, `chat_conversations`) adopt
+  any accidental NULL `account_id` rows into the default account and then mark the
+  column NOT NULL. It also repairs accounts created without their own baseline
+  value assumptions.
+- **External sync** — `013_external_sync.sql`: `external_object_map` records
+  source-app ids for imported assessment/roadmap objects. This makes recurring
+  imports from the Data & AI Maturity Assessment app idempotent: a use case created
+  from an exported roadmap is updated on the next run instead of duplicated and
+  double-counted.
+- **Account portfolio membership** — `014_account_portfolio.sql`:
+  `account_portfolio_use_cases` separates the shared use-case catalog from each
+  account's selected portfolio. The old `use_cases.in_portfolio` flag was global,
+  so a new account inherited the default/demo portfolio. 014 migrates the current
+  global selection into the default account only, preserves non-default accounts'
+  real work via roadmap/value/external-sync rows, and lets newly-created accounts
+  start with a clean portfolio ready for roadmap import.
 - **Migration ledger** — `schema_migrations`, created by `server/migrator.py`
   rather than by a numbered migration, since it must exist before the ledger can
   be consulted.

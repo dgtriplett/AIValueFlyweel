@@ -301,7 +301,8 @@ with empty values.
 |---|---|---|
 | `PGHOST` / `PGPORT` / `PGDATABASE` / `PGUSER` | Lakebase. `PGUSER` **must be the app's service-principal client id** — the app authenticates as itself. | yes |
 | `DATABRICKS_WAREHOUSE_ID` | Warehouse for system tables, UC discovery, `ai_query()`. From the bound resource. | yes |
-| `SERVING_ENDPOINT` | Foundation Model endpoint. | agents |
+| `SERVING_ENDPOINT` | Foundation Model chat endpoint for agents. | agents |
+| `AI_QUERY_ENDPOINT` | Foundation Model endpoint for SQL `ai_query()` batch enrichment. Keep separate because not every chat endpoint supports batch inference. | discovery |
 | `ATLAS_CATALOG` / `ATLAS_SCHEMA` | Where the discovery layer writes. Blank disables discovery. | discovery |
 | `GENIE_SPACE_ID` | Genie space over the portfolio mirror. | Genie |
 | `GENIE_MIRROR_CATALOG` / `GENIE_MIRROR_SCHEMA` | UC target for the mirror. | Genie |

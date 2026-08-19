@@ -287,6 +287,7 @@ def load(cur, data, clean: bool):
         demo_custom_parents = {u["parent_id"] for u in chosen[:5]}
 
     uc_id_by_parent = {}
+    seen_titles: set[str] = set()
     for u in data["use_cases"]:
         # CLEAN: everything is in the portfolio (pristine). DEMO: only the curated
         # in-flight subset is in the portfolio; the rest stay catalog-only.
@@ -301,6 +302,11 @@ def load(cur, data, clean: bool):
         realized_amt = u["realized_value_amount"] if carries_inflight else None
         realized_json = (json.dumps(u["realized_value_json"])
                          if (carries_inflight and u.get("realized_value_json")) else None)
+        title = u["title"]
+        title_key = title.strip().lower()
+        if title_key in seen_titles:
+            title = f"{title} ({u['parent_id']})"
+        seen_titles.add(title_key)
         cur.execute(
             """INSERT INTO use_cases
                (title, description, lob_id, sub_vertical, stage, phase, status, category,
@@ -308,7 +314,7 @@ def load(cur, data, clean: bool):
                 hypothesized_value_json, realized_value_amount, realized_value_json,
                 status_source, created_by, origin, in_portfolio)
                VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s) RETURNING id""",
-            (u["title"], u["description"], lob_id.get(u["lob"]), u["sub_vertical"],
+            (title, u["description"], lob_id.get(u["lob"]), u["sub_vertical"],
              u["stage"], phase, status, None, u["effort_tshirt"],  # category NULLed — was the parent's stale phase name; phase name is now derived
              u["priority_score"], u["risk_tags"], u["compliance_tags"],
              json.dumps(u["hypothesized_value_json"]), realized_amt, realized_json,
@@ -343,7 +349,7 @@ def load(cur, data, clean: bool):
     for a in data["value_assumptions"]:
         cur.execute(
             """INSERT INTO value_assumptions (key, label, value, unit, category)
-               VALUES (%s,%s,%s,%s,%s) ON CONFLICT (key) DO UPDATE SET value=EXCLUDED.value""",
+               VALUES (%s,%s,%s,%s,%s)""",
             (a["key"], a["label"], a["value"], a["unit"], a["category"]))
 
     # 7) benchmark library (reference; both modes) — if present in data

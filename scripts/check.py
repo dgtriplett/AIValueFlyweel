@@ -141,6 +141,10 @@ def main() -> int:
                            [sys.executable, str(ROOT / "scripts"
                                                 / "patch_spa_proposal_button.py"),
                             "--check"]))
+        results.append(run("SPA customer visibility applied",
+                           [sys.executable, str(ROOT / "scripts"
+                                                / "patch_spa_customer_visibility.py"),
+                            "--check"]))
 
     print("\n" + "=" * 62)
     for result in results:

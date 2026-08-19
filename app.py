@@ -4,15 +4,16 @@ Serves the REST API under /api/* and the built React SPA from frontend/dist.
 """
 import asyncio
 import logging
+import os
 from contextlib import asynccontextmanager
 from pathlib import Path
 
 from fastapi import FastAPI
-from fastapi.responses import FileResponse, JSONResponse, RedirectResponse
+from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
 
 from server import limits, logging_setup
-from server.config import IS_DATABRICKS_APP, SERVING_ENDPOINT, GENIE_SPACE_ID
+from server.config import AI_QUERY_ENDPOINT, IS_DATABRICKS_APP, SERVING_ENDPOINT, GENIE_SPACE_ID
 from server.db import db, token_refresh_loop
 from server.routes import (
     lobs,
@@ -44,9 +45,12 @@ from server.routes import (
     branding,
     knowledge,
     proposals,
+    exports,
     accounts as accounts_routes,
     whatif,
     snapshots as snapshot_routes,
+    quality,
+    sync_packages,
 )
 
 # Install handlers before anything logs. JSON in Databricks Apps, text locally;
@@ -61,6 +65,35 @@ FRONTEND_DIST = BASE_DIR / "frontend" / "dist"
 # Separate from the SPA because the SPA's TypeScript source isn't in this repo
 # (see README) — this way the new screens ship without touching the built bundle.
 CONSOLE_DIR = BASE_DIR / "frontend" / "console"
+
+
+def app_env() -> str:
+    value = (os.environ.get("APP_ENV") or "DEV").strip().upper()
+    return value if value in {"DEV", "PROD"} else value[:12]
+
+
+def env_pill_html() -> str:
+    env = app_env()
+    is_prod = env == "PROD"
+    bg = "#123c2f" if is_prod else "#3b2c06"
+    border = "#00a972" if is_prod else "#ffab00"
+    color = "#9ed6c4" if is_prod else "#ffdb96"
+    return (
+        '<div id="app-env-pill" aria-label="Application environment" '
+        f'style="position:fixed;right:14px;bottom:14px;z-index:2147483647;'
+        f'padding:5px 10px;border-radius:999px;border:1px solid {border};'
+        f'background:{bg};color:{color};font:700 11px DM Mono,ui-monospace,monospace;'
+        'letter-spacing:.08em;box-shadow:0 8px 24px rgba(0,0,0,.35);'
+        'pointer-events:none;">'
+        f'{env}</div>'
+    )
+
+
+def spa_index_response() -> HTMLResponse:
+    html = (FRONTEND_DIST / "index.html").read_text()
+    pill = env_pill_html()
+    html = html.replace("</body>", f"  {pill}\n  </body>")
+    return HTMLResponse(html)
 
 
 async def check_schema() -> None:
@@ -114,8 +147,10 @@ for module in (lobs, data_assets, use_cases, dependencies, values, roadmap,
                analytics, live, onboarding, joint_funding, source_recommendations,
                domains, ingestion, generate, setup, taxonomy, research,
                flow, inventory, chat, branding, knowledge, proposals,
-               accounts_routes, whatif, snapshot_routes):
+               exports, accounts_routes, whatif, snapshot_routes, quality):
     app.include_router(module.router, prefix="/api")
+
+app.include_router(sync_packages.router, prefix="/api")
 
 # Secondary routers whose paths don't sit under their module's own prefix:
 #   domains.uc_router  — a use case's required domains belong under /use-cases
@@ -145,14 +180,25 @@ async def health():
     return {
         "status": "healthy",
         "app": "grid-atlas",
+        "app_env": app_env(),
         "environment": "databricks" if IS_DATABRICKS_APP else "local",
         "db_connected": connected,
         "demo_mode": db.is_demo_mode,
         "serving_endpoint": SERVING_ENDPOINT,
+        "ai_query_endpoint": AI_QUERY_ENDPOINT,
         "genie_space_configured": bool(GENIE_SPACE_ID),
         "counts": counts,
         # So a "why did I get a 429?" report can be answered without a redeploy.
         "rate_limits": limits.snapshot(),
+    }
+
+
+@app.get("/api/runtime")
+async def runtime():
+    return {
+        "app": "grid-atlas",
+        "app_env": app_env(),
+        "databricks_app": bool(IS_DATABRICKS_APP),
     }
 
 
@@ -185,7 +231,7 @@ if FRONTEND_DIST.exists():
         candidate = FRONTEND_DIST / full_path
         if full_path and candidate.is_file():
             return FileResponse(str(candidate))
-        return FileResponse(str(FRONTEND_DIST / "index.html"))
+        return spa_index_response()
 else:
     @app.get("/")
     async def root():

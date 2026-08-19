@@ -116,6 +116,11 @@ class TestStagingSql(unittest.TestCase):
         self.assertIn("'temperature', 0.0", self.sql)
         self.assertIn("responseFormat =>", self.sql)
 
+    def test_default_endpoint_is_ai_query_specific(self):
+        """Agent chat models and SQL ai_query support do not always match."""
+        self.assertIn("databricks-claude-sonnet-4-5", self.sql)
+        self.assertNotIn("databricks-claude-sonnet-5", self.sql)
+
     def test_schema_context_deduped_before_join(self):
         """Duplicate schema rows would fan out candidates and multiply cost."""
         self.assertIn("ROW_NUMBER() OVER", self.sql)

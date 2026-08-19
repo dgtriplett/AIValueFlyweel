@@ -98,6 +98,65 @@ def classify(ready: int, total: int, prereqs_total: int, prereqs_built: int) -> 
     return "blocked", data_pct
 
 
+def confidence(
+    *,
+    readiness: str,
+    ready_pct: float,
+    required_total: int,
+    required_ready: int,
+    prereqs_total: int,
+    prereqs_built: int,
+    requirement_model: str,
+    requires_locked: bool,
+    pending_domains: list,
+) -> dict:
+    """Evidence confidence for the readiness answer.
+
+    Readiness says "what state is this use case in?" Confidence says "how much
+    should a user trust that state?" They are deliberately separate: a blocked use
+    case with three well-modeled domain requirements can be a high-confidence
+    blocked answer, while a shovel-ready use case with no requirements modeled is
+    actually a low-confidence answer.
+    """
+    score = 50
+    reasons: list[str] = []
+
+    if required_total == 0:
+        score = 30
+        reasons.append("No required data needs are modeled, so readiness is provisional.")
+    elif requires_locked:
+        score = 90
+        reasons.append("Data requirements were hand-curated and locked.")
+    elif requirement_model == "domain":
+        score = 82
+        reasons.append("Readiness uses semantic data domains, allowing vendor substitution.")
+    else:
+        score = 68
+        reasons.append("Readiness uses derived module-to-source requirements.")
+
+    if required_total > 0 and required_ready == 0:
+        score -= 14
+        reasons.append("None of the required data needs are currently satisfied.")
+    elif 0 < ready_pct < 1:
+        score -= 6
+        reasons.append("Some required data needs are still pending.")
+
+    if pending_domains:
+        score -= min(10, len(pending_domains) * 2)
+        reasons.append("Unmet semantic data domains remain.")
+
+    if prereqs_total > prereqs_built:
+        score -= 4
+        reasons.append("Direct prerequisite use cases are not all built.")
+
+    if readiness == "shovel_ready" and required_total == 0:
+        reasons.append("Shovel-ready because no requirements exist, not because data was proven.")
+
+    score = max(0, min(100, int(round(score))))
+    level = "high" if score >= 80 else "medium" if score >= 55 else "low"
+    return {"confidence": level, "confidence_score": score, "confidence_reasons": reasons}
+
+
 def _as_list(value) -> list:
     """jsonb_agg arrives as a parsed list when asyncpg has a jsonb codec
     registered, and as a JSON string when it doesn't. Accept both."""
@@ -264,6 +323,17 @@ async def readiness_map(
         p_built = sum(1 for p in plist if p["built"])
         pending = [{"id": p["id"], "title": p["title"]} for p in plist if not p["built"]]
         label, pct = classify(ready, total, p_total, p_built)
+        conf = confidence(
+            readiness=label,
+            ready_pct=pct,
+            required_total=total,
+            required_ready=ready,
+            prereqs_total=p_total,
+            prereqs_built=p_built,
+            requirement_model=model,
+            requires_locked=bool(r["requires_locked"]),
+            pending_domains=pending_domains,
+        )
         out[uc_id] = {
             "readiness": label,
             "ready_pct": round(pct, 4),
@@ -274,6 +344,7 @@ async def readiness_map(
             "pending_prereqs": pending,
             "requirement_model": model,
             "pending_domains": pending_domains,
+            **conf,
         }
     return out
 
@@ -285,4 +356,8 @@ async def readiness_for(use_case_id: int) -> dict:
         "required_total": 0, "required_ready": 0,
         "prereqs_total": 0, "prereqs_built": 0, "pending_prereqs": [],
         "requirement_model": "module", "pending_domains": [],
+        "confidence": "low", "confidence_score": 30,
+        "confidence_reasons": [
+            "No required data needs are modeled, so readiness is provisional.",
+        ],
     })

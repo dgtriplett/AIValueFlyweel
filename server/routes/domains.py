@@ -20,6 +20,7 @@ from pydantic import BaseModel, Field
 
 from ..common import current_user, row_to_dict, rows_to_list, write_audit
 from ..db import db
+from .. import portfolio
 # Import the readiness rule rather than restating it: a local copy would let
 # this module silently disagree with how readiness is actually computed.
 from ..readiness import ready_assets, READY_STATUSES as READY
@@ -127,15 +128,16 @@ async def domain_gaps(limit: int = 20):
                 "summary": {"total_value_blocked_mm": 0.0, "domains_with_no_source": 0}}
 
     ids = [d["id"] for d in unsatisfied]
-    dependents = await db.fetch("""
+    condition, params = await portfolio.portfolio_condition("uc", param_index=2)
+    dependents = await db.fetch(f"""
         SELECT urd.domain_id, uc.id, uc.title, uc.hypothesized_value_json, l.name AS lob_name
         FROM uc_requires_domain urd
         JOIN use_cases uc ON uc.id = urd.use_case_id
         LEFT JOIN lobs l ON l.id = uc.lob_id
         WHERE urd.domain_id = ANY($1::int[])
           AND urd.necessity = 'required'
-          AND uc.in_portfolio = true
-    """, ids, await ready_assets())
+          AND {condition}
+    """, ids, *params)
 
     by_domain: dict[int, list] = {}
     for r in dependents:
@@ -226,13 +228,14 @@ async def coverage_matrix():
     """, await ready_assets())
 
     # Which (domain, LOB) pairs are required, by how many use cases, worth what.
-    demand_rows = await db.fetch("""
+    condition, params = await portfolio.portfolio_condition("uc")
+    demand_rows = await db.fetch(f"""
         SELECT urd.domain_id, uc.lob_id, uc.id AS use_case_id, uc.title,
                uc.hypothesized_value_json, urd.necessity
         FROM uc_requires_domain urd
         JOIN use_cases uc ON uc.id = urd.use_case_id
-        WHERE uc.in_portfolio = true
-    """)
+        WHERE {condition}
+    """, *params)
     demand: dict[tuple, dict] = {}
     for row in demand_rows:
         if row["lob_id"] is None:

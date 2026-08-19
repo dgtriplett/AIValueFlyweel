@@ -65,6 +65,39 @@ class TestClassify(unittest.TestCase):
         self.assertEqual(readiness.classify(1, 4, 1, 1)[0], "blocked")
 
 
+class TestConfidence(unittest.TestCase):
+    def test_locked_requirements_are_high_confidence(self):
+        out = readiness.confidence(
+            readiness="shovel_ready",
+            ready_pct=1.0,
+            required_total=3,
+            required_ready=3,
+            prereqs_total=0,
+            prereqs_built=0,
+            requirement_model="module",
+            requires_locked=True,
+            pending_domains=[],
+        )
+        self.assertEqual(out["confidence"], "high")
+        self.assertGreaterEqual(out["confidence_score"], 80)
+
+    def test_no_requirements_is_low_confidence_even_if_ready(self):
+        out = readiness.confidence(
+            readiness="shovel_ready",
+            ready_pct=1.0,
+            required_total=0,
+            required_ready=0,
+            prereqs_total=0,
+            prereqs_built=0,
+            requirement_model="module",
+            requires_locked=False,
+            pending_domains=[],
+        )
+        self.assertEqual(out["confidence"], "low")
+        self.assertIn("No required data needs are modeled",
+                      " ".join(out["confidence_reasons"]))
+
+
 class TestDualPath(unittest.TestCase):
     def setUp(self):
         self._real_db = readiness.db
@@ -99,6 +132,7 @@ class TestDualPath(unittest.TestCase):
         self.assertEqual(out["requirement_model"], "domain")
         self.assertEqual(out["readiness"], "shovel_ready")
         self.assertEqual((out["required_ready"], out["required_total"]), (2, 2))
+        self.assertEqual(out["confidence"], "high")
 
     def test_requires_locked_forces_module_path(self):
         """A human-curated module requirement set outranks the permissive domain
@@ -181,7 +215,8 @@ class TestDualPath(unittest.TestCase):
         out = run(readiness.readiness_for(999))
         for key in ("readiness", "ready_pct", "required_total", "required_ready",
                     "prereqs_total", "prereqs_built", "pending_prereqs",
-                    "requirement_model", "pending_domains"):
+                    "requirement_model", "pending_domains", "confidence",
+                    "confidence_score", "confidence_reasons"):
             self.assertIn(key, out)
 
 

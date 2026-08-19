@@ -119,7 +119,7 @@ class TestEnvVarsAreReal(unittest.TestCase):
         server_text += (ROOT / "app.py").read_text()
 
         documented = set(re.findall(r"`(PG[A-Z]+|DATABRICKS_[A-Z_]+|ATLAS_[A-Z_]+|"
-                                    r"GENIE_[A-Z_]+|SERVING_ENDPOINT|DEMO_MODE|"
+                                    r"GENIE_[A-Z_]+|SERVING_ENDPOINT|AI_QUERY_ENDPOINT|DEMO_MODE|"
                                     r"LOG_LEVEL|RATE_LIMITS)`", all_docs_text()))
         self.assertTrue(documented, "no env vars found in the docs — bad regex?")
 

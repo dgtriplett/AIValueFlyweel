@@ -24,6 +24,9 @@ variables:
   serving_endpoint:
     description: "Foundation Model chat endpoint for the AI agents."
     default: databricks-claude-sonnet-5
+  ai_query_endpoint:
+    description: "Foundation Model endpoint for SQL ai_query() batch enrichment."
+    default: databricks-claude-sonnet-4-5
   atlas_catalog:
     description: "Unity Catalog the discovery layer writes inventory + enrichment staging into."
     default: grid_ops_demo_catalog
@@ -49,11 +52,17 @@ variables:
   demo_mode:
     description: "Enables the removable Demo Mode toggle + /api/demo/* endpoints. Ship 'off' to customers."
     default: off
+  app_name:
+    description: "Databricks App name for this target."
+    default: grid-atlas
+  app_env:
+    description: "Visible runtime environment label."
+    default: PROD
 
 resources:
   apps:
     grid_atlas:
-      name: grid-atlas
+      name: ${var.app_name}
       description: "Power & Utilities data + AI catalog: workspace discovery, use-case portfolio, value quantification, and dependency-sequenced roadmap."
       source_code_path: ./
       resources:
@@ -80,6 +89,11 @@ resources:
           serving_endpoint:
             name: ${var.serving_endpoint}
             permission: CAN_QUERY
+        - name: ai-query-endpoint
+          description: "Foundation Model endpoint used by SQL ai_query() batch enrichment."
+          serving_endpoint:
+            name: ${var.ai_query_endpoint}
+            permission: CAN_QUERY
 
 targets:
   dev:
@@ -87,7 +101,19 @@ targets:
     default: true
     workspace:
       root_path: /Workspace/Users/${workspace.current_user.userName}/.bundle/grid-atlas/dev
+    variables:
+      app_name: grid-atlas-dev
+      app_env: DEV
+      lakebase_project: grid-atlas-dev-pg
+      atlas_schema: grid_atlas_discovery_dev
+      genie_mirror_schema: grid_atlas_dev
   prod:
     mode: production
     workspace:
       root_path: /Workspace/Users/${workspace.current_user.userName}/.bundle/grid-atlas/prod
+    variables:
+      app_name: grid-atlas
+      app_env: PROD
+      lakebase_project: grid-atlas-pg
+      atlas_schema: grid_atlas_discovery
+      genie_mirror_schema: grid_atlas

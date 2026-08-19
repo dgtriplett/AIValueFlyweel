@@ -32,6 +32,7 @@ from pydantic import BaseModel, Field
 
 from .. import confirm as cf
 from .. import generation as gen
+from .. import portfolio
 from ..common import current_user, rows_to_list, write_audit
 from ..config import SERVING_ENDPOINT
 from ..db import db
@@ -288,7 +289,9 @@ async def commit_use_cases(body: CommitIn, request: Request):
 
 
 async def _portfolio_count() -> int:
-    row = await db.fetchrow("SELECT count(*) AS n FROM use_cases WHERE in_portfolio = true")
+    condition, params = await portfolio.portfolio_condition("uc")
+    row = await db.fetchrow(
+        f"SELECT count(*) AS n FROM use_cases uc WHERE {condition}", *params)
     return int(row["n"]) if row else 0
 
 
@@ -330,6 +333,9 @@ async def _execute_create_use_cases(payload: dict, actor: str) -> dict:
         if row is None:
             continue
         uc_id = row["id"]
+        if in_portfolio:
+            await portfolio.set_membership(
+                uc_id, True, actor=actor, source="generated_use_case")
 
         for necessity, field in (("required", "required_domains"),
                                  ("helpful", "helpful_domains")):
@@ -506,9 +512,11 @@ async def research(topic: str, limit: int = 8):
 
     # Score existing use cases: a token in the title is a much stronger signal
     # than one buried in a paragraph of description, hence 3x weighting.
-    rows = await db.fetch("""
+    membership_expr, membership_params = await portfolio.select_membership_expression(
+        "uc", param_index=3)
+    rows = await db.fetch(f"""
         SELECT uc.id, uc.title, uc.description, uc.status, uc.effort_tshirt,
-               uc.sub_vertical, uc.in_portfolio, l.name AS lob_name,
+               uc.sub_vertical, {membership_expr} AS in_portfolio, l.name AS lob_name,
                (SELECT count(*) * 3 FROM unnest($1::text[]) t
                  WHERE position(t in lower(uc.title)) > 0)
                + (SELECT count(*) FROM unnest($1::text[]) t
@@ -518,7 +526,7 @@ async def research(topic: str, limit: int = 8):
         LEFT JOIN lobs l ON l.id = uc.lob_id
         ORDER BY score DESC, uc.title
         LIMIT $2
-    """, tokens, limit)
+    """, tokens, limit, *membership_params)
     similar = [dict(r) for r in rows if (r["score"] or 0) > 0]
 
     satisfied, unsatisfied, index, satisfied_names = await _domain_context()

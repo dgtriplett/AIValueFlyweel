@@ -8,6 +8,7 @@ import io
 from fastapi import APIRouter, HTTPException, Request, UploadFile, File
 from fastapi.responses import StreamingResponse
 
+from .. import accounts
 from ..common import current_user, write_audit
 from ..db import db
 
@@ -90,7 +91,20 @@ async def export_template():
     ws3 = wb.create_sheet("Assumptions")
     ws3.append(["key", "label", "unit", "value"])
     style_header(ws3, 4)
-    for a in await db.fetch("SELECT key, label, unit, value FROM value_assumptions ORDER BY category, key"):
+    account_id = await accounts.current()
+    if account_id is not None:
+        assumptions = await db.fetch("""
+            SELECT DISTINCT ON (key) key, label, unit, value, category
+            FROM value_assumptions
+            WHERE account_id = $1 OR account_id IS NULL
+            ORDER BY key, (account_id IS NULL)
+        """, account_id)
+        assumptions = sorted(assumptions,
+                             key=lambda a: (a["category"] or "", a["key"] or ""))
+    else:
+        assumptions = await db.fetch(
+            "SELECT key, label, unit, value FROM value_assumptions ORDER BY category, key")
+    for a in assumptions:
         ws3.append([a["key"], a["label"], a["unit"] or "", float(a["value"])])
     for r in range(2, ws3.max_row + 1):
         ws3.cell(row=r, column=4).fill = edit_fill
@@ -134,7 +148,19 @@ async def _compute_import(parsed):
     changes = {"data_sources": [], "use_cases": [], "assumptions": []}
     errors = []
 
-    cur_assets = {a["id"]: a for a in await db.fetch("SELECT id, source_category, module, ingestion_status, vendor FROM data_assets")}
+    account_id = await accounts.current()
+    if account_id is not None:
+        cur_assets = {a["id"]: a for a in await db.fetch("""
+            SELECT da.id, da.source_category, da.module,
+                   COALESCE(s.ingestion_status, 'not_started') AS ingestion_status,
+                   da.vendor
+            FROM data_assets da
+            LEFT JOIN asset_status_by_account s
+                   ON s.data_asset_id = da.id AND s.account_id = $1
+        """, account_id)}
+    else:
+        cur_assets = {a["id"]: a for a in await db.fetch(
+            "SELECT id, source_category, module, ingestion_status, vendor FROM data_assets")}
     for r in parsed["data_sources"]:
         try:
             aid = int(r["id"])
@@ -167,7 +193,16 @@ async def _compute_import(parsed):
         elif st and st != u["status"]:
             changes["use_cases"].append({"id": uid, "title": u["title"], "field": "status", "from": u["status"], "to": st})
 
-    cur_ass = {a["key"]: float(a["value"]) for a in await db.fetch("SELECT key, value FROM value_assumptions")}
+    if account_id is not None:
+        cur_ass = {a["key"]: float(a["value"]) for a in await db.fetch("""
+            SELECT DISTINCT ON (key) key, value
+            FROM value_assumptions
+            WHERE account_id = $1 OR account_id IS NULL
+            ORDER BY key, (account_id IS NULL)
+        """, account_id)}
+    else:
+        cur_ass = {a["key"]: float(a["value"]) for a in await db.fetch(
+            "SELECT key, value FROM value_assumptions")}
     for r in parsed["assumptions"]:
         key = r.get("key")
         if not key or key not in cur_ass:
@@ -197,15 +232,53 @@ async def import_workbook(request: Request, file: UploadFile = File(...), apply:
                             "assumptions": len(changes["assumptions"])}}
 
     actor = current_user(request)
+    account_id = await accounts.current()
     applied = 0
     for c in changes["data_sources"]:
-        await db.execute("UPDATE data_assets SET ingestion_status=$1, updated_at=now() WHERE id=$2", c["to"], c["id"])
+        if account_id is not None:
+            await db.execute("""
+                INSERT INTO account_asset_status
+                    (account_id, data_asset_id, ingestion_status, is_user_edited,
+                     updated_by, updated_at)
+                VALUES ($1,$2,$3,true,$4,now())
+                ON CONFLICT (account_id, data_asset_id) DO UPDATE SET
+                    ingestion_status = EXCLUDED.ingestion_status,
+                    is_user_edited = true,
+                    updated_by = EXCLUDED.updated_by,
+                    updated_at = now()
+            """, account_id, c["id"], c["to"], actor)
+        else:
+            await db.execute(
+                "UPDATE data_assets SET ingestion_status=$1, updated_at=now() WHERE id=$2",
+                c["to"], c["id"])
         applied += 1
     for c in changes["use_cases"]:
         await db.execute("UPDATE use_cases SET status=$1, updated_at=now() WHERE id=$2", c["to"], c["id"])
         applied += 1
     for c in changes["assumptions"]:
-        await db.execute("UPDATE value_assumptions SET value=$1 WHERE key=$2", c["to"], c["key"])
+        if account_id is not None:
+            meta = await db.fetchrow(
+                """SELECT label, unit, category
+                   FROM value_assumptions
+                   WHERE key=$1 AND (account_id=$2 OR account_id IS NULL)
+                   ORDER BY (account_id IS NULL) LIMIT 1""",
+                c["key"], account_id)
+            await db.execute("""
+                INSERT INTO value_assumptions
+                    (account_id, key, label, value, unit, category, source, updated_at)
+                VALUES ($1,$2,$3,$4,$5,$6,'manual_import',now())
+                ON CONFLICT (account_id, key) DO UPDATE SET
+                    value=EXCLUDED.value,
+                    source='manual_import',
+                    updated_at=now()
+            """, account_id, c["key"],
+                meta["label"] if meta else c["key"], c["to"],
+                meta["unit"] if meta else None,
+                meta["category"] if meta else None)
+        else:
+            await db.execute(
+                "UPDATE value_assumptions SET value=$1 WHERE key=$2",
+                c["to"], c["key"])
         applied += 1
     await write_audit("onboarding", None, "import", actor, {"applied": applied, "errors": len(errors)})
     return {"apply": True, "applied": applied, "changes": changes, "errors": errors}

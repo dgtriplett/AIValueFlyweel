@@ -175,3 +175,17 @@ async def scope_clause(alias: str = "") -> tuple[str, list]:
         # Pre-migration: no accounts table, so nothing is scoped.
         return "true", []
     return f"({prefix}account_id = $1 OR {prefix}account_id IS NULL)", [account_id]
+
+
+async def owned_clause(column: str = "account_id", *, param_index: int = 1) -> tuple[str, list]:
+    """A WHERE fragment for tables whose rows are owned by exactly one account.
+
+    Unlike `scope_clause`, this does NOT include `account_id IS NULL`. NULL means
+    "shared/global" for reference-like content such as seeded KB folders and
+    glossary terms; it is not appropriate for customer-owned work like roadmap
+    items, value records, funding requests, comments, research runs, or chats.
+    """
+    account_id = await current()
+    if account_id is None:
+        return "true", []
+    return f"{column} = ${param_index}", [account_id]

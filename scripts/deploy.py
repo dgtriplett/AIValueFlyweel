@@ -224,10 +224,12 @@ def write_config(settings: dict) -> None:
     for name, key in (
         ("PGHOST", "pghost"), ("PGUSER", "pguser"), ("PGDATABASE", "pgdatabase"),
         ("SERVING_ENDPOINT", "serving_endpoint"),
+        ("AI_QUERY_ENDPOINT", "ai_query_endpoint"),
         ("ATLAS_CATALOG", "atlas_catalog"), ("ATLAS_SCHEMA", "atlas_schema"),
         ("GENIE_MIRROR_CATALOG", "genie_mirror_catalog"),
         ("GENIE_MIRROR_SCHEMA", "genie_mirror_schema"),
         ("GENIE_SPACE_ID", "genie_space_id"), ("DEMO_MODE", "demo_mode"),
+        ("APP_ENV", "app_env"),
     ):
         if settings.get(key) is not None:
             text = set_yaml_env(text, name, str(settings[key]))
@@ -243,10 +245,13 @@ def write_config(settings: dict) -> None:
     for key, value in (("atlas_catalog", settings["atlas_catalog"]),
                        ("atlas_schema", settings["atlas_schema"]),
                        ("serving_endpoint", settings["serving_endpoint"]),
+                       ("ai_query_endpoint", settings["ai_query_endpoint"]),
                        ("genie_mirror_catalog", settings["genie_mirror_catalog"]),
                        ("genie_mirror_schema", settings["genie_mirror_schema"]),
                        ("lakebase_project", settings["lakebase_project"]),
-                       ("demo_mode", settings["demo_mode"])):
+                       ("demo_mode", settings["demo_mode"]),
+                       ("app_name", settings["app_name"]),
+                       ("app_env", settings["app_env"])):
         # Each variable's `default:` is nested under its own key, so anchor on the
         # variable name and replace the default line that follows it.
         btext = re.sub(
@@ -299,8 +304,9 @@ def bundle_vars(settings: dict) -> list[str]:
     """
     return [f"--var={name}={settings[name]}" for name in (
         "warehouse_id", "atlas_catalog", "atlas_schema", "serving_endpoint",
+        "ai_query_endpoint",
         "genie_mirror_catalog", "genie_mirror_schema", "lakebase_project",
-        "pg_database", "demo_mode")]
+        "pg_database", "demo_mode", "app_name", "app_env")]
 
 
 def bundle_deploy(profile: str, target: str, settings: dict) -> None:
@@ -555,6 +561,8 @@ def main() -> None:
                         help="catalog for the discovery layer")
     parser.add_argument("--atlas-schema", default=None)
     parser.add_argument("--serving-endpoint", default=None)
+    parser.add_argument("--ai-query-endpoint", default=None,
+                        help="Foundation Model endpoint for SQL ai_query() enrichment")
     parser.add_argument("--genie-mirror-catalog", default=None)
     parser.add_argument("--genie-mirror-schema", default=None)
     # The one step POST /api/genie/provision cannot do for itself: an app cannot
@@ -614,6 +622,9 @@ def main() -> None:
     serving_endpoint = value("serving_endpoint", "serving_endpoint",
                              "Foundation Model endpoint",
                              "databricks-claude-sonnet-4-5")
+    ai_query_endpoint = value("ai_query_endpoint", "ai_query_endpoint",
+                              "ai_query() enrichment endpoint",
+                              "databricks-claude-sonnet-4-5")
     genie_mirror_catalog = value("genie_mirror_catalog", "genie_mirror_catalog",
                                  "Catalog for the Genie mirror",
                                  atlas_catalog or "main", required=False)
@@ -627,8 +638,11 @@ def main() -> None:
 
     settings = {
         "profile": profile, "target": target, "warehouse_id": warehouse_id,
+        "app_name": APP_NAME if target == "prod" else f"{APP_NAME}-{target}",
+        "app_env": "PROD" if target == "prod" else target.upper(),
         "atlas_catalog": atlas_catalog, "atlas_schema": atlas_schema,
         "serving_endpoint": serving_endpoint,
+        "ai_query_endpoint": ai_query_endpoint,
         "genie_mirror_catalog": genie_mirror_catalog,
         "genie_mirror_schema": genie_mirror_schema,
         "lakebase_project": lakebase_project, "pg_database": pg_database,
@@ -674,7 +688,7 @@ def main() -> None:
 
     # -- 6. grants --
     step(6, total, "Service principal + Unity Catalog grants")
-    app_name = APP_NAME if target == "prod" else f"{APP_NAME}-{target}"
+    app_name = settings["app_name"]
     app = resolve_app(profile, app_name) if not DRY_RUN else {"name": app_name}
     if app is None:
         print(f"  {yellow('could not read the app')} — is it named {app_name!r}?")

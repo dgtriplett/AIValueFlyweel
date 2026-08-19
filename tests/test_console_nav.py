@@ -181,6 +181,51 @@ class TestAccessibility(unittest.TestCase):
         self.assertIn("text(group.hint)", JS)
 
 
+class TestGetStartedDiscovery(unittest.TestCase):
+    def test_bootstrap_is_available_when_discovery_tables_are_missing(self):
+        """A first run often has ATLAS_CATALOG set but no discovery tables yet.
+
+        /api/ingestion/summary reports that as configured-but-unavailable; the
+        UI must still offer the bootstrap button, otherwise the user cannot get
+        from that state to the upload controls.
+        """
+        self.assertIn("const discoveryConfigured = !!inventory.configured", JS)
+        self.assertIn("${discoveryConfigured ? `", JS)
+        self.assertIn("Discovery storage is configured but not ready", JS)
+        self.assertLess(
+            JS.index("${discoveryConfigured ? `"),
+            JS.index('data-act="bootstrap"'),
+            "the bootstrap button is no longer inside the configured-discovery branch")
+
+    def test_bootstrap_refreshes_the_get_started_state(self):
+        """After creating the UC tables the upload controls should appear."""
+        block = JS[JS.index("bootstrap: async () => {"):]
+        block = block[:block.index('"up-schemas"')]
+        self.assertIn('api("/ingestion/bootstrap"', block)
+        self.assertIn("await viewStart()", block)
+
+
+class TestEnhancementScreens(unittest.TestCase):
+    def test_research_page_exposes_customer_enhancement_agent(self):
+        self.assertIn("/agents/customer-enhancements", JS)
+        self.assertIn("Customer enhancement agent", JS)
+        self.assertIn("10 app enhancements", JS)
+
+    def test_executive_export_page_is_reachable_and_downloads_pack(self):
+        self.assertIn("executive: viewExecutive", JS)
+        self.assertIn('["executive", "Executive export"]', JS)
+        self.assertIn("/exports/executive-pack", JS)
+        self.assertIn("/exports/executive-pack.md", JS)
+        self.assertIn("downloadApi", JS)
+
+    def test_maturity_roadmap_import_page_is_reachable(self):
+        self.assertIn("roadmap_import: viewRoadmapImport", JS)
+        self.assertIn('["roadmap_import", "Import roadmap"]', JS)
+        self.assertIn("/sync/maturity-roadmap/preview", JS)
+        self.assertIn("/sync/maturity-roadmap/apply", JS)
+        self.assertIn("value-flywheel-roadmap?assessmentId", JS)
+
+
 class TestClickOutsideIsOrderIndependent(unittest.TestCase):
     """The dismiss handler must not depend on listener registration order.
 
@@ -480,10 +525,39 @@ class TestSpaGroupedNav(unittest.TestCase):
         self.assertIn('label:"Value Flywheel"', self.bundle,
                       "the Value Flywheel TAB lost its name to the rebrand")
 
+    def test_prerequisite_readiness_does_not_wrap_and_explains_itself(self):
+        self.assertIn("gaCustomerVisibility", self.bundle,
+                      "the readiness/prerequisite UI patch is missing — run "
+                      "scripts/patch_spa_customer_visibility.py")
+        self.assertIn("whitespace-nowrap", self.bundle,
+                      "Awaiting prerequisites must stay on one line in tables")
+        self.assertIn("Required prerequisites", self.bundle,
+                      "the readiness tooltip must name the prerequisite use cases")
+        self.assertIn("details", self.bundle,
+                      "users need an obvious affordance to inspect prerequisites")
+
+    def test_phase_is_not_customer_visible_in_the_spa(self):
+        for stale in (
+            'children:"Phase"',
+            "Derived phase:",
+            "Filter by phase",
+            "All phases",
+            "Phase updates automatically",
+            "Derived from prerequisite depth",
+        ):
+            self.assertNotIn(stale, self.bundle,
+                             f"customer-visible phase text is back: {stale}")
+
     def test_the_patch_script_is_idempotent_and_checkable(self):
         source = (ROOT / "scripts" / "patch_spa_grouped_nav.py").read_text()
         self.assertIn("--check", source, "needs a no-op status mode for CI")
         self.assertIn("is_patched", source, "must skip an already-patched bundle")
+        self.assertIn("_syntax_error", source,
+                      "must refuse to WRITE a bundle that does not parse")
+
+    def test_the_customer_visibility_patch_script_is_checkable(self):
+        source = (ROOT / "scripts" / "patch_spa_customer_visibility.py").read_text()
+        self.assertIn("--check", source, "needs a no-op status mode for CI")
         self.assertIn("_syntax_error", source,
                       "must refuse to WRITE a bundle that does not parse")
 

@@ -33,6 +33,7 @@ from pydantic import BaseModel, Field
 
 from ..common import current_user, row_to_dict, rows_to_list, write_audit
 from ..db import db
+from .. import portfolio
 # Import the readiness rule rather than restating it: a local copy would let
 # this module silently disagree with how readiness is actually computed.
 from ..readiness import ready_assets, READY_STATUSES as READY
@@ -71,8 +72,11 @@ async def sankey(
     assumptions = await load_assumptions()
     readiness = await readiness_map()
 
-    lob_filter = "AND uc.lob_id = $1" if lob_id is not None else ""
-    args = [lob_id] if lob_id is not None else []
+    condition, args = await portfolio.portfolio_condition("uc")
+    lob_filter = ""
+    if lob_id is not None:
+        args.append(lob_id)
+        lob_filter = f"AND uc.lob_id = ${len(args)}"
 
     # One row per (use case, required domain). The LEFT JOIN on assets matters:
     # a domain with no serving asset must still appear, because that is exactly the
@@ -92,7 +96,7 @@ async def sankey(
         LEFT JOIN asset_serves_domain asd ON asd.domain_id = dd.id
         LEFT JOIN data_assets da ON da.id = asd.data_asset_id
         WHERE urd.necessity = 'required'
-          AND uc.in_portfolio = true
+          AND {condition}
           AND COALESCE(dd.is_active, true) = true
           {lob_filter}
     """, *args)

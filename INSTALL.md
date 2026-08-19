@@ -367,8 +367,9 @@ see the README's note on the frontend source.
 **Every `/api/*` call returns 403.** The app SP lacks warehouse or catalog access.
 `/console` → Setup names the failing probe and gives the GRANT.
 
-**`ai_query()` fails.** The SP needs `CAN_QUERY` on the endpoint. Agents degrade to
-heuristics meanwhile and label their output as such.
+**`ai_query()` fails.** The SP needs `CAN_QUERY` on `AI_QUERY_ENDPOINT`, and that
+endpoint must support SQL `ai_query()` batch inference. This is separate from
+`SERVING_ENDPOINT`, which is the chat endpoint used by agents.
 
 **Setup says "schema managed by install step".** Expected and benign. The app SP
 holds DML but not ownership, so it can't run DDL. The seed (run as the DB owner)

@@ -2,6 +2,8 @@
 from fastapi import APIRouter, HTTPException, Request
 from pydantic import BaseModel
 
+from .. import accounts
+from .. import portfolio
 from ..common import current_user, rows_to_list, write_audit
 from ..db import db
 from ..readiness import readiness_map
@@ -16,6 +18,17 @@ class AssumptionUpdate(BaseModel):
 
 @router.get("")
 async def list_assumptions():
+    account_id = await accounts.current()
+    if account_id is not None:
+        rows = await db.fetch("""
+            SELECT DISTINCT ON (key) *
+            FROM value_assumptions
+            WHERE account_id = $1 OR account_id IS NULL
+            ORDER BY key, (account_id IS NULL)
+        """, account_id)
+        rows = sorted(rows_to_list(rows),
+                      key=lambda r: (r.get("category") or "", r.get("key") or ""))
+        return rows
     rows = await db.fetch("SELECT * FROM value_assumptions ORDER BY category, key")
     return rows_to_list(rows)
 
@@ -23,10 +36,32 @@ async def list_assumptions():
 @router.put("/{key}")
 async def update_assumption(key: str, body: AssumptionUpdate, request: Request):
     actor = current_user(request)
-    row = await db.fetchrow(
-        "UPDATE value_assumptions SET value=$1 WHERE key=$2 RETURNING *",
-        body.value, key,
-    )
+    account_id = await accounts.current()
+    if account_id is not None:
+        meta = await db.fetchrow(
+            """SELECT label, unit, category
+               FROM value_assumptions
+               WHERE key=$1 AND (account_id=$2 OR account_id IS NULL)
+               ORDER BY (account_id IS NULL) LIMIT 1""",
+            key, account_id)
+        if meta is None:
+            raise HTTPException(404, "Assumption not found")
+        row = await db.fetchrow(
+            """INSERT INTO value_assumptions
+               (account_id, key, label, value, unit, category, source, updated_at)
+               VALUES ($1,$2,$3,$4,$5,$6,'manual',now())
+               ON CONFLICT (account_id, key) DO UPDATE SET
+                 value=EXCLUDED.value,
+                 source='manual',
+                 updated_at=now()
+               RETURNING *""",
+            account_id, key, meta["label"], body.value, meta["unit"],
+            meta["category"])
+    else:
+        row = await db.fetchrow(
+            "UPDATE value_assumptions SET value=$1 WHERE key=$2 RETURNING *",
+            body.value, key,
+        )
     if row is None:
         raise HTTPException(404, "Assumption not found")
     await write_audit("value_assumption", row["id"], "update", actor,
@@ -38,8 +73,8 @@ async def update_assumption(key: str, body: AssumptionUpdate, request: Request):
 async def portfolio_value():
     """Computed hypothesized + realized value per use case + portfolio totals ($M)."""
     assumptions = await load_assumptions()
-    # Portfolio value totals reflect the confirmed set only (in_portfolio=true).
-    rows = await db.fetch("SELECT * FROM use_cases WHERE in_portfolio = true")
+    condition, params = await portfolio.portfolio_condition("uc")
+    rows = await db.fetch(f"SELECT uc.* FROM use_cases uc WHERE {condition}", *params)
     rmap = await readiness_map()
     per = {}
     tot_hyp = tot_hyp_buildable = tot_real = 0.0

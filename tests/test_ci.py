@@ -117,6 +117,9 @@ class TestGatesAreNotSilentlyDropped(unittest.TestCase):
         self.assertIn("--check", self.source)
         self.assertIn("console.js", self.source)
 
+    def test_it_checks_customer_visibility_patch(self):
+        self.assertIn("patch_spa_customer_visibility.py", self.source)
+
     def test_it_checks_for_secrets(self):
         self.assertIn("check_no_secrets", self.source)
 

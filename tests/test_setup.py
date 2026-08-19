@@ -181,13 +181,13 @@ class TestServingProbe(ProbeTestCase):
         self.stub_sql(_ok([["OK"]]))
         self.assertTrue(run(setup._probe_serving("sp"))["ok"])
 
-    def test_failure_says_the_app_still_works(self):
-        """Losing the LLM degrades agents to heuristics; it must not read as fatal."""
+    def test_failure_says_batch_enrichment_needs_a_queryable_endpoint(self):
+        """Batch enrichment is optional, but the fix must name the right endpoint."""
         self.stub_sql(_fail())
         check = run(setup._probe_serving("sp"))
         self.assertFalse(check["ok"])
         self.assertFalse(check["required"])
-        self.assertIn("heuristics", check["fix"])
+        self.assertIn("batch inference", check["fix"])
         self.assertIn("CAN QUERY", check["grants"][0])
 
 

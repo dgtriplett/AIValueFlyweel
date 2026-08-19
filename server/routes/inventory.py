@@ -314,6 +314,23 @@ async def sync_artifacts(request: Request):
             record = mapper(raw)
             if record.get("name"):
                 records.append(record)
+        deduped = {}
+        for record in records:
+            key = (record.get("workspace_id") or "", record.get("artifact_id") or "")
+            existing = deduped.get(key)
+            if not existing:
+                deduped[key] = record
+                continue
+            existing["run_count_30d"] = max(
+                int(existing.get("run_count_30d") or 0),
+                int(record.get("run_count_30d") or 0),
+            )
+            if str(record.get("last_run") or "") > str(existing.get("last_run") or ""):
+                existing["last_run"] = record.get("last_run")
+            for field in ("name", "owner", "uc_catalog", "uc_schema", "status"):
+                if not existing.get(field) and record.get(field):
+                    existing[field] = record.get(field)
+        records = list(deduped.values())
         if not records:
             found[kind] = 0
             return
@@ -325,29 +342,34 @@ async def sync_artifacts(request: Request):
         written = 0
         for start in range(0, len(records), _ARTIFACT_BATCH):
             batch = records[start:start + _ARTIFACT_BATCH]
-            await db.execute("""
-                INSERT INTO artifacts
-                  (artifact_type, workspace_id, artifact_id, name, owner,
-                   uc_catalog, uc_schema, last_run, run_count_30d, status)
-                SELECT $1, w, a, n, o, c, s, lr, rc, st
-                FROM unnest($2::text[], $3::text[], $4::text[], $5::text[],
-                            $6::text[], $7::text[], $8::timestamptz[],
-                            $9::int[], $10::text[])
-                     AS t(w, a, n, o, c, s, lr, rc, st)
-                ON CONFLICT (artifact_type, workspace_id, artifact_id) DO UPDATE SET
-                  name=EXCLUDED.name, owner=EXCLUDED.owner,
-                  last_run=EXCLUDED.last_run, run_count_30d=EXCLUDED.run_count_30d,
-                  status=EXCLUDED.status, is_present=true, last_seen_at=now()
-            """, kind,
-                [r.get("workspace_id") for r in batch],
-                [r.get("artifact_id") for r in batch],
-                [r["name"] for r in batch],
-                [r.get("owner") for r in batch],
-                [r.get("uc_catalog") for r in batch],
-                [r.get("uc_schema") for r in batch],
-                [r.get("last_run") for r in batch],
-                [r.get("run_count_30d") for r in batch],
-                [r.get("status") for r in batch])
+            try:
+                await db.execute("""
+                    INSERT INTO artifacts
+                      (artifact_type, workspace_id, artifact_id, name, owner,
+                       uc_catalog, uc_schema, last_run, run_count_30d, status)
+                    SELECT $1, w, a, n, o, c, s, lr::timestamptz, rc, st
+                    FROM unnest($2::text[], $3::text[], $4::text[], $5::text[],
+                                $6::text[], $7::text[], $8::text[],
+                                $9::int[], $10::text[])
+                         AS t(w, a, n, o, c, s, lr, rc, st)
+                    ON CONFLICT (artifact_type, workspace_id, artifact_id) DO UPDATE SET
+                      name=EXCLUDED.name, owner=EXCLUDED.owner,
+                      last_run=EXCLUDED.last_run, run_count_30d=EXCLUDED.run_count_30d,
+                      status=EXCLUDED.status, is_present=true, last_seen_at=now()
+                """, kind,
+                    [r.get("workspace_id") for r in batch],
+                    [r.get("artifact_id") for r in batch],
+                    [r["name"] for r in batch],
+                    [r.get("owner") for r in batch],
+                    [r.get("uc_catalog") for r in batch],
+                    [r.get("uc_schema") for r in batch],
+                    [r.get("last_run") for r in batch],
+                    [r.get("run_count_30d") for r in batch],
+                    [r.get("status") for r in batch])
+            except Exception as exc:  # noqa: BLE001 - one artifact source must not 500 the scan
+                notes.append(f"{kind}: could not write discovered artifacts ({type(exc).__name__}: {exc})")
+                found[kind] = written
+                return
             written += len(batch)
         found[kind] = written
 
@@ -356,40 +378,62 @@ async def sync_artifacts(request: Request):
         # historian holds, so a demo workspace with stale data still shows activity.
         await ingest("job", """
             WITH recent AS (
-                SELECT job_id, count(*) AS runs, max(period_start_time) AS last_run
+                SELECT workspace_id, job_id, count(*) AS runs, max(period_start_time) AS last_run
                 FROM system.lakeflow.job_run_timeline
                 WHERE period_start_time > (
                     SELECT max(period_start_time) - INTERVAL 30 DAYS
                     FROM system.lakeflow.job_run_timeline)
-                GROUP BY job_id
+                GROUP BY workspace_id, job_id
             )
-            SELECT j.job_id, j.name, j.creator_id, r.runs, r.last_run
+            SELECT j.workspace_id, j.job_id, j.name, j.creator_id, r.runs, r.last_run
             FROM system.lakeflow.jobs j
-            LEFT JOIN recent r ON r.job_id = j.job_id
+            LEFT JOIN recent r ON r.workspace_id = j.workspace_id AND r.job_id = j.job_id
             WHERE j.name IS NOT NULL
             QUALIFY ROW_NUMBER() OVER (PARTITION BY j.job_id
                                        ORDER BY j.change_time DESC) = 1
             LIMIT 500
         """, lambda row: {
-            "artifact_id": str(row[0]), "name": row[1], "owner": row[2],
-            "run_count_30d": int(row[3]) if row[3] is not None else 0,
-            "last_run": row[4],
+            "workspace_id": row[0], "artifact_id": str(row[1]), "name": row[2],
+            "owner": row[3],
+            "run_count_30d": int(row[4]) if row[4] is not None else 0,
+            "last_run": row[5],
         })
     else:
         notes.append("system.lakeflow.jobs not readable — jobs skipped.")
 
     if available.get("serving"):
         await ingest("serving_endpoint", """
-            SELECT served_entity_name, count(*) AS calls, max(request_time) AS last_call
-            FROM system.serving.endpoint_usage
-            WHERE request_time > (SELECT max(request_time) - INTERVAL 30 DAYS
-                                  FROM system.serving.endpoint_usage)
-            GROUP BY served_entity_name
+            WITH recent AS (
+                SELECT served_entity_id, count(*) AS calls, max(request_time) AS last_call
+                FROM system.serving.endpoint_usage
+                WHERE request_time > (SELECT max(request_time) - INTERVAL 30 DAYS
+                                      FROM system.serving.endpoint_usage)
+                GROUP BY served_entity_id
+            ),
+            entities AS (
+                SELECT served_entity_id, workspace_id, endpoint_id, endpoint_name, created_by
+                FROM (
+                    SELECT served_entity_id, workspace_id, endpoint_id, endpoint_name, created_by,
+                           ROW_NUMBER() OVER (
+                               PARTITION BY served_entity_id
+                               ORDER BY change_time DESC
+                           ) AS rn
+                    FROM system.serving.served_entities
+                    WHERE endpoint_delete_time IS NULL
+                )
+                WHERE rn = 1
+            )
+            SELECT COALESCE(e.endpoint_id, r.served_entity_id) AS artifact_id,
+                   COALESCE(e.endpoint_name, r.served_entity_id) AS name,
+                   e.created_by, e.workspace_id, r.calls, r.last_call
+            FROM recent r
+            LEFT JOIN entities e ON e.served_entity_id = r.served_entity_id
             LIMIT 200
         """, lambda row: {
-            "artifact_id": str(row[0]), "name": row[0],
-            "run_count_30d": int(row[1]) if row[1] is not None else 0,
-            "last_run": row[2],
+            "artifact_id": str(row[0]), "name": row[1], "owner": row[2],
+            "workspace_id": row[3],
+            "run_count_30d": int(row[4]) if row[4] is not None else 0,
+            "last_run": row[5],
         })
     else:
         notes.append("system.serving.endpoint_usage not readable — endpoints skipped.")
@@ -406,26 +450,41 @@ async def sync_artifacts(request: Request):
         written = 0
         for start in range(0, len(models), _ARTIFACT_BATCH):
             batch = models[start:start + _ARTIFACT_BATCH]
-            await db.execute("""
-                INSERT INTO artifacts
-                  (artifact_type, workspace_id, artifact_id, name, owner,
-                   uc_catalog, uc_schema, last_modified)
-                SELECT 'model', NULL, a, n, o, c, s, lm
-                FROM unnest($1::text[], $2::text[], $3::text[], $4::text[],
-                            $5::text[], $6::timestamptz[]) AS t(a, n, o, c, s, lm)
-                ON CONFLICT (artifact_type, workspace_id, artifact_id) DO UPDATE SET
-                  name=EXCLUDED.name, owner=EXCLUDED.owner,
-                  last_modified=EXCLUDED.last_modified, is_present=true,
-                  last_seen_at=now()
-            """,
-                [f"{r[0]}.{r[1]}.{r[2]}" for r in batch],
-                [r[2] for r in batch], [r[3] for r in batch],
-                [r[0] for r in batch], [r[1] for r in batch],
-                [r[4] for r in batch])
+            try:
+                await db.execute("""
+                    INSERT INTO artifacts
+                      (artifact_type, workspace_id, artifact_id, name, owner,
+                       uc_catalog, uc_schema, last_modified)
+                    SELECT 'model', 'uc-model-registry', a, n, o, c, s, lm::timestamptz
+                    FROM unnest($1::text[], $2::text[], $3::text[], $4::text[],
+                                $5::text[], $6::text[]) AS t(a, n, o, c, s, lm)
+                    ON CONFLICT (artifact_type, workspace_id, artifact_id) DO UPDATE SET
+                      name=EXCLUDED.name, owner=EXCLUDED.owner,
+                      last_modified=EXCLUDED.last_modified, is_present=true,
+                      last_seen_at=now()
+                """,
+                    [f"{r[0]}.{r[1]}.{r[2]}" for r in batch],
+                    [r[2] for r in batch], [r[3] for r in batch],
+                    [r[0] for r in batch], [r[1] for r in batch],
+                    [r[4] for r in batch])
+            except Exception as exc:  # noqa: BLE001 - model inventory is one optional source
+                notes.append(f"model: could not write discovered artifacts ({type(exc).__name__}: {exc})")
+                found["model"] = written
+                break
             written += len(batch)
         found["model"] = written
     else:
         notes.append("system.information_schema.models not readable — models skipped.")
+
+    # Older scans used NULL workspace_id for jobs/models. PostgreSQL UNIQUE
+    # constraints treat NULLs as distinct, so those rows duplicated on every run.
+    # Remove only unedited rows; a manually attributed artifact is user state.
+    await db.execute("""
+        DELETE FROM artifacts
+        WHERE workspace_id IS NULL
+          AND artifact_type IN ('job','serving_endpoint','model')
+          AND is_user_edited = false
+    """)
 
     total = sum(found.values())
     await write_audit("artifacts", None, "sync", actor,

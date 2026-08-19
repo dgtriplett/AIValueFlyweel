@@ -26,7 +26,7 @@ from __future__ import annotations
 
 from typing import Awaitable, Callable
 
-from . import accounts
+from . import accounts, portfolio
 from .db import db
 from .readiness import ready_assets
 
@@ -73,8 +73,8 @@ async def _search_use_cases(args: dict, actor: str) -> dict:
     explainability."""
     query = (args.get("query") or "").strip().lower()
     limit = min(int(args.get("limit", 10)), 50)
-    clauses = ["uc.in_portfolio = true"]
-    params: list = []
+    condition, params = await portfolio.portfolio_condition("uc")
+    clauses = [condition]
     if query:
         params.append(f"%{query}%")
         clauses.append(f"(lower(uc.title) LIKE ${len(params)} "
@@ -171,12 +171,13 @@ async def _value_summary(args: dict, actor: str) -> dict:
 
     assumptions = await load_assumptions()
     readiness = await readiness_map()
-    rows = rows_to_list(await db.fetch("""
+    condition, params = await portfolio.portfolio_condition("uc")
+    rows = rows_to_list(await db.fetch(f"""
         SELECT uc.id, uc.status, uc.hypothesized_value_json, uc.realized_value_amount,
                l.name AS lob_name
         FROM use_cases uc LEFT JOIN lobs l ON l.id = uc.lob_id
-        WHERE uc.in_portfolio = true
-    """))
+        WHERE {condition}
+    """, *params))
     total = buildable = realized = 0.0
     by_lob: dict[str, float] = {}
     by_readiness: dict[str, float] = {}
@@ -265,8 +266,11 @@ async def _company_profile(args: dict, actor: str) -> dict:
                 "note": "No company researched yet. Research can calibrate the "
                         "value assumptions to a named utility."}
     profile = dict(row)
+    account_id = await accounts.current()
     calibrated = await db.fetchrow(
-        "SELECT count(*) AS n FROM value_assumptions WHERE source = 'research'")
+        "SELECT count(*) AS n FROM value_assumptions "
+        "WHERE account_id = $1 AND source = 'research'",
+        account_id)
     profile["calibrated_assumptions"] = int(calibrated["n"]) if calibrated else 0
     profile["researched"] = True
     return profile
@@ -276,10 +280,21 @@ async def _list_assumptions(args: dict, actor: str) -> dict:
     """The assumptions and whether each is calibrated — the honest answer to
     "where does this number come from?"."""
     from .common import rows_to_list
-    rows = rows_to_list(await db.fetch("""
-        SELECT key, label, value, unit, category, source, confidence, source_note
-        FROM value_assumptions ORDER BY category, key
-    """))
+    account_id = await accounts.current()
+    if account_id is not None:
+        rows = rows_to_list(await db.fetch("""
+            SELECT DISTINCT ON (key)
+                   key, label, value, unit, category, source, confidence, source_note
+            FROM value_assumptions
+            WHERE account_id = $1 OR account_id IS NULL
+            ORDER BY key, (account_id IS NULL)
+        """, account_id))
+        rows.sort(key=lambda r: (r.get("category") or "", r.get("key") or ""))
+    else:
+        rows = rows_to_list(await db.fetch("""
+            SELECT key, label, value, unit, category, source, confidence, source_note
+            FROM value_assumptions ORDER BY category, key
+        """))
     query = (args.get("query") or "").strip().lower()
     if query:
         rows = [r for r in rows if query in r["key"].lower()

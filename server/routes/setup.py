@@ -181,19 +181,19 @@ async def _probe_warehouse(sp: str) -> dict:
 
 
 async def _probe_serving(sp: str) -> dict:
-    """One-token ai_query. Cheapest possible proof the endpoint is queryable."""
+    """One-token ai_query against the endpoint used by batch enrichment."""
     result = await run_sql(
-        f"SELECT ai_query('{config.SERVING_ENDPOINT}', 'Reply with OK', "
+        f"SELECT ai_query('{config.AI_QUERY_ENDPOINT}', 'Reply with OK', "
         "modelParameters => named_struct('max_tokens', 1)) AS probe", timeout_s=60)
     if result["ok"]:
-        return _check("serving", True, "Foundation Model",
-                      f"{config.SERVING_ENDPOINT} is queryable.")
+        return _check("serving", True, "Batch AI enrichment",
+                      f"{config.AI_QUERY_ENDPOINT} is queryable through ai_query().")
     return _check(
-        "serving", False, "Foundation Model",
+        "serving", False, "Batch AI enrichment",
         result.get("error") or "ai_query failed",
-        fix=f"Grant the app's service principal CAN_QUERY on {config.SERVING_ENDPOINT}. "
-            "AI agents fall back to heuristics without it — the portfolio still works.",
-        grants=[f"-- In the Databricks UI: Serving -> {config.SERVING_ENDPOINT} -> "
+        fix=f"Grant the app's service principal CAN_QUERY on {config.AI_QUERY_ENDPOINT}, "
+            "and confirm the endpoint supports ai_query() batch inference.",
+        grants=[f"-- In the Databricks UI: Serving -> {config.AI_QUERY_ENDPOINT} -> "
                 f"Permissions -> add CAN QUERY for `{sp}`"])
 
 
@@ -313,7 +313,7 @@ async def status(request: Request):
         checks.append(await _probe_system_tables())
         checks.append(await _probe_genie(sp))
     else:
-        for name, label in (("serving", "Foundation Model"),
+        for name, label in (("serving", "Batch AI enrichment"),
                             ("discovery", "Discovery catalog"),
                             ("system_tables", "System tables"),
                             ("genie", "Genie space")):
@@ -379,7 +379,7 @@ async def grants():
         "-- Not SQL — set these in the Databricks UI:",
         f"--   SQL Warehouses -> {config.DATABRICKS_WAREHOUSE_ID or '<warehouse>'} "
         f"-> Permissions -> CAN USE for `{sp}`",
-        f"--   Serving -> {config.SERVING_ENDPOINT} -> Permissions -> CAN QUERY for `{sp}`",
+        f"--   Serving -> {config.AI_QUERY_ENDPOINT} -> Permissions -> CAN QUERY for `{sp}`",
     ]
     return {"service_principal": sp, "sql": "\n".join(lines)}
 

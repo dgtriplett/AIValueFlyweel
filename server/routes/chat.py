@@ -29,6 +29,7 @@ import secrets
 from fastapi import APIRouter, Depends, HTTPException, Request
 from pydantic import BaseModel, Field
 
+from .. import accounts
 from .. import chat_tools as ct
 from .. import confirm as cf
 from ..common import current_user, rows_to_list
@@ -60,11 +61,21 @@ async def _load_history(conversation_id: str) -> list[dict]:
     Tool calls and results are replayed too, so a follow-up like "and the second
     one?" still has the list it refers to.
     """
-    rows = await db.fetch("""
-        SELECT role, content, tool_name, tool_args_json, tool_result_json
-        FROM chat_messages WHERE conversation_id = $1
-        ORDER BY created_at DESC, id DESC LIMIT $2
-    """, conversation_id, HISTORY_TURNS * 3)
+    account_id = await accounts.current()
+    if account_id is not None:
+        rows = await db.fetch("""
+            SELECT m.role, m.content, m.tool_name, m.tool_args_json, m.tool_result_json
+            FROM chat_messages m
+            JOIN chat_conversations c ON c.id = m.conversation_id
+            WHERE m.conversation_id = $1 AND c.account_id = $2
+            ORDER BY m.created_at DESC, m.id DESC LIMIT $3
+        """, conversation_id, account_id, HISTORY_TURNS * 3)
+    else:
+        rows = await db.fetch("""
+            SELECT role, content, tool_name, tool_args_json, tool_result_json
+            FROM chat_messages WHERE conversation_id = $1
+            ORDER BY created_at DESC, id DESC LIMIT $2
+        """, conversation_id, HISTORY_TURNS * 3)
     messages: list[dict] = []
     for row in reversed(list(rows)):
         if row["role"] == "tool":
@@ -124,16 +135,28 @@ async def _chat_turn(body: ChatIn, request: Request):
     actor = current_user(request)
 
     conversation_id = body.conversation_id
+    account_id = await accounts.current()
     if conversation_id:
-        exists = await db.fetchrow(
-            "SELECT id FROM chat_conversations WHERE id=$1", conversation_id)
+        if account_id is not None:
+            exists = await db.fetchrow(
+                "SELECT id FROM chat_conversations WHERE id=$1 AND account_id=$2",
+                conversation_id, account_id)
+        else:
+            exists = await db.fetchrow(
+                "SELECT id FROM chat_conversations WHERE id=$1", conversation_id)
         if exists is None:
             raise HTTPException(404, "Conversation not found")
     else:
         conversation_id = f"conv_{secrets.token_hex(8)}"
-        await db.execute(
-            "INSERT INTO chat_conversations (id, title, actor) VALUES ($1,$2,$3)",
-            conversation_id, body.message[:80], actor)
+        if account_id is not None:
+            await db.execute(
+                """INSERT INTO chat_conversations (id, account_id, title, actor)
+                   VALUES ($1,$2,$3,$4)""",
+                conversation_id, account_id, body.message[:80], actor)
+        else:
+            await db.execute(
+                "INSERT INTO chat_conversations (id, title, actor) VALUES ($1,$2,$3)",
+                conversation_id, body.message[:80], actor)
 
     await _save(conversation_id, "user", content=body.message)
 
@@ -260,6 +283,16 @@ async def _chat_turn(body: ChatIn, request: Request):
 
 @router.get("/conversations")
 async def list_conversations(limit: int = 20):
+    account_id = await accounts.current()
+    if account_id is not None:
+        return rows_to_list(await db.fetch("""
+            SELECT c.id, c.title, c.actor, c.created_at, c.updated_at,
+                   (SELECT count(*) FROM chat_messages m
+                    WHERE m.conversation_id = c.id AND m.role <> 'tool') AS turns
+            FROM chat_conversations c
+            WHERE c.account_id = $1
+            ORDER BY c.updated_at DESC LIMIT $2
+        """, account_id, limit))
     return rows_to_list(await db.fetch("""
         SELECT c.id, c.title, c.actor, c.created_at, c.updated_at,
                (SELECT count(*) FROM chat_messages m
@@ -287,8 +320,14 @@ async def list_tools():
 
 @router.get("/{conversation_id}")
 async def get_conversation(conversation_id: str):
-    conversation = await db.fetchrow(
-        "SELECT * FROM chat_conversations WHERE id=$1", conversation_id)
+    account_id = await accounts.current()
+    if account_id is not None:
+        conversation = await db.fetchrow(
+            "SELECT * FROM chat_conversations WHERE id=$1 AND account_id=$2",
+            conversation_id, account_id)
+    else:
+        conversation = await db.fetchrow(
+            "SELECT * FROM chat_conversations WHERE id=$1", conversation_id)
     if conversation is None:
         raise HTTPException(404, "Conversation not found")
     messages = rows_to_list(await db.fetch("""
@@ -300,6 +339,12 @@ async def get_conversation(conversation_id: str):
 
 @router.delete("/{conversation_id}")
 async def delete_conversation(conversation_id: str):
-    result = await db.execute(
-        "DELETE FROM chat_conversations WHERE id=$1", conversation_id)
+    account_id = await accounts.current()
+    if account_id is not None:
+        result = await db.execute(
+            "DELETE FROM chat_conversations WHERE id=$1 AND account_id=$2",
+            conversation_id, account_id)
+    else:
+        result = await db.execute(
+            "DELETE FROM chat_conversations WHERE id=$1", conversation_id)
     return {"deleted": result is not None}

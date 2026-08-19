@@ -4,8 +4,10 @@ import json
 from fastapi import APIRouter, HTTPException, Request
 from pydantic import BaseModel
 
+from .. import accounts
 from ..common import current_user, row_to_dict, rows_to_list, write_audit
 from ..db import db
+from .. import portfolio
 from ..readiness import readiness_map, readiness_for
 from ..value_engine import (
     compute_realized,
@@ -95,8 +97,15 @@ async def list_use_cases(
         params.append(value)
         where.append(f"{column} = ${len(params)}")
 
+    membership_expr, membership_params = await portfolio.select_membership_expression(
+        "use_cases", param_index=1)
+    params.extend(membership_params)
+
     if scope == "portfolio":
-        where.append("in_portfolio = true")
+        condition, condition_params = await portfolio.portfolio_condition(
+            "use_cases", param_index=len(params) + 1)
+        where.append(condition)
+        params.extend(condition_params)
     elif scope == "catalog":
         where.append("origin = 'catalog'")
     if lob_id is not None:
@@ -107,7 +116,7 @@ async def list_use_cases(
         add_filter("phase", phase)
     if status:
         add_filter("status", status)
-    sql = "SELECT * FROM use_cases"
+    sql = f"SELECT use_cases.*, {membership_expr} AS in_portfolio FROM use_cases"
     if where:
         sql += " WHERE " + " AND ".join(where)
     sql += " ORDER BY id"
@@ -364,13 +373,24 @@ async def get_use_case_detail(uc_id: int):
            WHERE e.to_use_case_id = $1 ORDER BY uc.title""",
         uc_id,
     )
-    values = await db.fetch(
-        "SELECT * FROM value_records WHERE use_case_id = $1 ORDER BY id", uc_id,
-    )
-    comments = await db.fetch(
-        "SELECT * FROM comments WHERE entity_type='use_case' AND entity_id=$1 ORDER BY created_at",
-        uc_id,
-    )
+    account_id = await accounts.current()
+    if account_id is not None:
+        values = await db.fetch(
+            "SELECT * FROM value_records WHERE account_id=$1 AND use_case_id = $2 ORDER BY id",
+            account_id, uc_id)
+        comments = await db.fetch(
+            """SELECT * FROM comments
+               WHERE account_id=$1 AND entity_type='use_case' AND entity_id=$2
+               ORDER BY created_at""",
+            account_id, uc_id)
+    else:
+        values = await db.fetch(
+            "SELECT * FROM value_records WHERE use_case_id = $1 ORDER BY id", uc_id,
+        )
+        comments = await db.fetch(
+            "SELECT * FROM comments WHERE entity_type='use_case' AND entity_id=$1 ORDER BY created_at",
+            uc_id,
+        )
     return {
         **uc,
         "required_assets": rows_to_list(required),
@@ -405,8 +425,11 @@ async def create_use_case(body: UseCaseIn, request: Request):
     )
     if row is None:
         raise HTTPException(503, "Database unavailable")
+    await portfolio.set_membership(row["id"], True, actor=actor, source="custom_create")
     await write_audit("use_case", row["id"], "create", actor, {"title": body.title})
-    return row_to_dict(row)
+    out = row_to_dict(row)
+    out["in_portfolio"] = True
+    return out
 
 
 @router.put("/{uc_id}")
@@ -504,10 +527,9 @@ async def toggle_portfolio(uc_id: int, body: PortfolioToggle, request: Request):
     prev = await db.fetchrow("SELECT title, origin FROM use_cases WHERE id=$1", uc_id)
     if prev is None:
         raise HTTPException(404, "Use case not found")
-    row = await db.fetchrow(
-        "UPDATE use_cases SET in_portfolio=$1, updated_at=now() WHERE id=$2 RETURNING *",
-        body.in_portfolio, uc_id,
-    )
+    await portfolio.set_membership(
+        uc_id, body.in_portfolio, actor=actor, source="manual")
+    row = await db.fetchrow("SELECT * FROM use_cases WHERE id=$1", uc_id)
     await write_audit("use_case", uc_id, "portfolio_toggle", actor,
                       {"in_portfolio": body.in_portfolio, "title": prev["title"]})
     return row_to_dict(row)
@@ -524,10 +546,22 @@ async def bulk_portfolio(body: PortfolioBulk, request: Request):
     actor = current_user(request)
     if not body.ids:
         return {"updated": 0}
-    await db.execute(
-        "UPDATE use_cases SET in_portfolio=$1, updated_at=now() WHERE id = ANY($2::int[])",
-        body.in_portfolio, body.ids,
-    )
+    if body.in_portfolio:
+        await portfolio.add_many(body.ids, actor=actor, source="manual_bulk")
+    else:
+        account_id = await accounts.current()
+        if account_id is not None:
+            await db.execute(
+                "DELETE FROM account_portfolio_use_cases "
+                "WHERE account_id=$1 AND use_case_id = ANY($2::int[])",
+                account_id, body.ids,
+            )
+        else:
+            await db.execute(
+                "UPDATE use_cases SET in_portfolio=false, updated_at=now() "
+                "WHERE id = ANY($1::int[])",
+                body.ids,
+            )
     await write_audit("use_case", 0, "portfolio_bulk", actor,
                       {"in_portfolio": body.in_portfolio, "count": len(body.ids), "ids": body.ids})
     return {"updated": len(body.ids)}

@@ -55,11 +55,13 @@ class TestPortfolioRoutesSurvivedTheFork(unittest.TestCase):
                      "/api/joint-funding/opportunities",
                      "/api/data-sources/recommendations", "/api/agents/recommend",
                      "/api/agents/roadmap", "/api/agents/detect-dependencies",
+                     "/api/agents/customer-enhancements",
                      "/api/dependencies/requires", "/api/dependencies/enables",
                      "/api/use-cases/{uc_id}/readiness",
                      "/api/use-cases/{uc_id}/unlocks",
                      "/api/live/sync", "/api/genie/ask",
-                     "/api/onboarding/export.xlsx", "/api/onboarding/import"):
+                     "/api/onboarding/export.xlsx", "/api/onboarding/import",
+            "/api/quality/catalog"):
             self.assertIn(path, paths, f"{path} disappeared in the fork")
 
     def test_spa_catch_all_registered_last(self):
@@ -154,6 +156,77 @@ class TestIngestionRoutes(unittest.TestCase):
                      "/api/ingestion/runs"):
             self.assertIn(path, paths, f"{path} not registered")
 
+    def test_attribution_clears_stale_discovery_counts(self):
+        """Discovery evidence is current-state data, not historical state.
+
+        If a later sweep removes a source category, attribution must clear the
+        old discovered_table_count or readiness/value views keep trusting stale
+        inventory.
+        """
+        with open(os.path.join(ROOT, "server", "routes", "ingestion.py")) as handle:
+            source = handle.read()
+        block = source[source.index("@router.post(\"/attribute\""):]
+        block = block[:block.index("# ---------------------------------------------------------------------------", 500)]
+        self.assertIn("discovered_table_count=0", block)
+        self.assertIn("source_category", block)
+        self.assertIn("stale_assets_reset", block)
+
+
+class TestArtifactInventoryRoutes(unittest.TestCase):
+    def test_artifact_sync_does_not_bind_statement_timestamps_as_native_types(self):
+        """Statement Execution returns timestamp columns as strings.
+
+        Binding those values to asyncpg as timestamptz[] made Scan the workspace
+        raise a backend 500. The route should pass text arrays and cast inside
+        SQL, where NULL and ISO strings are both accepted.
+        """
+        with open(os.path.join(ROOT, "server", "routes", "inventory.py")) as handle:
+            source = handle.read()
+        block = source[source.index("@router.post(\"/artifacts/sync\""):]
+        block = block[:block.index("@router.patch", 500)]
+        self.assertIn("$8::text[]", block)
+        self.assertIn("lr::timestamptz", block)
+        self.assertIn("$6::text[]", block)
+        self.assertIn("lm::timestamptz", block)
+
+    def test_artifact_sync_reports_write_failures_as_notes(self):
+        with open(os.path.join(ROOT, "server", "routes", "inventory.py")) as handle:
+            source = handle.read()
+        block = source[source.index("@router.post(\"/artifacts/sync\""):]
+        block = block[:block.index("@router.patch", 500)]
+        self.assertIn("could not write discovered artifacts", block)
+        self.assertIn("return", block)
+
+    def test_serving_usage_uses_current_dimension_table_for_names(self):
+        with open(os.path.join(ROOT, "server", "routes", "inventory.py")) as handle:
+            source = handle.read()
+        block = source[source.index('if available.get("serving")'):]
+        block = block[:block.index("# Models come from", 500)]
+        self.assertIn("system.serving.served_entities", block)
+        self.assertIn("endpoint_name", block)
+        self.assertIn("served_entity_id", block)
+        self.assertNotIn("SELECT served_entity_name, count(*)", block)
+
+    def test_artifact_sync_uses_non_null_workspace_keys(self):
+        with open(os.path.join(ROOT, "server", "routes", "inventory.py")) as handle:
+            source = handle.read()
+        block = source[source.index("@router.post(\"/artifacts/sync\""):]
+        block = block[:block.index("@router.patch", 500)]
+        self.assertIn("r.workspace_id = j.workspace_id", block)
+        self.assertIn("'uc-model-registry'", block)
+        self.assertIn("workspace_id IS NULL", block)
+        self.assertIn("is_user_edited = false", block)
+
+    def test_artifact_sync_dedupes_each_batch_before_insert(self):
+        with open(os.path.join(ROOT, "server", "routes", "inventory.py")) as handle:
+            source = handle.read()
+        block = source[source.index("deduped = {}"):]
+        block = block[:block.index("if not records:", 500)]
+        self.assertIn("artifact_id", block)
+        self.assertIn("workspace_id", block)
+        self.assertIn("run_count_30d", block)
+        self.assertIn("last_run", block)
+
 
 class TestOpenApiSchema(unittest.TestCase):
     def test_schema_generates(self):
@@ -220,6 +293,8 @@ class TestNewFeatureRoutes(unittest.TestCase):
             "/api/artifacts/unattributed",
             # chat
             "/api/chat", "/api/chat/conversations", "/api/chat/tools/list",
+            # executive export pack
+            "/api/exports/executive-pack", "/api/exports/executive-pack.md",
         ):
             self.assertIn(path, paths, f"{path} not registered")
 
@@ -246,6 +321,15 @@ class TestNewFeatureRoutes(unittest.TestCase):
         from server import confirm as cf
         from server.routes import generate
         self.assertIn(cf.INTENT_APPLY_RESEARCH, generate._EXECUTORS)
+
+    def test_customer_enhancement_agent_serializes_profile_rows(self):
+        """company_profile has timestamps; raw dict(row) breaks json.dumps()."""
+        with open(os.path.join(ROOT, "server", "routes", "agents.py")) as handle:
+            source = handle.read()
+        block = source[source.index("@router.get(\"/customer-enhancements\""):]
+        block = block[:block.index("# ---------------------------------------------------------------------------", 500)]
+        self.assertIn("row_to_dict(profile_row)", block)
+        self.assertNotIn("profile = dict(profile_row)", block)
 
     def test_chat_write_tools_only_propose(self):
         """A chat-driven write must land in the same gate as any other agent

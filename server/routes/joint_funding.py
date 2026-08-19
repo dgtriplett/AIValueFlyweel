@@ -11,6 +11,7 @@ import json
 from fastapi import APIRouter, HTTPException, Request
 from pydantic import BaseModel
 
+from .. import accounts, portfolio
 from ..common import current_user, write_audit
 from ..db import db
 from ..value_engine import load_assumptions, EFFORT_COST, asset_cost, use_case_value
@@ -26,8 +27,9 @@ async def _context():
     assumptions = await load_assumptions()
     assets = [dict(a) for a in await db.fetch("SELECT * FROM data_assets ORDER BY id")]
     # Joint-funding value totals are portfolio-scoped (confirmed use cases only).
+    condition, params = await portfolio.portfolio_condition("uc")
     ucs = {u["id"]: dict(u) for u in await db.fetch(
-        "SELECT * FROM use_cases WHERE in_portfolio = true")}
+        f"SELECT uc.* FROM use_cases uc WHERE {condition}", *params)}
     lobs = {lob["id"]: lob["name"] for lob in await db.fetch("SELECT id, name FROM lobs")}
     requires = await db.fetch("SELECT use_case_id, data_asset_id, criticality FROM uc_requires_asset")
     # asset -> list of (uc_id, criticality)
@@ -264,14 +266,26 @@ class FundIn(BaseModel):
 @router.post("/request")
 async def create_request(body: FundIn, request: Request):
     actor = current_user(request)
-    row = await db.fetchrow(
-        """INSERT INTO funding_requests
-           (data_asset_id, requesting_lob_id, co_funding_lobs, combined_value, status,
-            sponsor, cost_share_json, brief_md)
-           VALUES ($1,$2,$3,$4,$5,$6,$7::jsonb,$8) RETURNING *""",
-        body.data_asset_id, body.requesting_lob_id, body.co_funding_lobs, body.combined_value,
-        body.status, body.sponsor or actor,
-        json.dumps(body.cost_share) if body.cost_share else None, body.brief_md)
+    account_id = await accounts.current()
+    if account_id is not None:
+        row = await db.fetchrow(
+            """INSERT INTO funding_requests
+               (account_id, data_asset_id, requesting_lob_id, co_funding_lobs,
+                combined_value, status, sponsor, cost_share_json, brief_md)
+               VALUES ($1,$2,$3,$4,$5,$6,$7,$8::jsonb,$9) RETURNING *""",
+            account_id, body.data_asset_id, body.requesting_lob_id,
+            body.co_funding_lobs, body.combined_value, body.status,
+            body.sponsor or actor,
+            json.dumps(body.cost_share) if body.cost_share else None, body.brief_md)
+    else:
+        row = await db.fetchrow(
+            """INSERT INTO funding_requests
+               (data_asset_id, requesting_lob_id, co_funding_lobs, combined_value, status,
+                sponsor, cost_share_json, brief_md)
+               VALUES ($1,$2,$3,$4,$5,$6,$7::jsonb,$8) RETURNING *""",
+            body.data_asset_id, body.requesting_lob_id, body.co_funding_lobs, body.combined_value,
+            body.status, body.sponsor or actor,
+            json.dumps(body.cost_share) if body.cost_share else None, body.brief_md)
     if row is None:
         raise HTTPException(503, "Database unavailable")
     await write_audit("funding_request", row["id"], "create", actor, {"data_asset_id": body.data_asset_id})
@@ -288,9 +302,16 @@ async def update_request(req_id: int, body: StatusIn, request: Request):
     if body.status not in ("proposed", "committed", "funded", "declined"):
         raise HTTPException(422, "invalid status")
     actor = current_user(request)
-    row = await db.fetchrow(
-        "UPDATE funding_requests SET status=$1, sponsor=COALESCE($2,sponsor) WHERE id=$3 RETURNING *",
-        body.status, body.sponsor, req_id)
+    account_id = await accounts.current()
+    if account_id is not None:
+        row = await db.fetchrow(
+            """UPDATE funding_requests SET status=$1, sponsor=COALESCE($2,sponsor)
+               WHERE id=$3 AND account_id=$4 RETURNING *""",
+            body.status, body.sponsor, req_id, account_id)
+    else:
+        row = await db.fetchrow(
+            "UPDATE funding_requests SET status=$1, sponsor=COALESCE($2,sponsor) WHERE id=$3 RETURNING *",
+            body.status, body.sponsor, req_id)
     if row is None:
         raise HTTPException(404, "Funding request not found")
     await write_audit("funding_request", req_id, "status", actor, {"status": body.status})

@@ -32,7 +32,7 @@ from __future__ import annotations
 
 import json
 
-from .config import ATLAS_CATALOG, ATLAS_SCHEMA, SERVING_ENDPOINT, atlas_fqn
+from .config import AI_QUERY_ENDPOINT, ATLAS_CATALOG, ATLAS_SCHEMA, atlas_fqn
 
 # Staging table for stage 1. Deliberately NOT dropped after a run so stage 2 can
 # be replayed without paying for inference again.
@@ -157,7 +157,7 @@ def build_staging_sql(
     Candidate selection excludes rows a human has edited and rows already
     enriched, so a re-run only pays for genuinely new tables.
     """
-    endpoint = endpoint or SERVING_ENDPOINT
+    endpoint = endpoint or AI_QUERY_ENDPOINT
     tables = atlas_fqn("discovered_tables")
     schemas = atlas_fqn("discovered_schemas")
     staging = staging_fqn()
@@ -339,7 +339,7 @@ def build_schema_enrichment_sql(company_name: str, endpoint: str | None = None,
     single struct column and parse once, so the projection can't be pushed down
     into repeated inference.
     """
-    endpoint = endpoint or SERVING_ENDPOINT
+    endpoint = endpoint or AI_QUERY_ENDPOINT
     schemas = atlas_fqn("discovered_schemas")
     limit = f"LIMIT {int(max_rows)}" if max_rows else ""
     preamble = (

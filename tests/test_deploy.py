@@ -62,7 +62,7 @@ class TestSetYamlEnv(unittest.TestCase):
     def test_touches_only_the_named_entry(self):
         """The failure this guards: a greedy pattern rewriting neighbouring keys."""
         out = deploy.set_yaml_env(self.original, "PGPORT", "5433")
-        for other in ("PGHOST", "PGDATABASE", "SERVING_ENDPOINT", "ATLAS_CATALOG",
+        for other in ("PGHOST", "PGDATABASE", "SERVING_ENDPOINT", "AI_QUERY_ENDPOINT", "ATLAS_CATALOG",
                       "ATLAS_SCHEMA", "GENIE_MIRROR_SCHEMA", "DEMO_MODE"):
             self.assertEqual(_env_value(out, other), _env_value(self.original, other),
                              f"{other} changed while setting PGPORT")
@@ -130,7 +130,7 @@ class TestBundleVariableRewrite(unittest.TestCase):
 
     def test_touches_only_the_named_variable(self):
         out = self._set(self.original, "atlas_schema", "changed")
-        for other in ("serving_endpoint", "genie_mirror_schema", "lakebase_project"):
+        for other in ("serving_endpoint", "ai_query_endpoint", "genie_mirror_schema", "lakebase_project"):
             before = re.search(
                 rf"  {other}:\n(?:    [^\n]*\n)*?    default:\s*(\S+)", self.original)
             after = re.search(
@@ -141,6 +141,7 @@ class TestBundleVariableRewrite(unittest.TestCase):
         """A typo'd key would be a silent no-op — the deploy would appear to work
         and the app would get the wrong value."""
         for key in ("atlas_catalog", "atlas_schema", "serving_endpoint",
+                    "ai_query_endpoint",
                     "genie_mirror_catalog", "genie_mirror_schema",
                     "lakebase_project", "demo_mode", "warehouse_id"):
             self.assertRegex(self.original, rf"\n  {key}:\n",
@@ -155,6 +156,7 @@ class TestSettingsParity(unittest.TestCase):
         with open(APP_YAML) as fh:
             text = fh.read()
         for name in ("PGHOST", "PGUSER", "PGDATABASE", "SERVING_ENDPOINT",
+                     "AI_QUERY_ENDPOINT",
                      "ATLAS_CATALOG", "ATLAS_SCHEMA", "GENIE_MIRROR_CATALOG",
                      "GENIE_MIRROR_SCHEMA", "GENIE_SPACE_ID", "DEMO_MODE"):
             self.assertIsNotNone(_env_value(text, name) if f"name: {name}" in text else None,

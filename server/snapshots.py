@@ -28,6 +28,7 @@ import json
 import logging
 
 from .db import db
+from . import portfolio
 from .readiness import READY_STATUSES, readiness_map
 from .value_engine import compute_realized, compute_value_range, load_assumptions
 
@@ -54,19 +55,20 @@ async def compute_metrics() -> dict:
     assumptions = await load_assumptions()
     readiness = await readiness_map()
 
-    rows = await db.fetch("""
+    membership_expr, params = await portfolio.select_membership_expression("uc")
+    rows = await db.fetch(f"""
         SELECT id, status, in_portfolio, hypothesized_value_json, realized_value_json,
                realized_override_enabled, realized_override_amount,
-               realized_override_note
-        FROM use_cases
-    """)
+               realized_override_note, {membership_expr} AS account_in_portfolio
+        FROM use_cases uc
+    """, *params)
 
     total = buildable = realized = 0.0
     live = 0
     portfolio_count = 0
     for row in rows:
         use_case = dict(row)
-        if not use_case.get("in_portfolio"):
+        if not use_case.get("account_in_portfolio"):
             continue
         portfolio_count += 1
         value_range = compute_value_range(

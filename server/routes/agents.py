@@ -14,8 +14,12 @@ import logging
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel
 
+from .. import accounts, portfolio
+from ..common import row_to_dict, rows_to_list
 from ..config import SERVING_ENDPOINT
 from ..db import db
+from ..readiness import readiness_map
+from ..value_engine import compute_value_range, load_assumptions
 
 logger = logging.getLogger(__name__)
 
@@ -61,6 +65,50 @@ class DetectIn(BaseModel):
     use_case_id: int
     max_assets: int = 6
     max_enables: int = 6
+
+
+CUSTOMER_ENHANCEMENT_SCHEMA = {
+    "type": "json_schema",
+    "json_schema": {
+        "name": "customer_enhancement_agent",
+        "schema": {
+            "type": "object",
+            "properties": {
+                "assumption_refinements": {
+                    "type": "array",
+                    "items": {
+                        "type": "object",
+                        "properties": {
+                            "key": {"type": "string"},
+                            "recommended_value": {"type": ["number", "null"]},
+                            "confidence": {"type": "string"},
+                            "basis": {"type": "string"},
+                            "rationale": {"type": "string"},
+                            "review_priority": {"type": "string"},
+                        },
+                        "required": ["key", "confidence", "basis", "rationale"],
+                    },
+                },
+                "app_enhancements": {
+                    "type": "array",
+                    "items": {
+                        "type": "object",
+                        "properties": {
+                            "title": {"type": "string"},
+                            "why": {"type": "string"},
+                            "it_delivers": {"type": "string"},
+                            "implementation_hint": {"type": "string"},
+                        },
+                        "required": ["title", "why", "it_delivers",
+                                     "implementation_hint"],
+                    },
+                },
+            },
+            "required": ["assumption_refinements", "app_enhancements"],
+        },
+        "strict": False,
+    },
+}
 
 
 def _keyword_score(text: str, terms: list[str]) -> int:
@@ -152,6 +200,207 @@ async def detect_dependencies(body: DetectIn):
         "used_llm": used_llm,
         "requires": req,
         "enables": ena,
+    }
+
+
+def _normalise_customer_agent(parsed: dict | None, assumptions: list[dict],
+                              profile: dict | None) -> dict:
+    """Validate model output and fill gaps with deterministic recommendations."""
+    known = {row["key"]: row for row in assumptions}
+    profile_name = (profile or {}).get("company_name") or "this customer"
+
+    refinements: list[dict] = []
+    if isinstance(parsed, dict):
+        for item in parsed.get("assumption_refinements") or []:
+            if not isinstance(item, dict):
+                continue
+            key = str(item.get("key") or "").strip()
+            if key not in known:
+                continue
+            raw_value = item.get("recommended_value")
+            value = raw_value if isinstance(raw_value, (int, float)) and raw_value >= 0 else None
+            refinements.append({
+                "key": key,
+                "label": known[key].get("label") or key,
+                "unit": known[key].get("unit"),
+                "current_value": known[key].get("value"),
+                "recommended_value": value,
+                "confidence": (str(item.get("confidence") or "low").lower()
+                               if str(item.get("confidence") or "").lower()
+                               in {"high", "medium", "low"} else "low"),
+                "basis": str(item.get("basis") or "").strip()
+                         or "model-generated research plan",
+                "rationale": str(item.get("rationale") or "").strip()
+                             or "Review against customer-specific public filings.",
+                "review_priority": str(item.get("review_priority") or "medium").lower(),
+            })
+
+    if not refinements:
+        priority_keys = [
+            "customerCount", "annualRevenueMM", "omBudgetMM", "capitalBudgetMM",
+            "tdLineMiles", "currentSAIDI", "saidiMinuteValueMM",
+            "generationFleetMW", "annualFuelSpendMM", "capacityPriceMWDay",
+        ]
+        for key in priority_keys:
+            row = known.get(key)
+            if not row:
+                continue
+            refinements.append({
+                "key": key,
+                "label": row.get("label") or key,
+                "unit": row.get("unit"),
+                "current_value": row.get("value"),
+                "recommended_value": row.get("value"),
+                "confidence": "low",
+                "basis": f"Review against {profile_name} annual report, 10-K, FERC Form 1, rate-case filings, or state reliability reports.",
+                "rationale": "This is a high-leverage value-engine assumption; leaving it generic can materially distort every use-case value.",
+                "review_priority": "high",
+            })
+
+    enhancements: list[dict] = []
+    if isinstance(parsed, dict):
+        for item in parsed.get("app_enhancements") or []:
+            if not isinstance(item, dict):
+                continue
+            title = str(item.get("title") or "").strip()
+            if not title:
+                continue
+            enhancements.append({
+                "title": title[:140],
+                "why": str(item.get("why") or "").strip(),
+                "it_delivers": str(item.get("it_delivers") or "").strip(),
+                "implementation_hint": str(item.get("implementation_hint") or "").strip(),
+            })
+
+    fallback = [
+        ("Assumption evidence drawer",
+         "Value assumptions need visible provenance before finance or operations will trust them.",
+         "A per-assumption evidence view showing source, confidence, last review date, and affected use cases.",
+         "Reuse assumption_research rows and add an impact query that lists use cases whose formula references each key."),
+        ("Prerequisite impact panel",
+         "Awaiting-prerequisite use cases should explain exactly what must be built first.",
+         "A one-click list of required prerequisite use cases, their owners, status, value, and unblock date.",
+         "Extend the readiness payload already returned by readiness_map with status/owner/value for pending_prereqs."),
+        ("Value sensitivity simulator",
+         "Customers challenge assumptions by asking which inputs move the answer most.",
+         "A tornado chart showing which assumptions have the biggest effect on portfolio value.",
+         "Perturb each value_assumption +/-10% and recompute affected use-case value ranges."),
+        ("Data gap acquisition plan",
+         "Readiness gaps should translate into source-system work, not just red badges.",
+         "A backlog grouped by missing data domain, source system, owner, and value at risk.",
+         "Aggregate pending_domains and module requirements against the coverage matrix."),
+        ("Executive export pack",
+         "Sponsors need a concise artifact to socialize the portfolio outside the app.",
+         "A PDF or PPT-ready export with portfolio value, buildable value, top blockers, and next actions.",
+         "Render the existing dashboard and roadmap rollups through a server-side markdown/HTML export."),
+        ("Use-case owner workflow",
+         "Tracking use cases needs accountability, not just status.",
+         "Owner, sponsor, due date, next milestone, and stale-status alerts per use case.",
+         "Add account-scoped owner fields and a status_age query."),
+        ("Benefits realization ledger",
+         "Realized value should be auditable after go-live.",
+         "Monthly actuals, evidence links, variance to hypothesis, and finance approval status.",
+         "Extend value_records with period/evidence/approval metadata and chart variance."),
+        ("Scenario portfolios",
+         "Customers often compare budget-constrained roadmap options.",
+         "Named scenarios such as conservative, accelerated, and data-platform-first with side-by-side value/readiness.",
+         "Snapshot roadmap/use-case selections into scenario tables and reuse current value_engine calculations."),
+        ("Source-system confidence scoring",
+         "Discovery data is uneven; users need to know which mappings are weak.",
+         "Confidence badges on data-source-to-use-case mappings and a review queue for low-confidence links.",
+         "Persist enrichment attribution confidence and expose it in Data Assets and dependency graph views."),
+        ("Customer benchmark calibration",
+         "Generic industry averages should be replaced by peer-size, region, and utility-type benchmarks.",
+         "A calibration page that compares current assumptions to peer bands and flags outliers.",
+         "Store benchmark min/p50/max per assumption and compare against the active account values."),
+    ]
+    seen = {item["title"].lower() for item in enhancements}
+    for title, why, delivers, hint in fallback:
+        if len(enhancements) >= 10:
+            break
+        if title.lower() in seen:
+            continue
+        enhancements.append({
+            "title": title,
+            "why": why,
+            "it_delivers": delivers,
+            "implementation_hint": hint,
+        })
+        seen.add(title.lower())
+
+    return {
+        "assumption_refinements": refinements[:12],
+        "app_enhancements": enhancements[:10],
+    }
+
+
+@router.get("/customer-enhancements")
+async def customer_enhancement_agent():
+    """Research-oriented agent for customer-specific assumption and app improvements.
+
+    It does not apply assumption changes. Existing /api/research/company and
+    /api/research/apply remain the write path because recalibration changes every
+    dollar figure in the portfolio.
+    """
+    account_id = await accounts.current()
+    profile_row = await db.fetchrow(
+        "SELECT * FROM company_profile WHERE account_id = $1", account_id)
+    profile = row_to_dict(profile_row) if profile_row else None
+    assumptions = rows_to_list(await db.fetch(
+        """SELECT DISTINCT ON (key) key, label, value, unit, category, source,
+                  source_note, confidence
+           FROM value_assumptions
+           WHERE $1::int IS NULL OR account_id = $1 OR account_id IS NULL
+           ORDER BY key, (account_id IS NULL)""",
+        account_id))
+    assumptions.sort(key=lambda row: (row.get("category") or "", row.get("key") or ""))
+    condition, params = await portfolio.portfolio_condition("uc")
+    use_cases = rows_to_list(await db.fetch(
+        f"""SELECT uc.id, uc.title, uc.status, uc.hypothesized_value_json, uc.lob_id
+           FROM use_cases uc
+           WHERE {condition}
+           ORDER BY id
+           LIMIT 80""", *params))
+    try:
+        rmap = await readiness_map()
+        value_assumptions = await load_assumptions()
+        for row in use_cases:
+            row["readiness"] = (rmap.get(row["id"]) or {}).get("readiness")
+            rng = compute_value_range(row.get("hypothesized_value_json"),
+                                      value_assumptions)
+            row["computed_value"] = rng["mid"] if rng else 0
+    except Exception:  # noqa: BLE001 - value context is helpful, not required
+        for row in use_cases:
+            row["computed_value"] = 0
+    use_cases = sorted(use_cases, key=lambda row: row.get("computed_value") or 0,
+                       reverse=True)[:25]
+
+    generic = [row for row in assumptions if (row.get("source") or "seed") != "research"]
+    company = (profile or {}).get("company_name") or "the configured customer"
+    prompt = (
+        "You are a Power & Utilities value-engineering product agent. Based on the "
+        "configured customer profile, current value assumptions, and portfolio, "
+        "recommend customer-specific assumption refinements and exactly 10 practical "
+        "enhancements to this app. Do not invent assumption keys. If a recommended "
+        "assumption value is not defensible from company-specific facts, set it to "
+        "null and explain the research needed. Return STRICT JSON matching the schema.\n\n"
+        f"CUSTOMER PROFILE: {json.dumps(profile or {'company_name': company})}\n"
+        f"CURRENT ASSUMPTIONS: {json.dumps(assumptions[:40])}\n"
+        f"GENERIC OR UNCALIBRATED ASSUMPTIONS: {json.dumps([a['key'] for a in generic])}\n"
+        f"TOP PORTFOLIO USE CASES: {json.dumps(use_cases)}\n"
+    )
+    parsed, used_llm, note = await _llm_json(
+        prompt, max_tokens=7000, response_schema=CUSTOMER_ENHANCEMENT_SCHEMA)
+    normalised = _normalise_customer_agent(parsed, assumptions, profile)
+    return {
+        "company": profile,
+        "researched": bool(profile),
+        "model": SERVING_ENDPOINT if used_llm else "heuristic",
+        "used_llm": used_llm,
+        "fallback_note": note,
+        "generic_assumption_count": len(generic),
+        "next": "Use /api/research/company to create audited assumption proposals, then /api/research/apply to stage selected changes for confirmation.",
+        **normalised,
     }
 
 
@@ -329,8 +578,9 @@ async def _portfolio_context():
     from ..readiness import readiness_map
     from ..value_engine import compute_value_range, load_assumptions
     # Portfolio-scoped: roadmap + next-best recommender operate on the confirmed set.
+    condition, params = await portfolio.portfolio_condition("uc")
     ucs = [dict(u) for u in await db.fetch(
-        "SELECT * FROM use_cases WHERE in_portfolio = true ORDER BY id")]
+        f"SELECT uc.* FROM use_cases uc WHERE {condition} ORDER BY uc.id", *params)]
     lobs = {lob["id"]: lob["name"] for lob in await db.fetch("SELECT id, name FROM lobs")}
     rmap = await readiness_map()
     assumptions = await load_assumptions()
@@ -530,13 +780,22 @@ async def roadmap(body: RoadmapIn):
     persisted = 0
     if body.persist:
         actor = body.actor or "agent"
+        account_id = await accounts.current()
         # replace agent-generated roadmap rows for these UCs
         for it in items:
-            await db.execute(
-                """INSERT INTO roadmap_items (use_case_id, horizon, wave, notes)
-                   VALUES ($1,$2,$3,$4)""",
-                it["use_case_id"], it["horizon"], it["wave"],
-                f"Auto-sequenced by roadmap agent (opportunity {it['opportunity']}).")
+            if account_id is not None:
+                await db.execute(
+                    """INSERT INTO roadmap_items
+                       (account_id, use_case_id, horizon, wave, notes)
+                       VALUES ($1,$2,$3,$4,$5)""",
+                    account_id, it["use_case_id"], it["horizon"], it["wave"],
+                    f"Auto-sequenced by roadmap agent (opportunity {it['opportunity']}).")
+            else:
+                await db.execute(
+                    """INSERT INTO roadmap_items (use_case_id, horizon, wave, notes)
+                       VALUES ($1,$2,$3,$4)""",
+                    it["use_case_id"], it["horizon"], it["wave"],
+                    f"Auto-sequenced by roadmap agent (opportunity {it['opportunity']}).")
             persisted += 1
         try:
             await db.execute(

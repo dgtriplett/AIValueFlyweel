@@ -41,7 +41,7 @@ from pydantic import BaseModel
 from .. import enrichment as enr
 from .. import normalization as norm
 from ..common import current_user, rows_to_list, write_audit
-from ..config import ATLAS_CATALOG, ATLAS_SCHEMA, SERVING_ENDPOINT, atlas_fqn, discovery_configured
+from ..config import AI_QUERY_ENDPOINT, ATLAS_CATALOG, ATLAS_SCHEMA, atlas_fqn, discovery_configured
 from ..db import db
 from ..limits import limiter
 from ..lineage import run_sql
@@ -789,6 +789,32 @@ async def attribute(body: AttributeIn, request: Request):
             for row in result["rows"] if row and row[0]
         }
 
+        discovered_categories = sorted(discovered)
+        if discovered_categories:
+            stale_rows = await db.fetch(
+                """UPDATE data_assets
+                   SET discovered_table_count=0,
+                       discovery_confidence=NULL,
+                       last_discovered_at=NULL,
+                       updated_at=now()
+                   WHERE COALESCE(source_category, '') <> ALL($1::text[])
+                     AND (COALESCE(discovered_table_count, 0) <> 0
+                          OR discovery_confidence IS NOT NULL
+                          OR last_discovered_at IS NOT NULL)
+                   RETURNING id""",
+                discovered_categories)
+        else:
+            stale_rows = await db.fetch(
+                """UPDATE data_assets
+                   SET discovered_table_count=0,
+                       discovery_confidence=NULL,
+                       last_discovered_at=NULL,
+                       updated_at=now()
+                   WHERE COALESCE(discovered_table_count, 0) <> 0
+                      OR discovery_confidence IS NOT NULL
+                      OR last_discovered_at IS NOT NULL
+                   RETURNING id""")
+
         assets = await db.fetch(
             "SELECT id, source_category, module, ingestion_status FROM data_assets")
         matched = 0
@@ -823,7 +849,8 @@ async def attribute(body: AttributeIn, request: Request):
                                      "from": current, "to": body.max_status})
 
         stats = {"canonicals_discovered": len(discovered), "assets_matched": matched,
-                 "assets_advanced": len(advanced)}
+                 "assets_advanced": len(advanced),
+                 "stale_assets_reset": len(stale_rows)}
         await _finish_run(run_id, "succeeded", stats)
         await write_audit("ingestion", run_id, "attribute", actor, stats)
         return {"ok": True, "run_id": run_id, "advanced": advanced,
@@ -864,7 +891,7 @@ async def summary():
         "schemas": int(row[0] or 0), "tables": int(row[1] or 0),
         "enriched_tables": int(row[2] or 0), "workspaces": int(row[3] or 0),
         "canonicals": int(row[4] or 0),
-        "serving_endpoint": SERVING_ENDPOINT,
+        "serving_endpoint": AI_QUERY_ENDPOINT,
     }
 
 

@@ -22,6 +22,24 @@
   const $ = (sel, root = document) => root.querySelector(sel);
   const main = $("#main");
 
+  async function renderEnvironmentPill() {
+    const pill = $("#app-env-pill");
+    if (!pill) return;
+    try {
+      const response = await fetch("/api/runtime", { cache: "no-store" });
+      if (!response.ok) return;
+      const runtime = await response.json();
+      const env = String(runtime.app_env || "DEV").toUpperCase();
+      pill.textContent = env;
+      pill.classList.toggle("prod", env === "PROD");
+      pill.classList.toggle("dev", env !== "PROD");
+    } catch {
+      /* keep the static DEV fallback */
+    }
+  }
+
+  renderEnvironmentPill();
+
   // ---------------------------------------------------------------------
   // Helpers
   // ---------------------------------------------------------------------
@@ -70,6 +88,25 @@
       throw new Error(detail || `${response.status} ${response.statusText}`);
     }
     return payload;
+  }
+
+  async function downloadApi(path, filename) {
+    const account = localStorage.getItem("avf_account_id");
+    const headers = {};
+    if (account) headers["X-Grid-Atlas-Account"] = account;
+    const response = await fetch(`/api${path}`, { headers });
+    if (!response.ok) {
+      throw new Error(`${response.status} ${response.statusText}`);
+    }
+    const blob = await response.blob();
+    const url = URL.createObjectURL(blob);
+    const link = document.createElement("a");
+    link.href = url;
+    link.download = filename;
+    document.body.appendChild(link);
+    link.click();
+    link.remove();
+    URL.revokeObjectURL(url);
   }
 
   function banner(kind, message) {
@@ -189,7 +226,8 @@
 
     const check = (name) => (status.checks || []).find((c) => c.name === name) || {};
     const healthy = !!status.ready;
-    const discoveryReady = !!inventory.configured && !!inventory.available;
+    const discoveryConfigured = !!inventory.configured;
+    const discoveryReady = discoveryConfigured && !!inventory.available;
     const hasInventory = (inventory.tables || 0) > 0;
     const hasEnrichment = (inventory.enriched_tables || 0) > 0;
 
@@ -275,17 +313,22 @@
                 ⬇ Download extractor (.zip)</a>
               <span class="small muted" id="extractor-info"></span>
             </div>
-            ${discoveryReady ? `
+            ${discoveryConfigured ? `
+              ${discoveryReady ? `
               <div class="stat" style="margin:12px 0">
                 <div><span class="k">Workspaces</span><span class="v">${num(inventory.workspaces)}</span></div>
                 <div><span class="k">Schemas</span><span class="v">${num(inventory.schemas)}</span></div>
                 <div><span class="k">Tables</span><span class="v">${num(inventory.tables)}</span></div>
                 <div><span class="k">Enriched</span><span class="v">${num(inventory.enriched_tables)}</span></div>
               </div>
-              <div class="row" style="margin-top:8px">
+              ` : banner("warn",
+                `Discovery storage is configured but not ready: `
+                + `${text(inventory.error || "run Create discovery tables, then re-check")}`)}
+              <div class="row" style="margin-top:10px">
                 <button class="action secondary" data-act="bootstrap" data-busy="Creating…">
                   Create discovery tables</button>
               </div>
+              ${discoveryReady ? `
               <div class="row" style="margin-top:10px">
                 <div><label for="f-schemas">all_schemas.csv</label>
                   <input type="file" id="f-schemas" accept=".csv"></div>
@@ -301,12 +344,10 @@
                   <span class="muted">(optional — markedly better AI accuracy)</span></label>
                   <input type="file" id="f-columns" accept=".csv"></div>
                 <button class="action" data-act="up-columns" data-busy="Uploading…">Upload</button>
-              </div>`
-            : banner("info", inventory.configured
-                ? `Discovery catalog unreachable: ${text(inventory.error || "unknown")}`
-                : "Set ATLAS_CATALOG in app.yaml to enable the estate sweep. The "
-                  + "curated 146-module catalog and the workbook below both work "
-                  + "without it.")}
+              </div>` : ""}`
+            : banner("info", "Set ATLAS_CATALOG in app.yaml to enable the estate "
+                + "sweep. The curated 146-module catalog and the workbook below both "
+                + "work without it.")}
           </div>
 
           <div class="card" style="background:var(--navy-900)">
@@ -492,6 +533,7 @@
       },
       bootstrap: async () => {
         const r = await api("/ingestion/bootstrap", { method: "POST" });
+        await viewStart();
         $("#result").innerHTML = banner("ok",
           `Discovery tables ready in ${text(r.catalog)}.${text(r.schema)}.`);
       },
@@ -1623,6 +1665,20 @@
             `Caveats from the research: ${profile.research_notes}`) : ""}
         </section>` : ""}
 
+      <section class="card">
+        <h3>Customer enhancement agent</h3>
+        <p class="small muted">Reviews the researched customer profile, current
+          value assumptions, and portfolio to recommend assumption refinements and
+          exactly 10 app enhancements. It does not apply anything.</p>
+        <div class="row" style="margin-top:10px">
+          <button class="action secondary" data-act="enhancements"
+                  data-busy="Researching…">Run agent</button>
+          <span class="small muted">Use this before a sponsor readout or value-model
+            review.</span>
+        </div>
+        <div id="agent-result" style="margin-top:14px"></div>
+      </section>
+
       ${rows.length ? `
         <section>
           <h3 class="small muted">Calibrated value assumptions</h3>
@@ -1715,6 +1771,10 @@
       "apply-all": () => propose(pending.map((r) => r.key)),
       "apply-selected": () => propose(
         [...document.querySelectorAll(".pick-key:checked")].map((i) => i.value)),
+      enhancements: async () => {
+        const result = await api("/agents/customer-enhancements");
+        $("#agent-result").innerHTML = renderEnhancementAgent(result);
+      },
     });
 
     function renderApplyCard(card) {
@@ -1743,6 +1803,56 @@
         cancel: () => { $("#result").innerHTML = ""; },
       });
     }
+  }
+
+  function renderEnhancementAgent(result) {
+    const refinements = result.assumption_refinements || [];
+    const enhancements = result.app_enhancements || [];
+    return `
+      ${result.fallback_note ? banner("warn", result.fallback_note) : ""}
+      <div class="stat" style="margin:12px 0">
+        <div><span class="k">Model</span><span class="v" style="font-size:14px">${
+          text(result.model || "heuristic")}</span></div>
+        <div><span class="k">Uncalibrated</span><span class="v">${
+          num(result.generic_assumption_count)}</span></div>
+        <div><span class="k">Refinements</span><span class="v">${
+          num(refinements.length)}</span></div>
+        <div><span class="k">Enhancements</span><span class="v">${
+          num(enhancements.length)}</span></div>
+      </div>
+      ${refinements.length ? `
+        <h4 class="small muted">Assumption refinements to review</h4>
+        <table>
+          <thead><tr><th>Assumption</th><th class="num">Current</th>
+            <th class="num">Recommended</th><th>Confidence</th><th>Basis</th></tr></thead>
+          <tbody>${refinements.map((r) => `
+            <tr>
+              <td><strong>${text(r.label || r.key)}</strong>
+                <div class="small muted mono">${text(r.key)}</div></td>
+              <td class="num">${num(r.current_value)}</td>
+              <td class="num">${r.recommended_value == null
+                ? "review" : num(r.recommended_value)}</td>
+              <td><span class="pill ${
+                r.confidence === "high" ? "ok" : r.confidence === "medium"
+                  ? "warn" : "bad"}">${text(r.confidence || "low")}</span></td>
+              <td class="small muted">${text(r.basis || "")}
+                ${r.rationale ? `<div>${text(r.rationale)}</div>` : ""}</td>
+            </tr>`).join("")}</tbody>
+        </table>` : banner("info", "No assumption refinements returned.")}
+      ${enhancements.length ? `
+        <h4 class="small muted" style="margin-top:18px">10 app enhancements</h4>
+        <table>
+          <thead><tr><th>Enhancement</th><th>Why it matters</th>
+            <th>Implementation hint</th></tr></thead>
+          <tbody>${enhancements.slice(0, 10).map((item, index) => `
+            <tr>
+              <td><strong>${index + 1}. ${text(item.title)}</strong>
+                <div class="small muted">${text(item.it_delivers || "")}</div></td>
+              <td class="small">${text(item.why || "")}</td>
+              <td class="small muted">${text(item.implementation_hint || "")}</td>
+            </tr>`).join("")}</tbody>
+        </table>` : ""}
+      <p class="small muted">${text(result.next || "")}</p>`;
   }
 
   // ---------------------------------------------------------------------
@@ -2807,6 +2917,239 @@
   }
 
   // ---------------------------------------------------------------------
+  // Executive export pack
+  // ---------------------------------------------------------------------
+  async function viewExecutive() {
+    main.innerHTML = `
+      <h2>Executive export</h2>
+      <p class="lede">A sponsor-ready pack with the portfolio value, buildable
+        use cases, blockers, assumption calibration status, and next actions.</p>
+      <div class="row" style="gap:8px;margin-bottom:16px">
+        <button class="action" data-act="download" data-busy="Preparing…">
+          Download Markdown pack</button>
+        <button class="action secondary" data-act="refresh" data-busy="Refreshing…">
+          Refresh</button>
+      </div>
+      <div id="ex-body"><p class="muted"><span class="spin"></span> Building pack…</p></div>
+      <div id="result"></div>`;
+
+    onActions(main, {
+      download: async () => {
+        await downloadApi("/exports/executive-pack.md",
+          "grid-atlas-executive-pack.md");
+        $("#result").innerHTML = banner("ok", "Executive pack downloaded.");
+      },
+      refresh: viewExecutive,
+    });
+
+    const body = $("#ex-body");
+    try {
+      const pack = await api("/exports/executive-pack");
+      const metrics = pack.metrics || {};
+      const assumptions = pack.assumptions || {};
+      const company = pack.company || {};
+      body.innerHTML = `
+        <section class="card">
+          <h3>${text(company.company_name || "Configured Utility")}</h3>
+          <div class="stat" style="margin:12px 0">
+            ${metricCell("Total value", "$" + num(metrics.total_value_mm) + "M")}
+            ${metricCell("Shovel-ready value",
+              "$" + num(metrics.buildable_value_mm) + "M")}
+            ${metricCell("Realized", "$" + num(metrics.realized_value_mm) + "M")}
+            ${metricCell("Use cases", num(metrics.use_cases_total))}
+            ${metricCell("Blocked", num(metrics.blocked), null, true)}
+          </div>
+          <p class="small muted">Generated ${text((pack.generated_at || "").slice(0, 19)
+            .replace("T", " "))} UTC.</p>
+        </section>
+
+        <section>
+          <h3 class="small muted">Top buildable use cases</h3>
+          ${exportUseCaseTable(pack.top_buildable_use_cases || [], true)}
+        </section>
+
+        <section>
+          <h3 class="small muted">Highest-value blockers</h3>
+          ${exportUseCaseTable(pack.top_blocked_or_awaiting_use_cases || [], false)}
+        </section>
+
+        <section class="card">
+          <h3>Value assumptions</h3>
+          <div class="stat">
+            ${metricCell("Tracked", num(assumptions.total))}
+            ${metricCell("Customer-calibrated", num(assumptions.calibrated))}
+            ${metricCell("Still generic", num(assumptions.generic))}
+          </div>
+          ${assumptions.generic
+            ? banner("warn", `${assumptions.generic} assumption(s) still use generic `
+                + "industry defaults. Run Company research before quoting the "
+                + "portfolio value externally.")
+            : banner("ok", "Every value assumption is customer-calibrated.")}
+        </section>
+
+        <section>
+          <h3 class="small muted">What-if recommendations</h3>
+          ${(pack.whatif || {}).candidates && (pack.whatif || {}).candidates.length
+            ? `<table><thead><tr><th>Source</th><th>Module</th>
+                <th class="num">Use cases</th><th class="num">Value / yr</th>
+                <th class="num">Value per $M</th></tr></thead>
+               <tbody>${pack.whatif.candidates.slice(0, 8).map((c) => `
+                <tr><td>${text(c.source || "")}</td>
+                  <td>${text(c.module || "")}</td>
+                  <td class="num">${num(c.use_cases_unblocked)}</td>
+                  <td class="num">$${num(c.value_unblocked_mm)}M</td>
+                  <td class="num">${num(c.value_per_cost)}</td></tr>`).join("")}
+               </tbody></table>`
+            : banner("info", text((pack.whatif || {}).note || "No recommendations."))}
+        </section>
+
+        <section>
+          <h3 class="small muted">Recommended next actions</h3>
+          <ul class="tight">${(pack.next_actions || []).map((a) =>
+            `<li>${text(a)}</li>`).join("")}</ul>
+        </section>`;
+    } catch (error) {
+      body.innerHTML = banner("err", error.message);
+    }
+  }
+
+  function exportUseCaseTable(rows, showConfidence) {
+    if (!rows.length) return banner("info", "None.");
+    return `<table>
+      <thead><tr><th>Use case</th><th>LOB</th><th>State</th>
+        <th class="num">Value / yr</th>${showConfidence ? "<th>Confidence</th>" : ""}
+      </tr></thead>
+      <tbody>${rows.map((u) => `
+        <tr>
+          <td><strong>${text(u.title)}</strong>
+            ${u.pending_prereqs && u.pending_prereqs.length
+              ? `<div class="small muted">Needs: ${
+                  u.pending_prereqs.map((p) => text(p.title)).join(", ")}</div>` : ""}
+            ${u.pending_domains && u.pending_domains.length
+              ? `<div class="small muted">Data gaps: ${
+                  u.pending_domains.map((d) => text(d.label || d.name)).join(", ")}</div>` : ""}
+          </td>
+          <td class="small">${text(u.lob || "—")}</td>
+          <td class="small">${text((u.readiness || "unknown").replace(/_/g, " "))}</td>
+          <td class="num">$${num(u.value_mm)}M</td>
+          ${showConfidence ? `<td><span class="pill ${
+            u.confidence === "high" ? "ok" : u.confidence === "medium" ? "warn" : "bad"
+          }">${text(u.confidence || "low")} · ${num(u.confidence_score)}</span></td>` : ""}
+        </tr>`).join("")}</tbody>
+    </table>`;
+  }
+
+  // ---------------------------------------------------------------------
+  // Roadmap import — handoff from the Data & AI Maturity Assessment app
+  // ---------------------------------------------------------------------
+  async function viewRoadmapImport() {
+    main.innerHTML = `
+      <h2>Roadmap import</h2>
+      <p class="lede">Bring a generated maturity-assessment roadmap into this
+        operational portfolio. Preview maps incoming use cases against existing
+        Value Flywheel records; Apply writes only after the preview has been reviewed.</p>
+      <div id="result"></div>
+      <section class="card">
+        <h3>Roadmap package</h3>
+        <div class="row" style="align-items:flex-start">
+          <div class="grow">
+            <label for="ri-file">JSON package</label>
+            <input id="ri-file" type="file" accept=".json,application/json">
+          </div>
+        </div>
+        <div class="field" style="margin-top:12px">
+          <label for="ri-json">Or paste package JSON</label>
+          <textarea id="ri-json" rows="14" style="width:100%;font-family:ui-monospace,
+            SFMono-Regular,monospace;font-size:12px"
+            placeholder='{"schemaVersion":"grid-atlas.sync.v1","packageType":"maturity_assessment_roadmap","useCases":[]}'></textarea>
+        </div>
+        <div class="row" style="gap:8px">
+          <button class="action secondary" data-act="preview" data-busy="Previewing…">
+            Preview import</button>
+          <button class="action" data-act="apply" data-busy="Importing…">
+            Apply import</button>
+        </div>
+      </section>
+      <section class="card">
+        <h3>Expected source</h3>
+        <p class="small muted">Export endpoint:
+          <code>/api/exports/value-flywheel-roadmap?assessmentId=&lt;id&gt;</code>
+          from the Data &amp; AI Maturity Assessment app.</p>
+      </section>`;
+
+    $("#ri-file").addEventListener("change", async () => {
+      const file = $("#ri-file").files && $("#ri-file").files[0];
+      if (!file) return;
+      $("#ri-json").value = await file.text();
+      $("#result").innerHTML = banner("info", `${file.name} loaded. Preview before applying.`);
+    });
+
+    onActions(main, {
+      preview: async () => {
+        const payload = await readRoadmapImportPackage();
+        renderRoadmapImportResult(await api("/sync/maturity-roadmap/preview", {
+          method: "POST",
+          body: JSON.stringify({ package: payload, dry_run: true }),
+        }), false);
+      },
+      apply: async () => {
+        const payload = await readRoadmapImportPackage();
+        if (!confirm("Apply this roadmap package to the operational portfolio?")) return;
+        renderRoadmapImportResult(await api("/sync/maturity-roadmap/apply", {
+          method: "POST",
+          body: JSON.stringify({ package: payload, dry_run: false }),
+        }), true);
+      },
+    });
+  }
+
+  async function readRoadmapImportPackage() {
+    let raw = ($("#ri-json").value || "").trim();
+    if (!raw) {
+      const file = $("#ri-file").files && $("#ri-file").files[0];
+      if (file) raw = await file.text();
+    }
+    if (!raw) throw new Error("Choose a roadmap package JSON file or paste JSON.");
+    let payload;
+    try {
+      payload = JSON.parse(raw);
+    } catch (error) {
+      throw new Error(`Package is not valid JSON: ${error.message}`);
+    }
+    const pkg = payload.package && typeof payload.package === "object"
+      ? payload.package
+      : payload;
+    const cases = pkg.useCases || pkg.use_cases || [];
+    if (!Array.isArray(cases) || cases.length === 0) {
+      throw new Error("Package must include a non-empty useCases array.");
+    }
+    return pkg;
+  }
+
+  function renderRoadmapImportResult(result, applied) {
+    const useCases = result.useCases || {};
+    const summary = result.summary || {};
+    const idMap = result.idMap || {};
+    $("#result").innerHTML = `
+      ${banner(applied ? "ok" : "info", applied
+        ? "Roadmap package imported."
+        : "Preview complete. Nothing has been written.")}
+      <div class="stat" style="margin:12px 0">
+        ${metricCell("Incoming", num(useCases.incoming ?? Object.keys(idMap).length))}
+        ${metricCell("Mapped", num(useCases.mapped ?? summary.mapped ?? 0))}
+        ${metricCell("Create / match", num(useCases.toCreateOrTitleMatch
+          ?? ((summary.created || 0) + (summary.updated || 0))))}
+        ${metricCell("Roadmap items", num(result.roadmapItems ?? 0))}
+      </div>
+      ${applied ? `<table>
+        <thead><tr><th>Action</th><th class="num">Count</th></tr></thead>
+        <tbody>${Object.entries(summary).map(([k, v]) => `
+          <tr><td>${text(k)}</td><td class="num">${num(v)}</td></tr>`).join("")}</tbody>
+      </table>` : ""}
+      <p class="small muted">Source app: ${text(result.sourceApp || "data-ai-maturity-assessment")}</p>`;
+  }
+
+  // ---------------------------------------------------------------------
   // Accounts
   // ---------------------------------------------------------------------
   /*
@@ -3357,6 +3700,8 @@
     whatif: viewWhatIf,
     dependencies: viewDependencies,
     trend: viewTrend,
+    executive: viewExecutive,
+    roadmap_import: viewRoadmapImport,
     accounts: viewAccounts,
     kb: viewKnowledge,
     proposals: viewProposals,
@@ -3422,6 +3767,7 @@
         ["trend", "Trend over time"],
         ["flow", "Value flow"],
         ["research", "Company research"],
+        ["executive", "Executive export"],
       ],
     },
     {
@@ -3430,6 +3776,7 @@
       hint: "Create and document new work",
       items: [
         ["generate", "Generate use cases"],
+        ["roadmap_import", "Import roadmap"],
         ["proposals", "Write a proposal"],
         ["kb", "Knowledge base"],
         ["artifacts", "What's built"],

@@ -86,14 +86,29 @@ async def _gather_context(use_case_id: int) -> tuple[dict, dict]:
 
     assumption_lines: list[str] = []
     if used_keys:
-        found = await db.fetch(
-            "SELECT key, label, value, unit FROM value_assumptions "
-            "WHERE key = ANY($1::text[])", list(dict.fromkeys(used_keys)))
+        account_id = await accounts.current()
+        if account_id is not None:
+            found = await db.fetch(
+                """SELECT DISTINCT ON (key) key, label, value, unit
+                   FROM value_assumptions
+                   WHERE key = ANY($1::text[])
+                     AND (account_id=$2 OR account_id IS NULL)
+                   ORDER BY key, (account_id IS NULL)""",
+                list(dict.fromkeys(used_keys)), account_id)
+        else:
+            found = await db.fetch(
+                "SELECT key, label, value, unit FROM value_assumptions "
+                "WHERE key = ANY($1::text[])", list(dict.fromkeys(used_keys)))
         # Research confidence, when the instance has been calibrated.
         confidence: dict[str, str] = {}
         try:
-            rows = await db.fetch(
-                "SELECT key, confidence FROM assumption_research")
+            if account_id is not None:
+                rows = await db.fetch(
+                    "SELECT key, confidence FROM assumption_research WHERE account_id=$1",
+                    account_id)
+            else:
+                rows = await db.fetch(
+                    "SELECT key, confidence FROM assumption_research")
             confidence = {r["key"]: r["confidence"] for r in rows}
         except Exception:  # noqa: BLE001 - table absent on an un-researched install
             pass
@@ -338,11 +353,18 @@ async def execute_create_proposal(payload: dict, actor: str) -> dict:
     folder_id = folder["id"] if folder else None
 
     if existing_id:
+        account_id = await accounts.current()
         # Supersede: snapshot the current text as a version, then overwrite. This is
         # why regenerating cannot lose a hand edit.
-        current = await db.fetchrow(
-            "SELECT title, body_md, summary, version FROM kb_articles WHERE id = $1",
-            existing_id)
+        if account_id is not None:
+            current = await db.fetchrow(
+                """SELECT title, body_md, summary, version
+                   FROM kb_articles WHERE id = $1 AND account_id=$2""",
+                existing_id, account_id)
+        else:
+            current = await db.fetchrow(
+                "SELECT title, body_md, summary, version FROM kb_articles WHERE id = $1",
+                existing_id)
         if current is not None:
             await db.execute("""
                 INSERT INTO kb_article_versions (article_id, version, title,
@@ -352,13 +374,24 @@ async def execute_create_proposal(payload: dict, actor: str) -> dict:
             """, existing_id, current["version"], current["title"],
                 current["body_md"], current["summary"],
                 "Superseded by a regenerated proposal", actor)
-        row = await db.fetchrow("""
-            UPDATE kb_articles SET title = $2, body_md = $3, summary = $4,
-                   generated_by = $5, version = version + 1,
-                   updated_by = $6, updated_at = now()
-            WHERE id = $1 RETURNING id, slug, version
-        """, existing_id, payload["title"], payload["body_md"],
-            payload["summary"], _GENERATOR, actor)
+        if account_id is not None:
+            row = await db.fetchrow("""
+                UPDATE kb_articles SET title = $2, body_md = $3, summary = $4,
+                       generated_by = $5, version = version + 1,
+                       updated_by = $6, updated_at = now()
+                WHERE id = $1 AND account_id=$7 RETURNING id, slug, version
+            """, existing_id, payload["title"], payload["body_md"],
+                payload["summary"], _GENERATOR, actor, account_id)
+        else:
+            row = await db.fetchrow("""
+                UPDATE kb_articles SET title = $2, body_md = $3, summary = $4,
+                       generated_by = $5, version = version + 1,
+                       updated_by = $6, updated_at = now()
+                WHERE id = $1 RETURNING id, slug, version
+            """, existing_id, payload["title"], payload["body_md"],
+                payload["summary"], _GENERATOR, actor)
+        if row is None:
+            raise HTTPException(404, "Proposal article not found")
         await write_audit("kb_article", existing_id, "regenerate_proposal", actor,
                           {"use_case_id": use_case_id})
         return {"article_id": row["id"], "slug": row["slug"],
@@ -366,13 +399,23 @@ async def execute_create_proposal(payload: dict, actor: str) -> dict:
 
     taken = {r["slug"] for r in await db.fetch("SELECT slug FROM kb_articles")}
     slug = kb.slugify(payload["title"], existing=taken)
-    row = await db.fetchrow("""
-        INSERT INTO kb_articles (title, slug, folder_id, body_md, summary, tags,
-            status, generated_by, created_by, updated_by)
-        VALUES ($1,$2,$3,$4,$5,$6,'draft',$7,$8,$8)
-        RETURNING id, slug, version
-    """, payload["title"], slug, folder_id, payload["body_md"], payload["summary"],
-        ["proposal", "generated"], _GENERATOR, actor)
+    account_id = await accounts.current()
+    if account_id is not None:
+        row = await db.fetchrow("""
+            INSERT INTO kb_articles (account_id, title, slug, folder_id, body_md,
+                summary, tags, status, generated_by, created_by, updated_by)
+            VALUES ($1,$2,$3,$4,$5,$6,$7,'draft',$8,$9,$9)
+            RETURNING id, slug, version
+        """, account_id, payload["title"], slug, folder_id, payload["body_md"],
+            payload["summary"], ["proposal", "generated"], _GENERATOR, actor)
+    else:
+        row = await db.fetchrow("""
+            INSERT INTO kb_articles (title, slug, folder_id, body_md, summary, tags,
+                status, generated_by, created_by, updated_by)
+            VALUES ($1,$2,$3,$4,$5,$6,'draft',$7,$8,$8)
+            RETURNING id, slug, version
+        """, payload["title"], slug, folder_id, payload["body_md"], payload["summary"],
+            ["proposal", "generated"], _GENERATOR, actor)
 
     # Attach it to the use case, which is what makes it findable from the portfolio.
     await db.execute("""

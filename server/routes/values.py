@@ -2,6 +2,7 @@
 from fastapi import APIRouter, HTTPException, Request
 from pydantic import BaseModel
 
+from .. import accounts
 from ..common import current_user, row_to_dict, rows_to_list, write_audit
 from ..db import db
 
@@ -20,6 +21,17 @@ class ValueIn(BaseModel):
 
 @router.get("")
 async def list_values(use_case_id: int | None = None):
+    account_id = await accounts.current()
+    if account_id is not None:
+        if use_case_id is not None:
+            rows = await db.fetch(
+                "SELECT * FROM value_records WHERE account_id=$1 AND use_case_id=$2 ORDER BY id",
+                account_id, use_case_id)
+        else:
+            rows = await db.fetch(
+                "SELECT * FROM value_records WHERE account_id=$1 ORDER BY id",
+                account_id)
+        return rows_to_list(rows)
     if use_case_id is not None:
         rows = await db.fetch("SELECT * FROM value_records WHERE use_case_id=$1 ORDER BY id", use_case_id)
     else:
@@ -29,7 +41,13 @@ async def list_values(use_case_id: int | None = None):
 
 @router.get("/{rec_id}")
 async def get_value(rec_id: int):
-    row = await db.fetchrow("SELECT * FROM value_records WHERE id=$1", rec_id)
+    account_id = await accounts.current()
+    if account_id is not None:
+        row = await db.fetchrow(
+            "SELECT * FROM value_records WHERE id=$1 AND account_id=$2",
+            rec_id, account_id)
+    else:
+        row = await db.fetchrow("SELECT * FROM value_records WHERE id=$1", rec_id)
     if row is None:
         raise HTTPException(404, "Value record not found")
     return row_to_dict(row)
@@ -40,13 +58,23 @@ async def create_value(body: ValueIn, request: Request):
     if body.kind not in ("hypothesized", "realized"):
         raise HTTPException(422, "kind must be 'hypothesized' or 'realized'")
     actor = current_user(request)
-    row = await db.fetchrow(
-        """INSERT INTO value_records
-           (use_case_id, kind, metric_type, amount, unit, fiscal_period, confidence, created_by)
-           VALUES ($1,$2,$3,$4,$5,$6,$7,$8) RETURNING *""",
-        body.use_case_id, body.kind, body.metric_type, body.amount, body.unit,
-        body.fiscal_period, body.confidence, actor,
-    )
+    account_id = await accounts.current()
+    if account_id is not None:
+        row = await db.fetchrow(
+            """INSERT INTO value_records
+               (account_id, use_case_id, kind, metric_type, amount, unit,
+                fiscal_period, confidence, created_by)
+               VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9) RETURNING *""",
+            account_id, body.use_case_id, body.kind, body.metric_type, body.amount,
+            body.unit, body.fiscal_period, body.confidence, actor)
+    else:
+        row = await db.fetchrow(
+            """INSERT INTO value_records
+               (use_case_id, kind, metric_type, amount, unit, fiscal_period, confidence, created_by)
+               VALUES ($1,$2,$3,$4,$5,$6,$7,$8) RETURNING *""",
+            body.use_case_id, body.kind, body.metric_type, body.amount, body.unit,
+            body.fiscal_period, body.confidence, actor,
+        )
     if row is None:
         raise HTTPException(503, "Database unavailable")
     await write_audit("value_record", row["id"], "create", actor, body.model_dump())
@@ -56,13 +84,23 @@ async def create_value(body: ValueIn, request: Request):
 @router.put("/{rec_id}")
 async def update_value(rec_id: int, body: ValueIn, request: Request):
     actor = current_user(request)
-    row = await db.fetchrow(
-        """UPDATE value_records SET
-           use_case_id=$1, kind=$2, metric_type=$3, amount=$4, unit=$5,
-           fiscal_period=$6, confidence=$7 WHERE id=$8 RETURNING *""",
-        body.use_case_id, body.kind, body.metric_type, body.amount, body.unit,
-        body.fiscal_period, body.confidence, rec_id,
-    )
+    account_id = await accounts.current()
+    if account_id is not None:
+        row = await db.fetchrow(
+            """UPDATE value_records SET
+               use_case_id=$1, kind=$2, metric_type=$3, amount=$4, unit=$5,
+               fiscal_period=$6, confidence=$7
+               WHERE id=$8 AND account_id=$9 RETURNING *""",
+            body.use_case_id, body.kind, body.metric_type, body.amount, body.unit,
+            body.fiscal_period, body.confidence, rec_id, account_id)
+    else:
+        row = await db.fetchrow(
+            """UPDATE value_records SET
+               use_case_id=$1, kind=$2, metric_type=$3, amount=$4, unit=$5,
+               fiscal_period=$6, confidence=$7 WHERE id=$8 RETURNING *""",
+            body.use_case_id, body.kind, body.metric_type, body.amount, body.unit,
+            body.fiscal_period, body.confidence, rec_id,
+        )
     if row is None:
         raise HTTPException(404, "Value record not found")
     await write_audit("value_record", rec_id, "update", actor, body.model_dump())
@@ -72,6 +110,12 @@ async def update_value(rec_id: int, body: ValueIn, request: Request):
 @router.delete("/{rec_id}")
 async def delete_value(rec_id: int, request: Request):
     actor = current_user(request)
-    res = await db.execute("DELETE FROM value_records WHERE id=$1", rec_id)
+    account_id = await accounts.current()
+    if account_id is not None:
+        res = await db.execute(
+            "DELETE FROM value_records WHERE id=$1 AND account_id=$2",
+            rec_id, account_id)
+    else:
+        res = await db.execute("DELETE FROM value_records WHERE id=$1", rec_id)
     await write_audit("value_record", rec_id, "delete", actor)
     return {"deleted": res is not None}
