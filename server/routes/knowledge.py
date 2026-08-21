@@ -300,6 +300,8 @@ async def create_folder(body: FolderIn, request: Request):
         INSERT INTO kb_folders (account_id, name, parent_id, path, created_by)
         VALUES ($1,$2,$3,$4,$5) RETURNING id, name, parent_id, path
     """, account_id, body.name.strip(), body.parent_id, path, actor)
+    if row is None:
+        raise HTTPException(503, "Database unavailable")
     await write_audit("kb_folder", row["id"], "create", actor, {"path": path})
     return dict(row)
 
@@ -519,6 +521,8 @@ async def create_article(body: ArticleIn, request: Request):
         RETURNING id, title, slug, status, version, created_at
     """, account_id, body.title.strip(), slug, body.folder_id, body.body_md,
         body.summary, _clean_tags(body.tags), body.status, actor)
+    if row is None:
+        raise HTTPException(503, "Database unavailable")
     await write_audit("kb_article", row["id"], "create", actor,
                       {"slug": slug, "title": body.title})
     return dict(row)
@@ -962,6 +966,8 @@ async def upload_attachment(slug: str, request: Request,
         RETURNING id, filename, mime_type, size_bytes, storage, uploaded_at
     """, article["id"], file.filename or filename, mime, len(content), storage,
         volume_path, None if storage == "volume" else content, checksum, actor)
+    if row is None:
+        raise HTTPException(503, "Database unavailable")
 
     await write_audit("kb_attachment", row["id"], "upload", actor,
                       {"slug": slug, "bytes": len(content), "storage": storage})

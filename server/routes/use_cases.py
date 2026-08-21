@@ -459,6 +459,8 @@ async def update_use_case(uc_id: int, body: UseCaseIn, request: Request):
         body.realized_override_enabled, body.realized_override_amount, body.realized_override_note,
         body.status_source, uc_id,
     )
+    if row is None:
+        raise HTTPException(503, "Database unavailable")
     await write_audit("use_case", uc_id, "update", actor, {"title": body.title, "status": body.status})
 
     # Addition A: delivering a use case implies its required data has landed.
@@ -505,6 +507,8 @@ async def change_status(uc_id: int, body: StatusChange, request: Request):
         "UPDATE use_cases SET status=$1, updated_at=now() WHERE id=$2 RETURNING *",
         target, uc_id,
     )
+    if row is None:
+        raise HTTPException(503, "Database unavailable")
     await write_audit("use_case", uc_id, "status_change", actor,
                       {"from": prev_status, "to": target,
                        "via": "advance" if body.advance else "inline"})

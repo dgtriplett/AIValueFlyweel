@@ -35,6 +35,21 @@ async def export_template():
             cell.fill = hdr_fill
             cell.font = hdr_font
 
+    def add_column_validation(ws, dv, column):
+        """Attach `dv` to `column` over the DATA rows only, if there are any.
+
+        On a fresh install every sheet is header-only, so `max_row` is 1 and the
+        obvious f"{column}2:{column}{ws.max_row}" spells "E2:E1" — a reversed range
+        that makes the workbook invalid, which turned the very first template a new
+        customer downloads into a 500. An empty sheet simply gets no dropdown: there
+        is no data cell to constrain, and the validation reappears on the next
+        export once rows exist.
+        """
+        if ws.max_row < 2:
+            return
+        ws.add_data_validation(dv)
+        dv.add(f"{column}2:{column}{ws.max_row}")
+
     # Instructions sheet
     ws0 = wb.active
     ws0.title = "Instructions"
@@ -59,8 +74,7 @@ async def export_template():
     for a in assets:
         ws1.append([a["id"], a["source_category"], a["module"], a["vendor"] or "", a["ingestion_status"]])
     dv = DataValidation(type="list", formula1='"not_started,landed,curated,governed"', allow_blank=False)
-    ws1.add_data_validation(dv)
-    dv.add(f"E2:E{ws1.max_row}")
+    add_column_validation(ws1, dv, "E")
     for r in range(2, ws1.max_row + 1):
         ws1.cell(row=r, column=4).fill = edit_fill
         ws1.cell(row=r, column=5).fill = edit_fill
@@ -79,8 +93,7 @@ async def export_template():
         ws2.append([u["id"], u["title"], u["domain"], u["phase"], u["status"], u["domain"],
                     float(u["priority_score"]) if u["priority_score"] else "", float(u["value_mm"]) if u["value_mm"] else "", ""])
     dv2 = DataValidation(type="list", formula1='"not_started,scoping,in_progress,live,value_realized"', allow_blank=False)
-    ws2.add_data_validation(dv2)
-    dv2.add(f"E2:E{ws2.max_row}")
+    add_column_validation(ws2, dv2, "E")
     for r in range(2, ws2.max_row + 1):
         for c in (5, 6, 7, 8, 9):
             ws2.cell(row=r, column=c).fill = edit_fill

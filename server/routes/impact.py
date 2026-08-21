@@ -5,13 +5,15 @@ Given a focal node (data asset or use case), traverse the dependency graph
 downstream impact, grouped by LOB, with hypothesized value and how many use
 cases would become shovel-ready.
 """
-from fastapi import APIRouter
+from fastapi import APIRouter, HTTPException
 
 from ..db import db
 from ..readiness import READY_STATUSES
 from ..value_engine import compute_value, load_assumptions
 
 router = APIRouter(prefix="/impact", tags=["impact"])
+
+_NODE_KINDS = ("asset", "uc", "lob")
 
 
 async def _load_graph():
@@ -28,6 +30,20 @@ def _asset_key(i):
 
 def _uc_key(i):
     return f"uc-{i}"
+
+
+def _split_node_id(node_id: str) -> tuple[str, int] | None:
+    """Split 'asset-12' / 'uc-3' / 'lob-7' into ('asset', 12); None if malformed.
+
+    Every caller used to do `int(nid.split("-")[1])` inline, which raises IndexError
+    on a bare 'bogus' and ValueError on 'asset-abc'. Neither is an HTTPException, so
+    both surfaced as a 500 on a request the client got wrong — see `blast_radius`,
+    which turns the None into the 422 the typed `{id:int}` routes already return.
+    """
+    kind, _, raw = node_id.partition("-")
+    if kind not in _NODE_KINDS or not raw.isdigit():
+        return None
+    return kind, int(raw)
 
 
 @router.get("/top-asset")
@@ -61,6 +77,14 @@ async def blast_radius(node_id: str, max_rings: int = 4):
     node_id: 'asset-<id>' or 'uc-<id>' or 'lob-<id>'.
     Returns rings (list of node ids per depth), node metadata, and a summary.
     """
+    # Validated before the graph load so a typo costs nothing and, more to the
+    # point, cannot reach the `int(...)` calls below as a 500.
+    parsed = _split_node_id(node_id)
+    if parsed is None:
+        raise HTTPException(
+            422, f"node_id must be 'asset-<id>', 'uc-<id>' or 'lob-<id>', not {node_id!r}")
+    kind, focal_id = parsed
+
     ucs, assets, requires, enables = await _load_graph()
     uc_by_id = {u["id"]: u for u in ucs}
     asset_by_id = {a["id"]: a for a in assets}
@@ -80,8 +104,8 @@ async def blast_radius(node_id: str, max_rings: int = 4):
 
     # seed set
     seeds: list[str] = []
-    if node_id.startswith("lob-"):
-        lob_id = int(node_id.split("-")[1])
+    if kind == "lob":
+        lob_id = focal_id
         # seed with all assets owned by the LOB + all UCs owned by the LOB
         seeds = [_asset_key(a["id"]) for a in assets if a["owning_lob_id"] == lob_id]
         seeds += [_uc_key(u["id"]) for u in ucs if u["lob_id"] == lob_id]
@@ -107,8 +131,15 @@ async def blast_radius(node_id: str, max_rings: int = 4):
 
     # node metadata
     def node_meta(nid: str) -> dict | None:
-        if nid.startswith("asset-"):
-            a = asset_by_id.get(int(nid.split("-")[1]))
+        # Unknown/unparseable ids are "no metadata", not an error: callers already
+        # drop the None, and the ring ids are built by _asset_key/_uc_key so this
+        # only bites if the graph ever grows a node kind this function predates.
+        split = _split_node_id(nid)
+        if split is None:
+            return None
+        nkind, nid_int = split
+        if nkind == "asset":
+            a = asset_by_id.get(nid_int)
             if not a:
                 return None
             return {
@@ -116,7 +147,7 @@ async def blast_radius(node_id: str, max_rings: int = 4):
                 "label": a["module"], "sublabel": a["source_system"],
                 "lob_id": a["owning_lob_id"], "ingestion_status": a["ingestion_status"],
             }
-        u = uc_by_id.get(int(nid.split("-")[1]))
+        u = uc_by_id.get(nid_int)
         if not u:
             return None
         return {
@@ -153,7 +184,11 @@ async def blast_radius(node_id: str, max_rings: int = 4):
     # readiness flips: if the focal node is an asset that is not yet ready,
     # count downstream UCs that would become shovel-ready once it is ready.
     becomes_ready = 0
-    focal_asset_ids = {int(s.split("-")[1]) for s in seeds if s.startswith("asset-")}
+    focal_asset_ids = set()
+    for s in seeds:
+        split = _split_node_id(s)
+        if split is not None and split[0] == "asset":
+            focal_asset_ids.add(split[1])
     if focal_asset_ids:
         # for each downstream UC, recompute readiness assuming focal assets are governed
         # get required assets per downstream UC
@@ -187,8 +222,8 @@ async def blast_radius(node_id: str, max_rings: int = 4):
             if hypo_ready and not now_ready and prereqs_ok:
                 becomes_ready += 1
 
-    focal = nodes.get(node_id) if not node_id.startswith("lob-") else {
-        "node_id": node_id, "type": "lob", "id": int(node_id.split("-")[1]), "label": f"LOB {node_id}",
+    focal = nodes.get(node_id) if kind != "lob" else {
+        "node_id": node_id, "type": "lob", "id": focal_id, "label": f"LOB {node_id}",
     }
 
     return {

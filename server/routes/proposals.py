@@ -416,6 +416,8 @@ async def execute_create_proposal(payload: dict, actor: str) -> dict:
             RETURNING id, slug, version
         """, payload["title"], slug, folder_id, payload["body_md"], payload["summary"],
             ["proposal", "generated"], _GENERATOR, actor)
+    if row is None:
+        raise HTTPException(503, "Database unavailable")
 
     # Attach it to the use case, which is what makes it findable from the portfolio.
     await db.execute("""
