@@ -209,9 +209,22 @@ app.include_router(_demo.router, prefix="/api")
 
 @app.get("/api/health")
 async def health():
+    """Liveness plus an honest database verdict.
+
+    Reports unhealthy — with a 503 — when Lakebase is CONFIGURED but unreachable.
+    Previously this said "healthy" through a full outage, because a failed pool fell
+    into the same demo-mode branch as an unconfigured one: reads returned empty, the
+    UI showed "no data yet" over a populated database, and the probe agreed
+    everything was fine. An outage that reports healthy is one nobody gets paged for.
+
+    A genuinely unconfigured Lakebase (no PGHOST) stays healthy: empty reads are the
+    right answer for a local checkout or a demo, and failing the probe there would
+    make a working install look broken.
+    """
     pool = await db.get_pool()
     connected = False
     counts: dict = {}
+    query_error: str | None = None
     if pool is not None:
         try:
             async with pool.acquire() as conn:
@@ -219,9 +232,15 @@ async def health():
                 for table in ("lobs", "data_assets", "use_cases"):
                     counts[table] = await conn.fetchval(f"SELECT count(*) FROM {table}")
         except Exception as exc:  # noqa: BLE001
-            counts = {"error": str(exc)}
-    return {
-        "status": "healthy",
+            query_error = str(exc)
+            counts = {"error": query_error}
+
+    # Configured-but-unreachable, or connected but unable to query: both mean the
+    # data this app exists to show is not being shown.
+    degraded = db.is_degraded or (pool is not None and not connected) \
+        or query_error is not None
+    payload = {
+        "status": "unhealthy" if degraded else "healthy",
         "app": "grid-atlas",
         "app_env": app_env(),
         "environment": "databricks" if IS_DATABRICKS_APP else "local",
@@ -234,6 +253,15 @@ async def health():
         # So a "why did I get a 429?" report can be answered without a redeploy.
         "rate_limits": limits.snapshot(),
     }
+    if degraded:
+        # Named plainly so the operator sees the cause in the probe output rather
+        # than having to go and read the app log.
+        payload["error"] = db.last_error or query_error or "database unreachable"
+        payload["detail"] = (
+            "Lakebase is configured (PGHOST is set) but unreachable, so reads are "
+            "empty and writes return 503. This is NOT demo mode.")
+        return JSONResponse(payload, status_code=503)
+    return payload
 
 
 @app.get("/api/runtime")

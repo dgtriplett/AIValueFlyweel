@@ -41,20 +41,58 @@ _AUTH_ERRORS = (
 
 
 class DatabasePool:
+    """The Lakebase pool, plus an honest account of why there isn't one.
+
+    TWO REASONS THERE IS NO POOL, AND THEY ARE NOT THE SAME
+    -------------------------------------------------------
+    `PGHOST` unset means nobody configured Lakebase: a local checkout, a demo, a
+    first boot before `scripts/deploy.py` has run. Empty reads are the CORRECT
+    answer there, and the app is working as intended.
+
+    `PGHOST` set but the pool failing to open means the database this app depends on
+    is unreachable — a bad OAuth token, a DNS failure, a Lakebase outage. The rows
+    exist; we just cannot see them.
+
+    Collapsing both into one `is_demo_mode` flag made an outage indistinguishable
+    from a demo: reads returned `[]`, so every screen rendered "no data yet" over a
+    live customer's populated database, and /api/health still said "healthy". That
+    is the worst possible failure — silent, total, and reported as fine. So the two
+    states are tracked separately and `is_degraded` is what /api/health must read.
+    """
+
     def __init__(self) -> None:
         self._pool: Optional[asyncpg.Pool] = None
-        self._demo_mode = False
+        self._unconfigured = False
+        self._last_error: Optional[str] = None
         self._lock = asyncio.Lock()
 
     @property
     def is_demo_mode(self) -> bool:
-        return self._demo_mode
+        """True only when Lakebase is EXPLICITLY unconfigured (no PGHOST).
+
+        Deliberately does NOT cover connection failure. A caller asking "am I in
+        demo mode" is asking "is an empty result expected", and during an outage it
+        very much is not.
+        """
+        return self._unconfigured
+
+    @property
+    def is_degraded(self) -> bool:
+        """True when Lakebase is configured but unreachable — a real outage."""
+        return self._last_error is not None and self._pool is None
+
+    @property
+    def last_error(self) -> Optional[str]:
+        """The most recent pool-creation failure, for /api/health to report."""
+        return self._last_error
 
     async def get_pool(self) -> Optional[asyncpg.Pool]:
         if not os.environ.get("PGHOST"):
-            self._demo_mode = True
+            self._unconfigured = True
+            self._last_error = None
             return None
 
+        self._unconfigured = False
         if self._pool is not None:
             return self._pool
 
@@ -74,16 +112,16 @@ class DatabasePool:
                     max_size=10,
                     command_timeout=30,
                 )
-                self._demo_mode = False
+                self._last_error = None
             except Exception as exc:  # noqa: BLE001
-                # Demo mode is a legitimate state (no Lakebase configured), but
-                # arriving here with PGHOST set means a real failure the operator
-                # needs to see, so log at warning with the cause.
-                logger.warning(
-                    "Lakebase connection failed (%s: %s) — entering demo mode; "
-                    "reads return empty and writes are no-ops",
+                # NOT demo mode: PGHOST is set, so somebody expects real data and is
+                # not getting it. Recorded so /api/health can report unhealthy
+                # instead of serving empty reads under a green status.
+                logger.error(
+                    "Lakebase connection failed (%s: %s) — reads will be empty and "
+                    "writes will 503 until it recovers",
                     type(exc).__name__, exc)
-                self._demo_mode = True
+                self._last_error = f"{type(exc).__name__}: {exc}"
                 self._pool = None
         return self._pool
 

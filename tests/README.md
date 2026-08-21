@@ -58,6 +58,8 @@ that has never talked to Databricks.
 | `test_setup.py` | The `/api/setup/*` permission probes and the GRANT statements they emit. |
 | `test_deploy.py` | `deploy.py`'s YAML rewriting, **and that `app.yaml` ships with no baked-in environment** (this has caught a real regression). |
 | `test_extractor_download.py` | The downloadable cross-workspace schema extractor is served intact and runnable. |
+| `test_path_traversal.py` | The SPA catch-all cannot be walked out of `frontend/dist`: **`GET /..%2f..%2fapp.py` returned this app's source pre-auth**. Covers the encoded spellings that survive router normalization (the plain `/../../` one never reproduced the bug), symlink escape, and that real assets and SPA deep links still serve. |
+| `test_db_degraded.py` | A Lakebase **outage is not demo mode**: `PGHOST` unset means empty reads are correct, but `PGHOST` set with a failing pool means a live database is unreachable — so `/api/health` returns 503 instead of reporting "healthy" while every screen shows "no data yet" over a populated database. |
 
 ## Why a fake DB instead of a real one
 
