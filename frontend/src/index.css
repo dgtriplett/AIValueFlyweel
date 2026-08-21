@@ -1,0 +1,217 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+@layer base {
+  html {
+    @apply font-sans;
+    font-weight: 400;
+    line-height: 1.5;
+    -webkit-font-smoothing: antialiased;
+    -moz-osx-font-smoothing: grayscale;
+  }
+
+  body {
+    @apply bg-navy-900 text-navy-300 font-sans;
+    -webkit-font-smoothing: antialiased;
+    -moz-osx-font-smoothing: grayscale;
+  }
+
+  /* Headings are lighter than Tailwind's default bold and always pure white —
+     against the dark navy, bold white reads as shouting. */
+  h1,
+  h2,
+  h3,
+  h4,
+  h5,
+  h6 {
+    font-weight: 500;
+    color: #fff;
+  }
+
+  button {
+    font-family: inherit;
+  }
+}
+
+@layer components {
+  .card {
+    background-color: #1b3139;
+    border: 1px solid #2a4a56;
+    border-radius: 8px;
+    padding: 20px;
+    box-shadow: 0 1px 3px rgb(0 0 0 / 30%);
+  }
+
+  .btn-primary {
+    background-color: #ff3621;
+    color: #fff;
+    font-weight: 500;
+    padding: 8px 16px;
+    border-radius: 4px;
+    transition: background-color 0.2s;
+    display: inline-flex;
+    align-items: center;
+    gap: 8px;
+  }
+  .btn-primary:hover:not(:disabled) {
+    background-color: #bd2b26;
+  }
+  .btn-primary:disabled {
+    background-color: #2a4a56;
+    color: #618794;
+    cursor: not-allowed;
+  }
+
+  .btn-secondary {
+    background-color: transparent;
+    color: #c4ccd6;
+    border: 1px solid #2a4a56;
+    font-weight: 500;
+    padding: 8px 16px;
+    border-radius: 4px;
+    transition: all 0.2s;
+    display: inline-flex;
+    align-items: center;
+    gap: 8px;
+  }
+  .btn-secondary:hover:not(:disabled) {
+    background-color: #143d4a;
+    color: #fff;
+    border-color: #618794;
+  }
+
+  .input-field {
+    background-color: #1b3139;
+    border: 1px solid #2a4a56;
+    border-radius: 4px;
+    padding: 8px 12px;
+    color: #fff;
+    font-family: inherit;
+    font-size: 14px;
+    width: 100%;
+    transition:
+      border-color 0.15s,
+      box-shadow 0.15s;
+  }
+  .input-field:focus {
+    outline: none;
+    border-color: #2272b4;
+    box-shadow: 0 0 0 2px rgb(34 114 180 / 25%);
+  }
+  .input-field::placeholder {
+    color: #618794;
+  }
+
+  /* Severity badges. The alpha-composited backgrounds keep them legible on both
+     the card and the table-row hover tint. */
+  .badge-critical {
+    @apply rounded-full px-2 py-0.5 text-xs font-semibold;
+    background: rgb(152 16 42 / 25%);
+    color: #ff9e94;
+    border: 1px solid rgb(152 16 42 / 50%);
+  }
+  .badge-high {
+    @apply rounded-full px-2 py-0.5 text-xs font-semibold;
+    background: rgb(255 171 0 / 18%);
+    color: #ffcc66;
+    border: 1px solid rgb(255 171 0 / 40%);
+  }
+  .badge-medium {
+    @apply rounded-full px-2 py-0.5 text-xs font-semibold;
+    background: rgb(34 114 180 / 18%);
+    color: #8acaff;
+    border: 1px solid rgb(34 114 180 / 40%);
+  }
+  .badge-low {
+    @apply rounded-full px-2 py-0.5 text-xs font-semibold;
+    background: rgb(0 169 114 / 18%);
+    color: #9ed6c4;
+    border: 1px solid rgb(0 169 114 / 40%);
+  }
+  .badge-electric {
+    @apply rounded-full px-2 py-0.5 text-xs font-semibold;
+    background: rgb(255 54 33 / 14%);
+    color: #ff9e94;
+    border: 1px solid rgb(255 54 33 / 40%);
+  }
+  .badge-muted {
+    @apply rounded-full px-2 py-0.5 text-xs font-semibold;
+    background: rgb(97 135 148 / 18%);
+    color: #c4ccd6;
+    border: 1px solid #2a4a56;
+  }
+}
+
+/* Dark scrollbars — the default light ones cut a bright stripe down every panel. */
+::-webkit-scrollbar {
+  width: 8px;
+  height: 8px;
+}
+::-webkit-scrollbar-track {
+  background-color: #0b2026;
+}
+::-webkit-scrollbar-thumb {
+  background-color: #2a4a56;
+  border-radius: 4px;
+}
+::-webkit-scrollbar-thumb:hover {
+  background-color: #618794;
+}
+
+::selection {
+  background-color: rgb(255 54 33 / 30%);
+}
+
+/* The use-case drawer's entrance. Hand-written rather than a Tailwind animation
+   because the class pair `animate-in slide-in-from-right` predates the config. */
+@keyframes slideInRight {
+  0% {
+    transform: translateX(100%);
+    opacity: 0;
+  }
+  to {
+    transform: translateX(0);
+    opacity: 1;
+  }
+}
+.animate-in.slide-in-from-right {
+  animation: slideInRight 0.22s cubic-bezier(0.16, 1, 0.3, 1) forwards;
+}
+
+html {
+  scroll-behavior: smooth;
+}
+
+/* Printing an exec one-pager must print THAT SHEET, not the app around it.
+   Hiding everything and re-showing the sheet is the only approach that survives
+   the sheet being rendered inside a fixed-position modal overlay. */
+@media print {
+  body * {
+    visibility: hidden;
+  }
+  .exec-sheet,
+  .exec-sheet * {
+    visibility: visible;
+  }
+  .exec-sheet {
+    position: absolute;
+    left: 0;
+    top: 0;
+    width: 100%;
+    max-width: none;
+    max-height: none;
+    overflow: visible;
+    box-shadow: none;
+    border-radius: 0;
+    padding: 24px !important;
+  }
+  .exec-sheet table,
+  .exec-sheet tr,
+  .exec-sheet li {
+    break-inside: avoid;
+  }
+  @page {
+    margin: 12mm;
+  }
+}
