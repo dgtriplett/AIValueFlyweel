@@ -95,8 +95,17 @@ class AccountPatch(BaseModel):
 
 
 @router.get("")
-async def list_accounts(include_inactive: bool = False):
-    """Every account, with per-account counts so the switcher is informative."""
+async def list_accounts(request: Request, include_inactive: bool = False):
+    """The accounts this caller may switch between, with counts for the switcher.
+
+    `include_inactive` enumerates ARCHIVED accounts too, which is a broader view of
+    who the operator's customers are than the switcher needs, so it is admin-gated.
+    The active list is what the switcher renders and stays available to any
+    authenticated user, per the one-instance-per-customer model.
+    """
+    await acct.authorize_account_read(request, 0)
+    if include_inactive:
+        acct.require_admin(request, "Listing archived accounts")
     where = "" if include_inactive else "WHERE a.is_active"
     try:
         rows = rows_to_list(await db.fetch(f"""
@@ -115,18 +124,30 @@ async def list_accounts(include_inactive: bool = False):
             FROM accounts a {where} ORDER BY a.is_default DESC, lower(a.name)
         """))
     except Exception as exc:  # noqa: BLE001
-        # Pre-migration installs have no accounts table. Report that plainly rather
-        # than 500ing, so the setup screen can say what to run.
-        logger.info("accounts unavailable (%s)", type(exc).__name__)
-        return {"accounts": [], "current_account_id": None,
-                "note": "Run migration 009 to enable accounts."}
+        # ONLY an absent table earns the friendly "run the migration" answer. This
+        # used to catch everything, so a real outage was reported as a pre-migration
+        # install: the setup screen told the operator to run migration 009 — which was
+        # already applied — while the actual cause was that Lakebase was unreachable.
+        # Wrong diagnosis on the one endpoint someone checks first.
+        if acct.is_missing_relation(exc):
+            logger.info("accounts table absent (%s) — reporting pre-migration",
+                        type(exc).__name__)
+            return {"accounts": [], "current_account_id": None,
+                    "note": "Run migration 009 to enable accounts."}
+        logger.error("accounts unavailable (%s: %s)", type(exc).__name__, exc)
+        raise HTTPException(
+            503, "The accounts table could not be read, so the account list is "
+                 f"unavailable. This is not a missing migration: {type(exc).__name__}"
+                 f": {exc}") from exc
     return {"accounts": rows, "current_account_id": await acct.current()}
 
 
 @router.get("/current")
-async def current_account():
+async def current_account(request: Request):
     """The account this request resolved to, and how."""
     account_id = await acct.current()
+    if account_id is not None:
+        await acct.authorize_account_read(request, account_id)
     if account_id is None:
         return {"account": None,
                 "note": "No accounts table — run scripts/migrate.py."}
@@ -144,7 +165,11 @@ async def create_account(body: AccountIn, request: Request):
     should start at the seeded defaults, not at another utility's calibrated figures.
     Inheriting them would be the kind of error that produces a confident wrong number
     with no visible cause.
+
+    Admin-gated: creating an account onboards a new customer onto this instance and
+    seeds their assumption set. It is an operator action, not a user one.
     """
+    acct.require_admin(request, "Creating an account")
     actor = current_user(request)
     slug = slugify(body.slug or body.name)
     existing = await db.fetchrow("SELECT id FROM accounts WHERE slug = $1", slug)
@@ -174,6 +199,14 @@ async def create_account(body: AccountIn, request: Request):
 
 @router.patch("/{account_id}", dependencies=[Depends(limiter("write"))])
 async def update_account(account_id: int, body: AccountPatch, request: Request):
+    """Rename, retype, activate/archive, or make default.
+
+    Admin-gated: every field here changes what other users of the instance see.
+    Archiving removes an account from everyone's switcher, and `make_default`
+    changes which account UNSCOPED requests resolve to — so an unauthorized caller
+    could silently repoint the whole instance at a different customer's data.
+    """
+    acct.require_admin(request, "Modifying an account")
     actor = current_user(request)
     row = await db.fetchrow("SELECT id, is_default FROM accounts WHERE id = $1",
                             account_id)
@@ -190,10 +223,21 @@ async def update_account(account_id: int, body: AccountPatch, request: Request):
         # Two statements, and the clear MUST come first: the partial unique index
         # permits only one row with is_default = true, so setting the new one before
         # clearing the old would violate it.
-        await db.execute("UPDATE accounts SET is_default = false WHERE is_default")
-        await db.execute(
-            "UPDATE accounts SET is_default = true, updated_at = now() WHERE id = $1",
-            account_id)
+        #
+        # ONE TRANSACTION, because the window between them is a broken state. Run as
+        # separate execute() calls each took its own connection, so a failure or a
+        # restart after the clear left the table with NO default — and then every
+        # unscoped request resolves to whatever `ORDER BY id LIMIT 1` returns, which
+        # is a different customer's account. Atomic means the instance is never
+        # pointed at the wrong tenant, even briefly.
+        async with db.transaction() as conn:
+            if conn is None:
+                raise HTTPException(503, "Database unavailable")
+            await conn.execute(
+                "UPDATE accounts SET is_default = false WHERE is_default")
+            await conn.execute(
+                "UPDATE accounts SET is_default = true, updated_at = now() "
+                "WHERE id = $1", account_id)
         acct.invalidate_default()
 
     await db.execute("""
@@ -216,7 +260,17 @@ async def update_account(account_id: int, body: AccountPatch, request: Request):
 
 @router.delete("/{account_id}", dependencies=[Depends(limiter("write"))])
 async def delete_account(account_id: int, request: Request, hard: bool = False):
-    """Archive by default. `?hard=true` deletes the account and everything it owns."""
+    """Archive by default. `?hard=true` deletes the account and everything it owns.
+
+    Admin-gated on BOTH paths. `?hard=true` cascades away months of a customer's
+    calibrated assumptions, research and proposals and is irreversible, and archiving
+    still removes the account from every user's switcher. Neither is something an
+    ordinary authenticated user of the instance should be able to do with one request.
+    """
+    # Named distinctly so the refusal log and the 403 say which one was attempted.
+    acct.require_admin(
+        request,
+        "Permanently deleting an account" if hard else "Archiving an account")
     actor = current_user(request)
     row = await db.fetchrow(
         "SELECT id, name, is_default FROM accounts WHERE id = $1", account_id)
