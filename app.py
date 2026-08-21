@@ -89,6 +89,49 @@ def env_pill_html() -> str:
     )
 
 
+def safe_static_path(root: Path, requested: str) -> Path | None:
+    """The file `requested` names inside `root`, or None if it escapes.
+
+    WHY THIS EXISTS
+    ---------------
+    The SPA catch-all captures `{full_path:path}`, which happily contains `..`.
+    Joining that onto a directory and serving the result is an unauthenticated
+    arbitrary file read: `GET /..%2f..%2fapp.py` returned this file's source, and
+    the same trick reaches anything the app process can read. This route is the
+    app's front door, matched before any auth runs, so the check has to live here.
+
+    Containment is decided on the RESOLVED paths, and the root is resolved too, so
+    a symlink pointing out of the tree cannot smuggle a path past the comparison —
+    `..` collapsing alone is not enough. `strict=False` because a miss must be a
+    404/SPA fallback, not an exception.
+
+    Returns None for anything that is not a real contained file, so every rejection
+    — escape, directory, missing file, empty path — takes the SPA fallback and the
+    caller cannot distinguish "outside the root" from "not found". That difference
+    is itself a filesystem oracle.
+    """
+    if not requested:
+        return None
+    # A NUL byte truncates the path in some C-level filesystem calls, so a name
+    # containing one must never reach the OS.
+    if "\x00" in requested:
+        return None
+    try:
+        root_resolved = root.resolve(strict=False)
+        candidate = (root_resolved / requested).resolve(strict=False)
+    except (OSError, ValueError):
+        # An overlong or otherwise unrepresentable path resolves to nothing useful.
+        return None
+    if candidate != root_resolved and root_resolved not in candidate.parents:
+        return None
+    try:
+        if not candidate.is_file():
+            return None
+    except OSError:
+        return None
+    return candidate
+
+
 def spa_index_response() -> HTMLResponse:
     html = (FRONTEND_DIST / "index.html").read_text()
     pill = env_pill_html()
@@ -228,8 +271,8 @@ if FRONTEND_DIST.exists():
     async def serve_spa(full_path: str):
         if full_path.startswith("api/"):
             return JSONResponse({"error": "Not found"}, status_code=404)
-        candidate = FRONTEND_DIST / full_path
-        if full_path and candidate.is_file():
+        candidate = safe_static_path(FRONTEND_DIST, full_path)
+        if candidate is not None:
             return FileResponse(str(candidate))
         return spa_index_response()
 else:
