@@ -22,6 +22,7 @@ Deploy into **your own** Databricks workspace.
 
 ```bash
 git clone <this-repo> && cd grid-atlas
+python3 -m pip install -r requirements-deploy.txt
 python3 scripts/deploy.py --dry-run     # review what it will do
 python3 scripts/deploy.py               # do it
 ```
@@ -50,6 +51,14 @@ Then open the app → **`/console`** → *Setup & health*, and fix anything red.
 | [Databricks CLI](https://docs.databricks.com/dev-tools/cli/install.html) | ≥ 0.239 | Bundle deploy, grants, app start |
 | Python | ≥ 3.11 | The deploy and seed scripts |
 | Node.js | ≥ 18 | Only to rebuild the SPA (the built bundle is committed) |
+
+Install the operator-side Python dependency used by the deploy, migration, and
+seed scripts. It is separate from `requirements.txt`, which is installed inside
+the Databricks App runtime and uses `asyncpg` instead.
+
+```bash
+python3 -m pip install -r requirements-deploy.txt
+```
 
 Authenticate first:
 
@@ -150,6 +159,7 @@ database.
 ## Step 2 — Deploy
 
 ```bash
+python3 -m pip install -r requirements-deploy.txt
 python3 scripts/deploy.py
 ```
 

@@ -1,0 +1,2 @@
+# Operator-side deploy, migration, and seed scripts. Not installed in the Databricks App runtime.
+psycopg2-binary==2.9.12
