@@ -8,7 +8,7 @@ For the pristine shipped state use scripts/seed_clean.py.
 
 Usage:
   python scripts/seed_demo.py [--profile <profile>] [--project <lakebase-project>] [--db app]
-  (defaults: profile fe-vm-grid-ops-demo, project grid-atlas-db, db app)
+  (defaults: profile DEFAULT, db app; --project is required)
 """
 from pathlib import Path
 import sys

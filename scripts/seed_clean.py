@@ -16,7 +16,7 @@ a half-populated state on error (rolls back).
 
 Usage:
   python scripts/seed_clean.py [--profile <profile>] [--project <lakebase-project>] [--db app]
-  (defaults: profile fe-vm-grid-ops-demo, project grid-atlas-db, db app)
+  (defaults: profile DEFAULT, db app; --project is required)
 """
 from pathlib import Path
 import sys

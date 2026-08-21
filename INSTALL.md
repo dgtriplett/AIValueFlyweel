@@ -354,7 +354,7 @@ makes the "nothing configured yet" state easy to inspect deliberately.
 Run the tests:
 
 ```bash
-python3 -m unittest discover -s tests -v      # 281 tests, stdlib only
+python3 -m unittest discover -s tests -v      # 976 tests, stdlib only
 ```
 
 To work on the portfolio SPA you need `frontend/src/`, which is not in this repo —

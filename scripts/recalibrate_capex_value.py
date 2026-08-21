@@ -639,8 +639,8 @@ def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__.split("\n")[0])
     parser.add_argument("--dry-run", action="store_true",
                         help="report every change without writing")
-    parser.add_argument("--profile", default="fe-vm-grid-ops-demo")
-    parser.add_argument("--project", default="grid-atlas-pg")
+    parser.add_argument("--profile", default="DEFAULT")
+    parser.add_argument("--project", required=True)
     parser.add_argument("--branch", default="production")
     parser.add_argument("--endpoint", default="primary")
     parser.add_argument("--db", default="app")
