@@ -49,7 +49,7 @@ async def genie_status():
     }
 
 
-@router.post("/ask")
+@router.post("/ask", dependencies=[Depends(limiter("research"))])
 async def ask(body: AskIn):
     if not GENIE_SPACE_ID:
         return {

@@ -11,13 +11,14 @@ computation that powers the flywheel highlight moment.
 import json
 import logging
 
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel
 
 from .. import accounts, portfolio
 from ..common import row_to_dict, rows_to_list
 from ..config import SERVING_ENDPOINT
 from ..db import db
+from ..limits import limiter
 from ..readiness import readiness_map
 from ..value_engine import compute_value_range, load_assumptions
 
@@ -148,7 +149,7 @@ async def _heuristic_detect(uc: dict, assets: list, ucs: list, max_assets: int, 
     return req, ena
 
 
-@router.post("/detect-dependencies")
+@router.post("/detect-dependencies", dependencies=[Depends(limiter("research"))])
 async def detect_dependencies(body: DetectIn):
     uc = await db.fetchrow("SELECT * FROM use_cases WHERE id=$1", body.use_case_id)
     if uc is None:
@@ -334,7 +335,8 @@ def _normalise_customer_agent(parsed: dict | None, assumptions: list[dict],
     }
 
 
-@router.get("/customer-enhancements")
+@router.get("/customer-enhancements",
+            dependencies=[Depends(limiter("research"))])
 async def customer_enhancement_agent():
     """Research-oriented agent for customer-specific assumption and app improvements.
 
@@ -601,7 +603,7 @@ class RecommendIn(BaseModel):
     top_n: int = 6
 
 
-@router.post("/recommend")
+@router.post("/recommend", dependencies=[Depends(limiter("research"))])
 async def recommend(body: RecommendIn):
     ucs, _ = await _portfolio_context()
     live = [u for u in ucs if u["status"] in ("live", "value_realized")]
@@ -821,7 +823,7 @@ class EstimateIn(BaseModel):
     description: str | None = None
 
 
-@router.post("/estimate-value")
+@router.post("/estimate-value", dependencies=[Depends(limiter("research"))])
 async def estimate_value(body: EstimateIn):
     title, desc = body.title, body.description
     if body.use_case_id is not None:
@@ -880,7 +882,7 @@ class DecomposeIn(BaseModel):
     vendor: str | None = None
 
 
-@router.post("/decompose-source")
+@router.post("/decompose-source", dependencies=[Depends(limiter("research"))])
 async def decompose_source(body: DecomposeIn):
     prompt = (
         "You are a Power & Utilities data architect. For the given source system category (and optional vendor), "
