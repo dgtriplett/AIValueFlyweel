@@ -378,35 +378,51 @@ python3 tests/serve_local.py --port 8000       # then open /console
 
 ## A note on the frontend source
 
-This repo ships the **pre-built** SPA in `frontend/dist/`, which is what the app
-serves. The TypeScript source (`frontend/src/`) was not part of the exported
-workspace folder and is therefore **not** included — the committed `dist/` bundle
-is the source of record for the portfolio UI.
+The SPA is a normal React 18 + TypeScript + Vite app. Its source is in
+`frontend/src/`, and `frontend/dist/` is the build output.
 
-That is why the discovery and agent screens ship as a separate, dependency-free
-page in `frontend/console/`: adding them to the SPA would mean reverse-engineering
-a minified bundle, and a mistake there would break a UI that already works. The
-build config (`package.json`, `vite.config.ts`, `tailwind.config.js`,
-`tsconfig*.json`) is all present, so restoring `frontend/src/` is enough to make
-the SPA buildable again.
+```bash
+cd frontend
+npm install
+npm run build      # tsc && vite build → frontend/dist
+npm run dev        # vite dev server, proxying /api to localhost:8000
+```
 
----
+`frontend/dist` is **committed**, because the app serves the pre-built bundle and
+the deploy has no Node build step. So a source change is only shipped once you
+rebuild and commit the result. `scripts/check.py` gates on exactly that: it
+verifies the chunk `dist/index.html` loads still carries the behaviour the source
+promises, so a stale `dist` fails rather than quietly shipping the previous UI.
 
-### The SPA's nav is patched, not built
+### It used to be patched, not built
 
-`frontend/dist` is committed and its React source is not in this repo, so two edits
-to the SPA live in re-runnable scripts rather than in source:
+This was not always the case, and the history explains some of the shape of the
+code. `frontend/src/` was missing from the exported workspace folder, so for a
+while the only way to change the SPA was to regex-patch the minified bundle —
+`patch_spa_nav.py`, `patch_spa_grouped_nav.py`, `patch_spa_proposal_button.py`,
+`patch_spa_customer_visibility.py` and `rebrand_bundle.py` each rewrote strings
+inside the built JS, and CI asserted the patches were still applied.
 
-| Script | What it changes |
-|---|---|
-| [`scripts/patch_spa_nav.py`](scripts/patch_spa_nav.py) | Product name and subtitle in the header. |
-| [`scripts/patch_spa_grouped_nav.py`](scripts/patch_spa_grouped_nav.py) | Collapses the nine flat tabs into `Portfolio · Analyze ▾ · Plan ▾`, and adds links to the knowledge base and the proposal agent. |
+The source has since been reconstructed, so those scripts are gone. Two
+consequences worth knowing:
 
-**If you ever rebuild the SPA, re-run both.** A fresh build reverts them, which
-silently hides the knowledge base and the proposal agent from the app's front door
-without anything failing. `scripts/check.py` gates on this (`--check` reports status
-without modifying anything), and the patch refuses to write a bundle that does not
-parse — an unparseable bundle is a blank page for every user.
+- **The reconstructed source already contains what they patched in** — the
+  `Portfolio · Analyze ▾ · Plan ▾` grouped nav, the knowledge-base and
+  "Write a proposal" links, the drawer's proposal action, the current product
+  name, and the removal of customer-visible *phase* text. A rebuild no longer
+  reverts any of it, which was the whole failure mode those scripts existed to
+  paper over.
+- **The `data-ga*` attributes in the JSX are deliberate.** `data-gaGroupedNav`,
+  `data-ga-menu`, `data-gaProposalBtn` and `data-gaCustomerVisibility` were the
+  markers those patch scripts used to prove they had run. They are kept because
+  they are stable identifiers for the same behaviour across a minified rebuild,
+  which is what [`scripts/check_spa_bundle.py`](scripts/check_spa_bundle.py) keys
+  on — minified variable names change on every build, so they cannot be asserted.
+
+The discovery and agent screens remain a separate, dependency-free page in
+`frontend/console/`. That was originally because adding them to the SPA meant
+reverse-engineering a minified bundle; now it is simply because the console is a
+different tool for a different user, and it needs no build step of its own.
 
 ## License
 
