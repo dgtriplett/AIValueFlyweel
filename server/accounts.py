@@ -43,6 +43,22 @@ from .db import db
 
 logger = logging.getLogger(__name__)
 
+
+class AccountResolutionError(RuntimeError):
+    """Resolution failed for a reason that is NOT 'no accounts exist yet'.
+
+    The distinction is the whole point. An install with no accounts table (before
+    migration 009) or no rows in it (a fresh deploy) is a legitimate state: nothing
+    is scoped because nothing has been set up, and the app must still work so the
+    operator can set it up.
+
+    A database error while asking which account this is, is a different thing
+    entirely. Treating it as "no account" made `scope_clause()` return `true`, which
+    turned a transient Lakebase hiccup into every tenant's rows being served to
+    whoever asked. This exception is what makes that case fail closed instead.
+    """
+
+
 # The account for the current request. None means "not yet resolved" — reads fall
 # back to the default account, which is what an unscoped background task
 # (token refresh, a migration check) should see.
@@ -50,6 +66,55 @@ current_account_id: ContextVar[int | None] = ContextVar(
     "current_account_id", default=None)
 
 ACCOUNT_HEADER = "x-grid-atlas-account"
+
+# Paths that must keep answering when account resolution fails.
+#
+# /api/health has to report the outage — 503ing it from middleware would replace the
+# diagnostic body with a generic error and hide the cause. The SPA and its assets
+# have to load so the user sees an error page rather than a blank tab, and they read
+# no tenant data anyway. /api/setup and /api/accounts are how an operator fixes the
+# very condition that caused the failure.
+_UNSCOPED_PREFIXES = (
+    "/api/health",
+    "/api/runtime",
+    "/api/setup",
+    "/api/accounts",
+)
+
+
+def _requires_account_scope(path: str) -> bool:
+    """Whether a failed resolution must block this request.
+
+    Only /api/* reads tenant rows. Everything else is the SPA shell.
+    """
+    if not path.startswith("/api/"):
+        return False
+    return not path.startswith(_UNSCOPED_PREFIXES)
+
+
+def _is_missing_relation(exc: BaseException) -> bool:
+    """True when the error means "the accounts table isn't there yet".
+
+    That is the pre-migration state and it is legitimate. Anything else — a dropped
+    connection, a permission error, a timeout — is a failure and must not be
+    mistaken for it.
+
+    Matched on SQLSTATE first (42P01 undefined_table, 3F000 invalid_schema_name),
+    since that is asyncpg's structured signal, with a class-name and message check
+    behind it so the tests' stubbed asyncpg and any wrapped exception still classify
+    correctly.
+    """
+    sqlstate = getattr(exc, "sqlstate", None)
+    if sqlstate in ("42P01", "3F000"):
+        return True
+    if sqlstate is not None:
+        # A real SQLSTATE that is not "missing relation" is a genuine error.
+        return False
+    if type(exc).__name__ in ("UndefinedTableError", "InvalidSchemaNameError"):
+        return True
+    message = str(exc).lower()
+    return ("does not exist" in message and "relation" in message) \
+        or "undefinedtable" in message
 
 # Cached default so the common path is not a query per request. Invalidated whenever
 # an account is created, deleted, or made default.
@@ -62,23 +127,39 @@ def invalidate_default() -> None:
 
 
 async def default_account_id() -> int | None:
-    """The default account's id, or None on an un-migrated / empty database."""
+    """The default account's id, or None when no accounts exist yet.
+
+    Raises AccountResolutionError if the question could not be ANSWERED — a DB
+    error other than a missing table. Returning None there would look identical to
+    a fresh install and unscope every read, so the two must not share a return value.
+    """
     if _default_cache["id"] is not None:
         return _default_cache["id"]
     try:
         row = await db.fetchrow(
             "SELECT id FROM accounts WHERE is_default AND is_active LIMIT 1")
-    except Exception:  # noqa: BLE001 - table absent before migration 009
-        return None
+    except Exception as exc:  # noqa: BLE001
+        if _is_missing_relation(exc):
+            # Pre-migration-009 install: nothing is scoped because nothing is set up.
+            return None
+        raise AccountResolutionError(
+            f"could not read the accounts table ({type(exc).__name__}: {exc})"
+        ) from exc
     if row is None:
         # An install where the default was archived. Fall back to the lowest active
         # id rather than returning None, which would make every scoped read empty.
         try:
             row = await db.fetchrow(
                 "SELECT id FROM accounts WHERE is_active ORDER BY id LIMIT 1")
-        except Exception:  # noqa: BLE001
-            return None
+        except Exception as exc:  # noqa: BLE001
+            if _is_missing_relation(exc):
+                return None
+            raise AccountResolutionError(
+                f"could not read the accounts table ({type(exc).__name__}: {exc})"
+            ) from exc
     if row is None:
+        # The table exists and has no active row: a fresh install before the first
+        # account is created. Legitimate, and the setup screens must still work.
         return None
     _default_cache["id"] = row["id"]
     return row["id"]
@@ -128,18 +209,37 @@ def install_middleware(app) -> None:
     """Resolve the account once per request and put it in the ContextVar."""
     from starlette.middleware.base import BaseHTTPMiddleware
 
+    from starlette.responses import JSONResponse
+
     class AccountContextMiddleware(BaseHTTPMiddleware):
         async def dispatch(self, request, call_next):
             token = None
             try:
-                # Never fail a request on account resolution: a broken accounts
-                # table should degrade to the default, not return 500 for the whole
-                # app. The portfolio is still readable either way.
                 account_id = await resolve(request)
                 token = current_account_id.set(account_id)
             except Exception as exc:  # noqa: BLE001
-                logger.warning("account resolution failed (%s) — unscoped",
-                               type(exc).__name__)
+                # FAIL CLOSED. This used to swallow the error and continue
+                # "unscoped", which meant scope_clause() returned `true` and the
+                # request read EVERY tenant's rows. A 503 is the correct answer:
+                # we cannot establish whose data this is, so we serve none of it.
+                #
+                # Health, setup and the SPA shell are exempted (see
+                # _UNSCOPED_PREFIXES) because they read no tenant data and are how
+                # the failure gets diagnosed and fixed.
+                if _requires_account_scope(request.url.path):
+                    logger.error(
+                        "account resolution failed for %s (%s: %s) — refusing the "
+                        "request rather than serving unscoped data",
+                        request.url.path, type(exc).__name__, exc)
+                    return JSONResponse(
+                        {"error": "Account could not be resolved, so this request "
+                                  "would not be scoped to one customer. Refusing "
+                                  "rather than returning data across accounts.",
+                         "detail": f"{type(exc).__name__}: {exc}"},
+                        status_code=503)
+                logger.warning(
+                    "account resolution failed for %s (%s) — continuing, this path "
+                    "reads no tenant data", request.url.path, type(exc).__name__)
             try:
                 response = await call_next(request)
                 if token is not None and current_account_id.get() is not None:
@@ -168,11 +268,17 @@ async def scope_clause(alias: str = "") -> tuple[str, list]:
     NULL account_id is treated as visible to every account. That is what lets a
     shared row — a seeded KB folder, a global glossary term — serve all tenants
     without being copied per account.
+
+    Returns the unscoped `true` ONLY when no accounts exist yet. If resolution
+    fails, this raises rather than returning `true`: an unscoped clause during a
+    database problem is a cross-tenant read, which is exactly the failure this
+    module exists to prevent.
     """
     prefix = f"{alias}." if alias else ""
     account_id = await current()
     if account_id is None:
-        # Pre-migration: no accounts table, so nothing is scoped.
+        # No accounts configured yet (pre-migration or fresh install), so there is
+        # nothing to scope to and no other tenant whose rows could leak.
         return "true", []
     return f"({prefix}account_id = $1 OR {prefix}account_id IS NULL)", [account_id]
 

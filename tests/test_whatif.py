@@ -247,12 +247,29 @@ class TestScopeClause(AccountTestCase):
         self.assertEqual(params, [5])
 
     def test_unscoped_when_there_are_no_accounts(self):
+        """Pre-migration-009: no accounts table, so there is nothing to scope to.
+
+        The simulated error now has to LOOK like a missing relation. This fixture
+        raised a bare RuntimeError, and the code treated ANY exception as
+        "pre-migration" and returned `true` — so a dropped connection unscoped the
+        query and served every tenant's rows under one tenant's request. The two
+        cases are distinguished now; the test below pins the other side.
+        """
         class NoTable(ScopedDB):
             async def fetchrow(self, sql, *args):
-                raise RuntimeError("no accounts")
+                raise RuntimeError('relation "accounts" does not exist')
         self.use(NoTable())
         clause, params = run(accounts.scope_clause())
         self.assertEqual((clause, params), ("true", []))
+
+    def test_resolution_failure_does_not_unscope(self):
+        """A real DB error must not degrade to `true`: that is a cross-tenant read."""
+        class Unreachable(ScopedDB):
+            async def fetchrow(self, sql, *args):
+                raise RuntimeError("connection reset by peer")
+        self.use(Unreachable())
+        with self.assertRaises(accounts.AccountResolutionError):
+            run(accounts.scope_clause())
 
 
 class TestNoCrossTenantStatusLeak(unittest.TestCase):
