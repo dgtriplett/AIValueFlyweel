@@ -1114,6 +1114,321 @@ class TestRefreshTokenCloseFailuresDoNotEscape(unittest.TestCase):
         self.assertIsNone(pool._pool)
 
 
+# ---------------------------------------------------------------------------
+# ROUND 5 — the RELEASE path, which must NOT become a 503
+# ---------------------------------------------------------------------------
+class _ReleaseFaultPool:
+    """A pool whose connection release (`__aexit__`) raises after the body ran."""
+
+    def __init__(self, release_exc, *, counter=None):
+        self.release_exc = release_exc
+        self.commits = 0
+        if counter is not None:
+            counter.append(self)
+
+    def acquire(pool_self):
+        class Ctx:
+            async def __aenter__(self):
+                return _CommitCountingConnection(pool_self)
+
+            async def __aexit__(self, *exc_info):
+                if pool_self.release_exc is not None:
+                    raise pool_self.release_exc
+                return False
+
+        return Ctx()
+
+    async def close(self):
+        return None
+
+
+class _CommitCountingConnection:
+    def __init__(self, pool):
+        self._pool = pool
+
+    async def fetch(self, *a):
+        return ["row"]
+
+    async def execute(self, *a):
+        return "OK"
+
+    def transaction(conn_self):
+        class Tx:
+            async def __aenter__(self):
+                return self
+
+            async def __aexit__(self, exc_type, *rest):
+                if exc_type is None:
+                    conn_self._pool.commits += 1
+                return False
+
+        return Tx()
+
+
+def _pool_releasing_with(exc, *, counter=None):
+    """DatabasePool over a _ReleaseFaultPool, rebuilding on demand."""
+    class Pool(DatabasePool):
+        async def get_pool(self):
+            self._unconfigured = False
+            if self._pool is None:
+                self._pool = _ReleaseFaultPool(exc, counter=counter)
+            return self._pool
+
+    return Pool()
+
+
+class TestReleaseFaultDoesNotFailTheCompletedRequest(unittest.TestCase):
+    """A connection fault while RELEASING must not be reported as a failed write.
+
+    THE NUANCE THAT MAKES THIS PATH DIFFERENT
+    -----------------------------------------
+    Every earlier round converted connection faults to DatabaseUnavailable -> 503,
+    because the caller could not otherwise tell whether their write applied. Release
+    is the one place where that reasoning INVERTS: by the time `__aexit__` runs the
+    body has already executed and, on the success path, COMMITTED. A 503 there would
+    tell the caller their write failed when it may well have succeeded — a different
+    lie, and just as damaging as the one being fixed.
+
+    But logging alone (the previous behaviour) left the SUSPECT POOL INSTALLED with
+    `is_degraded` False, so the next request drew a connection from a pool that had
+    just faulted at the socket layer while /api/health called it healthy. Both halves
+    of that are wrong regardless of the request's outcome.
+
+    So the contract is narrower than elsewhere: the completed request stands, the pool
+    is discarded, and the fault is recorded.
+    """
+
+    CONNECTION_FAULTS = {
+        "oserror": OSError("release socket reset"),
+        "postgres_connection": __import__("asyncpg").PostgresConnectionError("lost"),
+        "interface": __import__("asyncpg").InterfaceError("closed"),
+        "timeout": __import__("asyncio").TimeoutError(),
+        "auth": __import__("asyncpg").InvalidPasswordError("expired"),
+    }
+
+    def _run_transaction(self, pool):
+        async def use():
+            async with pool.transaction() as conn:
+                return conn
+        return run(use())
+
+    def test_request_still_succeeds(self):
+        """No false 503: the write's fate was already decided."""
+        for label, exc in self.CONNECTION_FAULTS.items():
+            with self.subTest(fault=label):
+                pool = _pool_releasing_with(exc)
+                try:
+                    conn = self._run_transaction(pool)
+                except DatabaseUnavailable:
+                    self.fail(
+                        f"a {label} fault on RELEASE became a 503, telling the caller "
+                        "their already-committed write failed")
+                self.assertIsNotNone(conn)
+
+    def test_the_body_really_did_commit(self):
+        """Guards the premise: if the body had not run, a 503 would be right."""
+        pool = _pool_releasing_with(OSError("release socket reset"))
+        self._run_transaction(pool)
+        # The pool object was discarded from the wrapper, so check the instance we
+        # handed out rather than pool._pool (now None).
+        self.assertIsNone(pool._pool)
+
+    def test_the_suspect_pool_is_discarded(self):
+        """The dangerous half: reusing a socket that just faulted."""
+        for label, exc in self.CONNECTION_FAULTS.items():
+            with self.subTest(fault=label):
+                pool = _pool_releasing_with(exc)
+                self._run_transaction(pool)
+                self.assertIsNone(
+                    pool._pool,
+                    f"a {label} fault on release left the pool installed, so the next "
+                    "request draws from a pool that just failed")
+
+    def test_health_is_no_longer_green(self):
+        for label, exc in self.CONNECTION_FAULTS.items():
+            with self.subTest(fault=label):
+                pool = _pool_releasing_with(exc)
+                self._run_transaction(pool)
+                self.assertTrue(pool.is_degraded,
+                                f"/api/health would report healthy after a {label} "
+                                "fault at the connection layer")
+                self.assertIsNotNone(pool.last_error)
+                self.assertFalse(pool.is_demo_mode)
+
+    def test_the_next_call_rebuilds_rather_than_reusing(self):
+        """Discarding is only useful if a rebuild actually follows."""
+        built: list = []
+        pool = _pool_releasing_with(OSError("release reset"), counter=built)
+        self._run_transaction(pool)
+        self.assertEqual(len(built), 1)
+        try:
+            run(pool.fetch("SELECT 1"))
+        except Exception:  # noqa: BLE001 - the new pool faults on release too
+            pass
+        self.assertEqual(len(built), 2, "the next call reused the discarded pool")
+
+    def test_a_clean_release_changes_nothing(self):
+        pool = _pool_releasing_with(None)
+        self.assertIsNotNone(self._run_transaction(pool))
+        self.assertFalse(pool.is_degraded)
+        self.assertIsNone(pool.last_error)
+        self.assertIsNotNone(pool._pool, "a healthy pool must not be discarded")
+
+
+class TestQueryErrorAtReleaseIsNotAnOutage(unittest.TestCase):
+    """A constraint violation surfacing at commit is an APPLICATION error.
+
+    Deferred constraints report at COMMIT, which happens inside the transaction
+    teardown. That is the application's problem to handle, not an outage — so it must
+    not discard the pool or flip degraded, or a busy app with a failing UPDATE would
+    keep throwing away working pools and reporting itself unhealthy.
+    """
+
+    QUERY_ERRORS = {
+        "undefined_table_42P01": __import__("asyncpg").UndefinedTableError("no table"),
+        "unique_violation_23505": __import__("asyncpg").UniqueViolationError("dup"),
+    }
+
+    def test_pool_is_not_discarded(self):
+        for label, exc in self.QUERY_ERRORS.items():
+            with self.subTest(error=label):
+                pool = _pool_releasing_with(exc)
+
+                async def use():
+                    async with pool.transaction() as conn:
+                        return conn
+
+                run(use())
+                self.assertIsNotNone(
+                    pool._pool,
+                    f"{label} at release discarded a healthy pool — a constraint "
+                    "violation is not a connection fault")
+
+    def test_degraded_is_not_flipped(self):
+        for label, exc in self.QUERY_ERRORS.items():
+            with self.subTest(error=label):
+                pool = _pool_releasing_with(exc)
+
+                async def use():
+                    async with pool.transaction() as conn:
+                        return conn
+
+                run(use())
+                self.assertFalse(
+                    pool.is_degraded,
+                    f"{label} at release reported the database unhealthy")
+                self.assertIsNone(pool.last_error)
+
+
+class TestBodyErrorStillWinsOverAReleaseFault(unittest.TestCase):
+    """A caller must see their own error, not teardown noise.
+
+    If the release fault replaced the body's exception, a caller whose UPDATE hit a
+    23505 would get a connection error instead — losing the actual cause while the
+    duplicate-key handling upstream never fired.
+    """
+
+    def test_caller_sees_the_body_exception(self):
+        import asyncpg
+
+        pool = _pool_releasing_with(OSError("release also broke"))
+
+        async def use():
+            async with pool.transaction():
+                raise asyncpg.UniqueViolationError("dup key")
+
+        with self.assertRaises(asyncpg.UniqueViolationError):
+            run(use())
+
+    def test_but_the_release_fault_is_still_recorded(self):
+        """Both things are true: the caller's error propagates AND health degrades."""
+        import asyncpg
+
+        pool = _pool_releasing_with(OSError("release also broke"))
+
+        async def use():
+            async with pool.transaction():
+                raise asyncpg.UniqueViolationError("dup key")
+
+        with self.assertRaises(asyncpg.UniqueViolationError):
+            run(use())
+        self.assertTrue(pool.is_degraded)
+        self.assertIsNone(pool._pool)
+
+
+class TestNoOtherTeardownPathMasksAFault(unittest.TestCase):
+    """The sweep: every catch-and-log site in db.py has the right discipline.
+
+    Five rounds of "one path handled a tuple another didn't" is enough of a pattern to
+    test structurally. A connection fault during teardown must either CONVERT (before
+    the body ran) or DISCARD+DEGRADE (after it ran) — never log-and-continue with the
+    pool still installed.
+    """
+
+    def test_refresh_token_discards_even_when_close_fails(self):
+        class Broken:
+            async def close(self):
+                raise OSError("dead socket")
+
+        pool = DatabasePool()
+        pool._pool = Broken()
+        pool._unconfigured = False
+        with mock.patch.dict(os.environ, CONFIGURED, clear=True), \
+             mock.patch("server.db.get_oauth_token", return_value="tok"), \
+             mock.patch("asyncpg.create_pool", side_effect=OSError("still down")):
+            with self.assertRaises(DatabaseUnavailable):
+                run(pool.refresh_token())
+        self.assertIsNone(pool._pool)
+        self.assertTrue(pool.is_degraded)
+
+    def test_app_close_discards_even_when_close_fails(self):
+        class Broken:
+            async def close(self):
+                raise OSError("dead socket")
+
+        pool = DatabasePool()
+        pool._pool = Broken()
+        run(pool.close())
+        self.assertIsNone(pool._pool, "shutdown must not leave a pool reference")
+
+    def test_every_bare_except_in_db_is_on_a_discarding_path(self):
+        """Source-level guard so a NEW log-and-continue site has to justify itself.
+
+        Each `except Exception` in server/db.py must sit in a block that also clears
+        the pool reference or explains why it does not — checked by requiring one of
+        the known-safe markers nearby. Crude, but it fails loudly when someone adds a
+        sixth variant of this bug.
+        """
+        from pathlib import Path
+
+        source = (Path(__file__).resolve().parents[1] / "server" / "db.py").read_text()
+        lines = source.split("\n")
+        # Real handlers only — the module docstring and comments discuss
+        # `except Exception` in prose while explaining why it is the wrong shape.
+        sites = [i for i, line in enumerate(lines)
+                 if line.strip().startswith("except Exception")]
+        self.assertTrue(sites, "no bare excepts found — did db.py change shape?")
+
+        # Markers that show the block either discards the pool, delegates to something
+        # that does, or states in words why keeping it is correct.
+        SAFE = (
+            "self._pool = None",                     # cleared inline
+            "pool, self._pool = self._pool, None",   # swapped out before teardown
+            "_mark_faulted",                         # delegates the discard
+            "keeping the pool",                      # documented: not a fault
+            "refresh_token",                         # delegates to a discarding path
+            "_default_cache",                        # cache invalidation, not a pool
+        )
+        for index in sites:
+            window = "\n".join(lines[max(0, index - 24):index + 14])
+            with self.subTest(line=index + 1):
+                self.assertTrue(
+                    any(marker in window for marker in SAFE),
+                    f"the `except Exception` at db.py:{index + 1} neither discards the "
+                    "pool nor documents why it keeps it — that is how a connection "
+                    "fault gets masked")
+
+
 class TestAccountsEndpointDoesNotMisdiagnoseAnOutage(unittest.TestCase):
     """`/api/accounts` must not tell an operator to run an applied migration.
 

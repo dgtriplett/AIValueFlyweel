@@ -229,6 +229,20 @@ class DatabasePool:
                 f"({self._last_error}). Refusing to return an empty result that "
                 "would read as 'no data' and silently unscope this request.")
 
+    def _mark_faulted(self, exc: BaseException, context: str) -> None:
+        """Discard the suspect pool and record the fault, WITHOUT raising.
+
+        The two things every connection-level fault must do regardless of when it
+        happens: stop the suspect pool being reused, and make `/api/health` tell the
+        truth. Separated from `_connection_failed` because whether the CALLER should
+        also see a 503 depends on timing — see the release path in `transaction()`,
+        where the write has already been decided and a 503 would be a different lie.
+        """
+        self._last_error = f"{type(exc).__name__}: {exc}"
+        self._pool = None      # force a fresh pool on the next call
+        logger.error("Lakebase fault during %s (%s: %s) — discarding the pool and "
+                     "reporting unhealthy", context, type(exc).__name__, exc)
+
     def _connection_failed(self, exc: Exception) -> "DatabaseUnavailable":
         """Record a connection-level failure and convert it to DatabaseUnavailable.
 
@@ -253,11 +267,7 @@ class DatabasePool:
         caller handles, not outages, and turning a 42P01 into a 503 would break the
         pre-migration path along with every route that catches its own DB errors.
         """
-        self._last_error = f"{type(exc).__name__}: {exc}"
-        self._pool = None      # force a fresh pool on the next call
-        logger.error("Lakebase query failed at the connection level (%s: %s) — "
-                     "reporting unavailable rather than an opaque 500",
-                     type(exc).__name__, exc)
+        self._mark_faulted(exc, "a query")
         return DatabaseUnavailable(
             "Lakebase is configured (PGHOST is set) but the connection failed "
             f"({self._last_error}). No data was read or written.")
@@ -362,14 +372,37 @@ class DatabasePool:
         except (_AUTH_ERRORS + _CONNECTION_ERRORS) as exc:
             raise self._connection_failed(exc) from exc
         finally:
-            # Release the connection whatever happened. A failure here is teardown of
-            # a connection we are done with, so it must not replace the caller's
-            # exception or leak out of a successful transaction.
+            # RELEASE IS THE ONE PATH THAT MUST NOT BECOME A 503.
+            #
+            # By the time __aexit__ runs the body has already executed and, on the
+            # success path, COMMITTED. Raising DatabaseUnavailable here would tell the
+            # caller their write failed when it may well have succeeded — a different
+            # lie, and just as damaging as the one the earlier rounds fixed. Nor may
+            # it replace a body exception: a caller whose UPDATE hit a 23505 needs to
+            # see the 23505, not a connection error from teardown.
+            #
+            # But logging alone (what this used to do) left the SUSPECT POOL INSTALLED
+            # and is_degraded False, so the next request drew a connection from a pool
+            # that had just faulted at the socket layer, and /api/health called it
+            # healthy. Both halves of that are wrong independently of the request's
+            # outcome.
+            #
+            # So: discard the pool and record the fault — the next call rebuilds and
+            # health reports honestly — while the completed request's result stands.
+            # Only connection/auth-level faults qualify; a query error surfacing at
+            # commit (a deferred constraint, say) is an application error, so it
+            # propagates untouched and must NOT discard the pool or flip degraded.
             try:
                 await conn_ctx.__aexit__(None, None, None)
+            except (_AUTH_ERRORS + _CONNECTION_ERRORS) as exc:
+                self._mark_faulted(exc, "releasing a transaction connection")
             except Exception as exc:  # noqa: BLE001
-                logger.warning("releasing the Lakebase connection failed (%s: %s)",
-                               type(exc).__name__, exc)
+                # A query-level or unexpected error from teardown. Not an outage, so
+                # the pool stays and degraded is untouched — but it is still logged,
+                # because silently dropping it is how this path went unexamined.
+                logger.warning(
+                    "releasing the Lakebase connection failed with a non-connection "
+                    "error (%s: %s) — keeping the pool", type(exc).__name__, exc)
 
     async def execute(self, sql: str, *args):
         _charge_budget()
