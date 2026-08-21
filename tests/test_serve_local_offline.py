@@ -64,7 +64,13 @@ class TestServeLocalOffline(unittest.TestCase):
                     "Offline model response (no network).")
 
                 import aiohttp
+                timeout = aiohttp.ClientTimeout(total=60)
+                assert timeout.kwargs == {"total": 60}
                 async with aiohttp.ClientSession() as session:
+                    async with session.post(
+                        "https://workspace/api/2.0/genie/spaces", timeout=timeout
+                    ) as response:
+                        provision_body = await response.text()
                     async with session.post(
                         "https://workspace/api/2.0/genie/spaces/space/start-conversation"
                     ) as response:
@@ -74,6 +80,7 @@ class TestServeLocalOffline(unittest.TestCase):
                         "conversations/offline-conversation/messages/offline-message"
                     ) as response:
                         completed = await response.json()
+                assert provision_body == "{}"
                 assert started["conversation_id"] == "offline-conversation"
                 assert completed["attachments"][0]["text"]["content"] == (
                     "Offline Genie response (no network).")
