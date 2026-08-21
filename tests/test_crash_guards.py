@@ -25,8 +25,10 @@ WHY EACH ONE MATTERED
 
 Each test below was confirmed to FAIL against the pre-fix code.
 """
+import ast
 import io
 import os
+import pathlib
 import sys
 import unittest
 from unittest import mock
@@ -40,7 +42,9 @@ from fastapi import HTTPException  # noqa: E402
 from fastapi.testclient import TestClient  # noqa: E402
 
 import app as appmod  # noqa: E402
-from server.routes import impact, knowledge, onboarding, proposals, use_cases  # noqa: E402
+from server.routes import accounts as accounts_route  # noqa: E402
+from server.routes import (impact, knowledge, onboarding, proposals,  # noqa: E402
+                           sync_packages, use_cases)
 from fakedb import FakeDB, Row, run  # noqa: E402
 
 
@@ -128,6 +132,10 @@ class MalformedImpactNodeId(unittest.TestCase):
         "widget-1",       # unknown node kind
         "asset-1.5",      # float, not an int
         "ASSET-1",        # kinds are lowercase
+        # Unicode digits: `isdigit()` is True for these, so the first version of
+        # the fix let them reach int() — see UnicodeDigitNodeIds below.
+        "asset-²",   # superscript two: int() raises ValueError -> was a 500
+        "uc-٣",      # Arabic-Indic three: int() ACCEPTS it -> was a silent 200
     ]
 
     def test_malformed_ids_are_422(self):
@@ -158,6 +166,47 @@ class MalformedImpactNodeId(unittest.TestCase):
         self.assertEqual(("lob", 7), impact._split_node_id("lob-7"))
         for bad in ("bogus", "asset-abc", "uc-", "-1", "widget-1", ""):
             self.assertIsNone(impact._split_node_id(bad), bad)
+
+
+class UnicodeDigitNodeIds(unittest.TestCase):
+    """`str.isdigit()` is not the question "does int() accept this".
+
+    Found by cross-review after the first fix, which gated on `raw.isdigit()` and
+    then called `int(raw)` believing the check made it safe. The two cases fail in
+    OPPOSITE directions, which is why neither a bare isdigit() nor a try/except
+    around int() is sufficient on its own:
+
+      * '²'.isdigit() is True and int('²') raises ValueError — still a 500.
+      * '٣'.isdigit() is True and int('٣') returns 3 — no crash, but `uc-٣` would
+        silently resolve to use case 3. An id the app never generates should be
+        refused, not reinterpreted, so try/except alone would trade a crash for a
+        wrong answer.
+
+    Requiring ASCII digits answers both.
+    """
+
+    def test_isdigit_alone_would_not_have_been_safe(self):
+        """The premise, asserted so this test explains itself if it ever fails."""
+        self.assertTrue("²".isdigit())
+        with self.assertRaises(ValueError):
+            int("²")
+        self.assertTrue("٣".isdigit())
+        self.assertEqual(3, int("٣"))  # accepted — hence the isascii() requirement
+
+    def test_superscript_digit_is_422_not_500(self):
+        resp = client().get("/api/impact/asset-²")
+        self.assertEqual(422, resp.status_code, resp.text[:200])
+
+    def test_arabic_indic_digit_is_refused_not_reinterpreted(self):
+        resp = client().get("/api/impact/uc-٣")
+        self.assertEqual(422, resp.status_code, resp.text[:200])
+
+    def test_parser_rejects_non_ascii_digits(self):
+        for raw in ("asset-²", "uc-٣", "lob-٣", "asset-１"):  # incl. fullwidth one
+            self.assertIsNone(impact._split_node_id(raw), raw)
+
+    def test_ascii_digits_still_parse(self):
+        self.assertEqual(("asset", 12), impact._split_node_id("asset-12"))
 
 
 class NoneWritesDB(FakeDB):
@@ -224,28 +273,53 @@ class GuardedReturningWrites(unittest.TestCase):
         self.assert503(use_cases.change_status(
             1, use_cases.StatusChange(status="in_progress"), self.req))
 
+    def test_create_account(self):
+        """Missed by the first sweep's hard-coded module list.
+
+        `require_admin` is patched because this asserts the write guard, not the
+        admin gate — which is tested for real in test_account_authz.py, and which
+        the guard deliberately sits AFTER.
+        """
+        with mock.patch.object(accounts_route, "db", self.db), \
+             mock.patch.object(accounts_route, "write_audit", mock.AsyncMock()), \
+             mock.patch.object(accounts_route.acct, "require_admin",
+                               return_value="admin@example.com"), \
+             mock.patch.object(accounts_route.acct, "invalidate_default"):
+            self.assert503(accounts_route.create_account(
+                accounts_route.AccountIn(name="Northern Grid"), self.req))
+
+    def test_sync_packages_lookup_or_create_use_case(self):
+        """Also missed by the first sweep — an import that silently 500'd."""
+        with mock.patch.object(sync_packages, "db", self.db), \
+             mock.patch.object(sync_packages.accounts, "current",
+                               mock.AsyncMock(return_value=None)):
+            self.assert503(sync_packages._lookup_or_create_use_case(
+                {"title": "Outage Prediction", "id": "ext-1"}, "maturity", "actor"))
+
 
 class ReturningSitesAreGuarded(unittest.TestCase):
     """Every `fetchrow(... RETURNING ...)` checks its result before using it.
 
-    The per-site tests above cover the sites the audit found. This one is the
-    regression net for the sites nobody has written a test for yet: it re-derives
-    the list from the source, so a NEW unguarded write fails here rather than
-    waiting to be found by the next audit.
+    The per-site tests above cover the sites the audit named. This is the net for
+    the ones nobody has written a test for, re-derived from the source so a NEW
+    unguarded write fails here rather than in the next audit.
+
+    It GLOBS the source tree. The first version of this sweep took a hard-coded
+    list of module names copied from the audit's grep, which made it worth almost
+    nothing: `accounts.py` and `sync_packages.py` were not on that list, both had
+    an unguarded write, and the sweep reported a clean tree while cross-review
+    found them by globbing. A completeness check that needs a human to remember to
+    extend it is a check that silently narrows as the codebase grows.
     """
 
-    ROUTES = ("knowledge values roadmap proposals joint_funding ingestion "
-              "funding_requests use_cases research inventory flow demo data_assets "
-              "value_assumptions dependencies lobs comments domains snapshots").split()
+    def source_files(self):
+        """Every module that could contain a write, discovered not enumerated."""
+        server = pathlib.Path(__file__).resolve().parent.parent / "server"
+        return sorted(set(server.glob("*.py")) | set(server.glob("routes/*.py")))
 
-    def test_no_unguarded_returning_write(self):
-        import ast
-        import pathlib
-
-        root = pathlib.Path(__file__).resolve().parent.parent / "server" / "routes"
-        unguarded = []
-        for name in self.ROUTES:
-            path = root / f"{name}.py"
+    def unguarded_sites(self):
+        sites, scanned = [], 0
+        for path in self.source_files():
             source = path.read_text()
             lines = source.splitlines()
             for node in ast.walk(ast.parse(source)):
@@ -264,12 +338,35 @@ class ReturningSitesAreGuarded(unittest.TestCase):
                 if not (len(node.targets) == 1
                         and isinstance(node.targets[0], ast.Name)):
                     continue
+                scanned += 1
                 var = node.targets[0].id
                 if not self._guarded(var, lines[node.end_lineno:node.end_lineno + 14]):
-                    unguarded.append(f"{path.name}:{node.lineno} ({var})")
+                    sites.append(f"{path.name}:{node.lineno} ({var})")
+        return sites, scanned
 
+    def test_no_unguarded_returning_write(self):
+        unguarded, _ = self.unguarded_sites()
         self.assertEqual([], unguarded, "unguarded RETURNING write(s): "
                                         + ", ".join(unguarded))
+
+    def test_sweep_actually_reaches_the_writes(self):
+        """The sweep must be scanning a real corpus, not silently matching nothing.
+
+        `test_no_unguarded_returning_write` passes just as happily on zero sites as
+        on all of them, so a glob typo or an AST-shape change would turn it green
+        and useless. This pins the floor and names the two files whose omission was
+        the actual defect.
+        """
+        _, scanned = self.unguarded_sites()
+        self.assertGreater(scanned, 50,
+                           f"sweep found only {scanned} RETURNING writes — the "
+                           f"tree has ~60, so the glob or the AST match is broken")
+
+        names = {path.name for path in self.source_files()}
+        for required in ("accounts.py", "sync_packages.py"):
+            self.assertIn(required, names,
+                          f"{required} is outside the sweep — it was missed once "
+                          f"already and had an unguarded write")
 
     @staticmethod
     def _guarded(var, window):

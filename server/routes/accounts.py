@@ -186,6 +186,8 @@ async def create_account(body: AccountIn, request: Request):
         VALUES ($1,$2,$3,$4,$5, NOT EXISTS (SELECT 1 FROM accounts))
         RETURNING id, slug, name, utility_type, is_default
     """, slug, body.name.strip(), body.utility_type, body.notes, actor)
+    if row is None:
+        raise HTTPException(503, "Database unavailable")
 
     acct.invalidate_default()
     seeded_assumptions = await _seed_assumptions_for_account(row["id"], actor)

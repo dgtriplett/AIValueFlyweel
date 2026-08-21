@@ -39,9 +39,17 @@ def _split_node_id(node_id: str) -> tuple[str, int] | None:
     on a bare 'bogus' and ValueError on 'asset-abc'. Neither is an HTTPException, so
     both surfaced as a 500 on a request the client got wrong — see `blast_radius`,
     which turns the None into the 422 the typed `{id:int}` routes already return.
+
+    ASCII digits specifically, because `str.isdigit()` is not the same question as
+    "does int() accept this". It is True for superscripts, which int() rejects
+    ('asset-²' was still a 500 after the first fix), and also True for other
+    scripts' digits, which int() ACCEPTS — so '٣'.isdigit() plus a try/except
+    would quietly resolve `uc-٣` to use case 3. An id the app never generates
+    should be rejected, not reinterpreted, so the test is `isascii() and isdigit()`
+    rather than a guarded int().
     """
     kind, _, raw = node_id.partition("-")
-    if kind not in _NODE_KINDS or not raw.isdigit():
+    if kind not in _NODE_KINDS or not (raw.isascii() and raw.isdigit()):
         return None
     return kind, int(raw)
 
