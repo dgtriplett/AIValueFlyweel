@@ -147,6 +147,14 @@ def _aiohttp() -> types.ModuleType:
                 }
             return {}
 
+        async def text(self):
+            return "{}"
+
+    class ClientTimeout:
+        def __init__(self, *args, **kwargs):
+            self.args = args
+            self.kwargs = kwargs
+
     class ClientSession:
         def __init__(self, *args, **kwargs):
             self.args = args
@@ -165,6 +173,7 @@ def _aiohttp() -> types.ModuleType:
             return Response("POST", url)
 
     mod.ClientSession = ClientSession
+    mod.ClientTimeout = ClientTimeout
     return mod
 
 
