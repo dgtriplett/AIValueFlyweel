@@ -42,6 +42,7 @@ from fastapi import (APIRouter, Depends, File, HTTPException, Query, Request,
                      Response, UploadFile)
 from pydantic import BaseModel, Field
 
+from .. import accounts
 from .. import knowledge as kb
 from ..common import current_user, rows_to_list, write_audit
 from ..config import ATLAS_CATALOG, ATLAS_SCHEMA, discovery_configured
@@ -115,6 +116,41 @@ class LinkIn(BaseModel):
     relation: str = "related"
 
 
+# ---------------------------------------------------------------------------
+# Account scoping
+# ---------------------------------------------------------------------------
+# kb_articles and kb_folders both carry account_id (migration 009), but every read
+# here spanned all rows and every write omitted it. So one utility's knowledge base
+# — their standards, their generated proposals, their uploaded documents — was
+# readable and editable by every other tenant on the instance, and anything they
+# created became globally visible because account_id defaulted to NULL.
+#
+# NULL means "shared reference library, visible to all" and is what the shipped
+# seeded content uses, so the read predicate keeps NULL rows while the write path
+# stamps the current account.
+async def _article_by_slug(slug: str, *, columns: str = "id"):
+    """One article the current account may see, or None.
+
+    Every by-slug handler goes through this rather than querying `WHERE slug = $1`
+    directly. Slugs are unique across the whole table, so an unscoped lookup let a
+    caller read, edit, archive or hard-delete another tenant's article by guessing
+    or listing its slug — and article slugs are derived from titles, so they are
+    guessable.
+    """
+    scope, params = await accounts.scope_clause_at(2)
+    return await db.fetchrow(
+        f"SELECT {columns} FROM kb_articles WHERE slug = $1 AND {scope}",
+        slug, *params)
+
+
+async def _folder_visible(folder_id: int) -> bool:
+    """Whether the current account may file something in this folder."""
+    scope, params = await accounts.scope_clause_at(2)
+    row = await db.fetchrow(
+        f"SELECT id FROM kb_folders WHERE id = $1 AND {scope}", folder_id, *params)
+    return row is not None
+
+
 def _check_status(status: str | None) -> None:
     if status is not None and status not in ("draft", "published", "archived"):
         raise HTTPException(422, "status must be draft, published or archived")
@@ -141,21 +177,29 @@ def _clean_tags(tags: list[str] | None) -> list[str]:
 @router.get("/tree")
 async def folder_tree():
     """The folder tree with per-folder article counts, plus the unfiled count."""
-    folders = rows_to_list(await db.fetch("""
+    # Both the folder list AND the per-folder counts are scoped: an unscoped count
+    # leaks the SIZE of another tenant's knowledge base even when the folder itself
+    # is shared reference content.
+    folder_scope, folder_params = await accounts.scope_clause("f")
+    article_scope, _ = await accounts.scope_clause("a")
+    folders = rows_to_list(await db.fetch(f"""
         SELECT f.id, f.name, f.parent_id, f.path, f.sort_order,
                (SELECT count(*) FROM kb_articles a
-                 WHERE a.folder_id = f.id AND a.status <> 'archived')
+                 WHERE a.folder_id = f.id AND a.status <> 'archived'
+                   AND {article_scope})
                AS article_count
-        FROM kb_folders f ORDER BY f.sort_order, lower(f.name)
-    """))
+        FROM kb_folders f WHERE {folder_scope}
+        ORDER BY f.sort_order, lower(f.name)
+    """, *folder_params))
+    scope, params = await accounts.scope_clause()
     unfiled = await db.fetchrow(
-        "SELECT count(*) AS n FROM kb_articles "
-        "WHERE folder_id IS NULL AND status <> 'archived'")
+        f"SELECT count(*) AS n FROM kb_articles "
+        f"WHERE folder_id IS NULL AND status <> 'archived' AND {scope}", *params)
     totals = await db.fetchrow(
-        "SELECT count(*) AS articles, "
-        "count(*) FILTER (WHERE status = 'published') AS published, "
-        "count(*) FILTER (WHERE generated_by IS NOT NULL) AS generated "
-        "FROM kb_articles WHERE status <> 'archived'")
+        f"SELECT count(*) AS articles, "
+        f"count(*) FILTER (WHERE status = 'published') AS published, "
+        f"count(*) FILTER (WHERE generated_by IS NOT NULL) AS generated "
+        f"FROM kb_articles WHERE status <> 'archived' AND {scope}", *params)
     return {
         "folders": folders,
         "unfiled_count": (unfiled or {}).get("n", 0) if unfiled else 0,
@@ -166,25 +210,32 @@ async def folder_tree():
 @router.post("/folders", dependencies=[Depends(limiter("write"))])
 async def create_folder(body: FolderIn, request: Request):
     actor = current_user(request)
+    account_id = await accounts.current()
+    scope, scope_params = await accounts.scope_clause_at(2)
     parent_path = None
     if body.parent_id is not None:
         parent = await db.fetchrow(
-            "SELECT path FROM kb_folders WHERE id = $1", body.parent_id)
+            f"SELECT path FROM kb_folders WHERE id = $1 AND {scope}",
+            body.parent_id, *scope_params)
         if parent is None:
             raise HTTPException(404, "Parent folder not found")
         parent_path = parent["path"]
 
     path = kb.folder_path(parent_path, body.name)
+    # Scoped, so two tenants may each have a /standards folder. An unscoped check
+    # made the first account to create a path own that name instance-wide, and the
+    # 409 disclosed that another tenant had used it.
     existing = await db.fetchrow(
-        "SELECT id FROM kb_folders WHERE path = $1", path)
+        f"SELECT id FROM kb_folders WHERE path = $1 AND {scope}",
+        path, *scope_params)
     if existing is not None:
         raise HTTPException(
             409, f"A folder already exists at {path}. Pick a different name.")
 
     row = await db.fetchrow("""
-        INSERT INTO kb_folders (name, parent_id, path, created_by)
-        VALUES ($1,$2,$3,$4) RETURNING id, name, parent_id, path
-    """, body.name.strip(), body.parent_id, path, actor)
+        INSERT INTO kb_folders (account_id, name, parent_id, path, created_by)
+        VALUES ($1,$2,$3,$4,$5) RETURNING id, name, parent_id, path
+    """, account_id, body.name.strip(), body.parent_id, path, actor)
     await write_audit("kb_folder", row["id"], "create", actor, {"path": path})
     return dict(row)
 
@@ -193,8 +244,10 @@ async def create_folder(body: FolderIn, request: Request):
 async def update_folder(folder_id: int, body: FolderPatch, request: Request):
     """Rename or move a folder, re-pathing its whole subtree."""
     actor = current_user(request)
+    scope, scope_params = await accounts.scope_clause_at(2)
     folder = await db.fetchrow(
-        "SELECT id, name, parent_id, path FROM kb_folders WHERE id = $1", folder_id)
+        f"SELECT id, name, parent_id, path FROM kb_folders "
+        f"WHERE id = $1 AND {scope}", folder_id, *scope_params)
     if folder is None:
         raise HTTPException(404, "Folder not found")
 
@@ -206,7 +259,8 @@ async def update_folder(folder_id: int, body: FolderPatch, request: Request):
         if body.parent_id == folder_id:
             raise HTTPException(422, "A folder cannot be its own parent.")
         parent = await db.fetchrow(
-            "SELECT id, path FROM kb_folders WHERE id = $1", body.parent_id)
+            f"SELECT id, path FROM kb_folders WHERE id = $1 AND {scope}",
+            body.parent_id, *scope_params)
         if parent is None:
             raise HTTPException(404, "Parent folder not found")
         # Moving a folder into its own descendant detaches the whole branch: the
@@ -219,7 +273,8 @@ async def update_folder(folder_id: int, body: FolderPatch, request: Request):
         new_parent_path = parent["path"]
     elif folder["parent_id"] is not None:
         parent = await db.fetchrow(
-            "SELECT path FROM kb_folders WHERE id = $1", folder["parent_id"])
+            f"SELECT path FROM kb_folders WHERE id = $1 AND {scope}",
+            folder["parent_id"], *scope_params)
         new_parent_path = parent["path"] if parent else None
 
     new_name = (body.name or folder["name"]).strip()
@@ -227,27 +282,35 @@ async def update_folder(folder_id: int, body: FolderPatch, request: Request):
     old_path = folder["path"]
 
     if new_path != old_path:
+        clash_scope, clash_params = await accounts.scope_clause_at(3)
         clash = await db.fetchrow(
-            "SELECT id FROM kb_folders WHERE path = $1 AND id <> $2",
-            new_path, folder_id)
+            f"SELECT id FROM kb_folders WHERE path = $1 AND id <> $2 "
+            f"AND {clash_scope}", new_path, folder_id, *clash_params)
         if clash is not None:
             raise HTTPException(409, f"A folder already exists at {new_path}.")
 
-    await db.execute("""
+    update_scope, update_params = await accounts.scope_clause_at(5)
+    await db.execute(f"""
         UPDATE kb_folders SET name = $1, parent_id = $2, path = $3,
-               updated_at = now() WHERE id = $4
-    """, new_name, new_parent_id, new_path, folder_id)
+               updated_at = now() WHERE id = $4 AND {update_scope}
+    """, new_name, new_parent_id, new_path, folder_id, *update_params)
 
     # Re-path descendants. Their stored paths all begin with the old path, so one
     # UPDATE fixes the subtree; doing it per-row would leave a partially-repathed
     # tree if it failed halfway.
+    #
+    # Scoped too: a shared (NULL-account) folder can have same-path descendants in
+    # other tenants, and re-pathing those would silently rewrite another customer's
+    # folder tree as a side effect of renaming one of ours.
     if new_path != old_path:
-        await db.execute("""
+        descendant_scope, descendant_params = await accounts.scope_clause_at(5)
+        await db.execute(f"""
             UPDATE kb_folders
                SET path = $1 || substring(path from char_length($2) + 1),
                    updated_at = now()
-             WHERE path LIKE $3 AND id <> $4
-        """, new_path, old_path, kb.descendant_pattern(old_path), folder_id)
+             WHERE path LIKE $3 AND id <> $4 AND {descendant_scope}
+        """, new_path, old_path, kb.descendant_pattern(old_path), folder_id,
+            *descendant_params)
 
     await write_audit("kb_folder", folder_id, "update", actor,
                       {"from": old_path, "to": new_path})
@@ -264,16 +327,22 @@ async def delete_folder(folder_id: int, request: Request):
     unfiled rather than gone. Child folders cascade, so their articles unfile too.
     """
     actor = current_user(request)
+    scope, scope_params = await accounts.scope_clause_at(2)
     folder = await db.fetchrow(
-        "SELECT path FROM kb_folders WHERE id = $1", folder_id)
+        f"SELECT path FROM kb_folders WHERE id = $1 AND {scope}",
+        folder_id, *scope_params)
     if folder is None:
         raise HTTPException(404, "Folder not found")
-    affected = await db.fetchrow("""
+    article_scope, _ = await accounts.scope_clause_at(2, "a")
+    affected = await db.fetchrow(f"""
         SELECT count(*) AS n FROM kb_articles a
         WHERE a.folder_id IN (
             SELECT id FROM kb_folders WHERE path LIKE $1
-        )""", kb.descendant_pattern(folder["path"]))
-    await db.execute("DELETE FROM kb_folders WHERE id = $1", folder_id)
+        ) AND {article_scope}""",
+        kb.descendant_pattern(folder["path"]), *scope_params)
+    await db.execute(
+        f"DELETE FROM kb_folders WHERE id = $1 AND {scope}",
+        folder_id, *scope_params)
     await write_audit("kb_folder", folder_id, "delete", actor,
                       {"path": folder["path"]})
     return {"deleted": True,
@@ -306,9 +375,11 @@ async def list_articles(
     if entity_type is not None and entity_type not in ENTITY_TYPES:
         raise HTTPException(422, f"entity_type must be one of {ENTITY_TYPES}")
 
+    account_id = await accounts.current()
     sql = kb.build_search_sql(
         has_query=bool(q), folder=bool(folder_path), tag=bool(tag),
-        status=bool(status), entity=entity_type is not None)
+        status=bool(status), entity=entity_type is not None,
+        account=account_id is not None)
     params: list = []
     if q:
         params.append(q)
@@ -320,6 +391,8 @@ async def list_articles(
         params.append(status)
     if entity_type is not None:
         params.extend([entity_type, entity_id])
+    if account_id is not None:
+        params.append(account_id)
     params.extend([limit, offset])
 
     try:
@@ -338,23 +411,26 @@ async def list_articles(
 @router.post("/articles", dependencies=[Depends(limiter("write"))])
 async def create_article(body: ArticleIn, request: Request):
     actor = current_user(request)
+    account_id = await accounts.current()
     _check_status(body.status)
-    if body.folder_id is not None:
-        folder = await db.fetchrow(
-            "SELECT id FROM kb_folders WHERE id = $1", body.folder_id)
-        if folder is None:
-            raise HTTPException(404, "Folder not found")
+    if body.folder_id is not None and not await _folder_visible(body.folder_id):
+        raise HTTPException(404, "Folder not found")
 
+    # Slug uniqueness stays GLOBAL on purpose: kb_articles.slug is UNIQUE in the
+    # schema (migration 007) and relaxing that needs a migration another PR owns. So
+    # the candidate list must span all rows, or the insert below fails on a
+    # constraint violation instead of picking the next free suffix. This reads slugs
+    # only — no titles, bodies or account ids — so it is not a content disclosure.
     taken = {r["slug"] for r in await db.fetch("SELECT slug FROM kb_articles")}
     slug = kb.slugify(body.title, existing=taken)
 
     row = await db.fetchrow("""
         INSERT INTO kb_articles
-            (title, slug, folder_id, body_md, summary, tags, status,
+            (account_id, title, slug, folder_id, body_md, summary, tags, status,
              created_by, updated_by)
-        VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$8)
+        VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$9)
         RETURNING id, title, slug, status, version, created_at
-    """, body.title.strip(), slug, body.folder_id, body.body_md,
+    """, account_id, body.title.strip(), slug, body.folder_id, body.body_md,
         body.summary, _clean_tags(body.tags), body.status, actor)
     await write_audit("kb_article", row["id"], "create", actor,
                       {"slug": slug, "title": body.title})
@@ -364,11 +440,12 @@ async def create_article(body: ArticleIn, request: Request):
 @router.get("/articles/{slug}")
 async def get_article(slug: str):
     """One article with its links, attachments, versions and resolved wiki links."""
-    row = await db.fetchrow("""
+    scope, scope_params = await accounts.scope_clause_at(2, "a")
+    row = await db.fetchrow(f"""
         SELECT a.*, f.name AS folder_name, f.path AS folder_path
         FROM kb_articles a LEFT JOIN kb_folders f ON f.id = a.folder_id
-        WHERE a.slug = $1
-    """, slug)
+        WHERE a.slug = $1 AND {scope}
+    """, slug, *scope_params)
     if row is None:
         raise HTTPException(404, "Article not found")
     article = dict(row)
@@ -417,9 +494,14 @@ async def get_article(slug: str):
     referenced = kb.extract_wiki_links(article.get("body_md") or "")
     resolved: list[dict] = []
     if referenced:
+        # Scoped: resolving against all rows returned another tenant's article TITLE
+        # for any slug guessed in a body, turning [[...]] into a probe for what other
+        # customers have written.
+        link_scope, link_params = await accounts.scope_clause_at(2)
         found = await db.fetch(
-            "SELECT slug, title FROM kb_articles WHERE slug = ANY($1::text[])",
-            referenced)
+            f"SELECT slug, title FROM kb_articles "
+            f"WHERE slug = ANY($1::text[]) AND {link_scope}",
+            referenced, *link_params)
         existing = {r["slug"]: r["title"] for r in found}
         resolved = [{"slug": s, "title": existing.get(s), "exists": s in existing}
                     for s in dict.fromkeys(referenced)]
@@ -433,17 +515,13 @@ async def update_article(slug: str, body: ArticleUpdate, request: Request):
     """Edit an article, snapshotting the previous version first."""
     actor = current_user(request)
     _check_status(body.status)
-    row = await db.fetchrow(
-        "SELECT id, title, body_md, summary, version FROM kb_articles "
-        "WHERE slug = $1", slug)
+    row = await _article_by_slug(
+        slug, columns="id, title, body_md, summary, version")
     if row is None:
         raise HTTPException(404, "Article not found")
 
-    if body.folder_id is not None:
-        folder = await db.fetchrow(
-            "SELECT id FROM kb_folders WHERE id = $1", body.folder_id)
-        if folder is None:
-            raise HTTPException(404, "Folder not found")
+    if body.folder_id is not None and not await _folder_visible(body.folder_id):
+        raise HTTPException(404, "Folder not found")
 
     # Only a CONTENT change makes a new version. Re-filing an article or changing
     # its tags would otherwise fill the history with entries whose diff is empty,
@@ -462,7 +540,11 @@ async def update_article(slug: str, body: ArticleUpdate, request: Request):
         """, row["id"], row["version"], row["title"], row["body_md"],
             row["summary"], body.change_note, actor)
 
-    updated = await db.fetchrow("""
+    # The ownership predicate is repeated on the write even though the lookup above
+    # was scoped. Belt and braces: it makes the statement safe to read in isolation,
+    # and a future edit that changes how `row` is fetched cannot silently widen it.
+    write_scope, write_params = await accounts.scope_clause_at(10)
+    updated = await db.fetchrow(f"""
         UPDATE kb_articles SET
             title    = COALESCE($2, title),
             body_md  = COALESCE($3, body_md),
@@ -473,13 +555,15 @@ async def update_article(slug: str, body: ArticleUpdate, request: Request):
             version  = version + CASE WHEN $8 THEN 1 ELSE 0 END,
             updated_by = $9,
             updated_at = now()
-        WHERE id = $1
+        WHERE id = $1 AND {write_scope}
         RETURNING id, title, slug, status, version, updated_at
     """, row["id"],
         body.title.strip() if body.title else None,
         body.body_md, body.summary, body.folder_id,
         _clean_tags(body.tags) if body.tags is not None else None,
-        body.status, content_changed, actor)
+        body.status, content_changed, actor, *write_params)
+    if updated is None:
+        raise HTTPException(404, "Article not found")
 
     await write_audit("kb_article", row["id"], "update", actor,
                       {"slug": slug, "new_version": updated["version"],
@@ -496,24 +580,29 @@ async def delete_article(slug: str, request: Request, hard: bool = False):
     drop out of search but keep their links and history.
     """
     actor = current_user(request)
-    row = await db.fetchrow("SELECT id, title FROM kb_articles WHERE slug = $1", slug)
+    row = await _article_by_slug(slug, columns="id, title")
     if row is None:
         raise HTTPException(404, "Article not found")
+    # Scoped on the write as well as the lookup: a hard delete is irreversible, so
+    # this is the last statement that should ever be reachable by id alone.
     if hard:
-        await db.execute("DELETE FROM kb_articles WHERE id = $1", row["id"])
+        scope, params = await accounts.scope_clause_at(2)
+        await db.execute(
+            f"DELETE FROM kb_articles WHERE id = $1 AND {scope}",
+            row["id"], *params)
         await write_audit("kb_article", row["id"], "delete", actor, {"slug": slug})
         return {"deleted": True, "slug": slug}
+    scope, params = await accounts.scope_clause_at(3)
     await db.execute(
-        "UPDATE kb_articles SET status = 'archived', updated_by = $2, "
-        "updated_at = now() WHERE id = $1", row["id"], actor)
+        f"UPDATE kb_articles SET status = 'archived', updated_by = $2, "
+        f"updated_at = now() WHERE id = $1 AND {scope}", row["id"], actor, *params)
     await write_audit("kb_article", row["id"], "archive", actor, {"slug": slug})
     return {"archived": True, "slug": slug}
 
 
 @router.get("/articles/{slug}/versions")
 async def article_versions(slug: str):
-    row = await db.fetchrow("SELECT id, version FROM kb_articles WHERE slug = $1",
-                            slug)
+    row = await _article_by_slug(slug, columns="id, version")
     if row is None:
         raise HTTPException(404, "Article not found")
     return {
@@ -536,9 +625,8 @@ async def restore_version(slug: str, version: int, request: Request):
     recover from.
     """
     actor = current_user(request)
-    row = await db.fetchrow(
-        "SELECT id, title, body_md, summary, version FROM kb_articles "
-        "WHERE slug = $1", slug)
+    row = await _article_by_slug(
+        slug, columns="id, title, body_md, summary, version")
     if row is None:
         raise HTTPException(404, "Article not found")
     target = await db.fetchrow(
@@ -555,11 +643,15 @@ async def restore_version(slug: str, version: int, request: Request):
     """, row["id"], row["version"], row["title"], row["body_md"], row["summary"],
         f"Replaced by a restore of version {version}", actor)
 
-    updated = await db.fetchrow("""
+    scope, params = await accounts.scope_clause_at(6)
+    updated = await db.fetchrow(f"""
         UPDATE kb_articles SET title = $2, body_md = $3, summary = $4,
                version = version + 1, updated_by = $5, updated_at = now()
-        WHERE id = $1 RETURNING version
-    """, row["id"], target["title"], target["body_md"], target["summary"], actor)
+        WHERE id = $1 AND {scope} RETURNING version
+    """, row["id"], target["title"], target["body_md"], target["summary"], actor,
+        *params)
+    if updated is None:
+        raise HTTPException(404, "Article not found")
 
     await write_audit("kb_article", row["id"], "restore", actor,
                       {"slug": slug, "restored_from": version,
@@ -579,7 +671,7 @@ async def add_link(slug: str, body: LinkIn, request: Request):
     if body.relation not in RELATIONS:
         raise HTTPException(422, f"relation must be one of {RELATIONS}")
 
-    article = await db.fetchrow("SELECT id FROM kb_articles WHERE slug = $1", slug)
+    article = await _article_by_slug(slug)
     if article is None:
         raise HTTPException(404, "Article not found")
 
@@ -612,10 +704,20 @@ async def add_link(slug: str, body: LinkIn, request: Request):
 
 @router.delete("/links/{link_id}", dependencies=[Depends(limiter("write"))])
 async def remove_link(link_id: int, request: Request):
+    """Detach an article from an entity.
+
+    kb_links has no account_id of its own, so it is scoped through the article that
+    owns it. Deleting by link id alone let any caller detach another tenant's
+    articles from their portfolio entities.
+    """
     actor = current_user(request)
+    scope, scope_params = await accounts.scope_clause_at(2, "a")
     row = await db.fetchrow(
-        "DELETE FROM kb_links WHERE id = $1 RETURNING article_id, entity_type, "
-        "entity_id", link_id)
+        f"""DELETE FROM kb_links WHERE id = $1 AND EXISTS (
+                SELECT 1 FROM kb_articles a
+                 WHERE a.id = kb_links.article_id AND {scope})
+            RETURNING article_id, entity_type, entity_id""",
+        link_id, *scope_params)
     if row is None:
         raise HTTPException(404, "Link not found")
     await write_audit("kb_link", link_id, "delete", actor, dict(row))
@@ -631,7 +733,10 @@ async def articles_for_entity(entity_type: str, entity_id: int):
     """
     if entity_type not in ENTITY_TYPES:
         raise HTTPException(422, f"entity_type must be one of {ENTITY_TYPES}")
-    rows = rows_to_list(await db.fetch("""
+    # Scoped through the joined article: opening a use case must show OUR standards
+    # and proposals, not every tenant's.
+    scope, scope_params = await accounts.scope_clause_at(3, "a")
+    rows = rows_to_list(await db.fetch(f"""
         SELECT a.id, a.title, a.slug, a.summary, a.status, a.tags,
                a.generated_by, a.updated_at, l.relation, l.id AS link_id,
                f.path AS folder_path
@@ -639,11 +744,12 @@ async def articles_for_entity(entity_type: str, entity_id: int):
         JOIN kb_articles a ON a.id = l.article_id
         LEFT JOIN kb_folders f ON f.id = a.folder_id
         WHERE l.entity_type = $1 AND l.entity_id = $2 AND a.status <> 'archived'
+          AND {scope}
         ORDER BY CASE l.relation
                      WHEN 'standard' THEN 1 WHEN 'proposal' THEN 2
                      WHEN 'explains' THEN 3 WHEN 'evidence' THEN 4 ELSE 5 END,
                  a.updated_at DESC
-    """, entity_type, entity_id))
+    """, entity_type, entity_id, *scope_params))
     return {"entity_type": entity_type, "entity_id": entity_id,
             "articles": rows, "count": len(rows)}
 
@@ -657,7 +763,7 @@ async def upload_attachment(slug: str, request: Request,
                             file: UploadFile = File(...)):
     """Attach a document. Validated against its actual bytes, not its filename."""
     actor = current_user(request)
-    article = await db.fetchrow("SELECT id FROM kb_articles WHERE slug = $1", slug)
+    article = await _article_by_slug(slug)
     if article is None:
         raise HTTPException(404, "Article not found")
 
@@ -737,10 +843,17 @@ async def download_attachment(attachment_id: int):
     ALWAYS as an attachment download, never inline. These bytes are user-supplied;
     rendering one in the page would make a crafted file a script-execution vector
     even with the type sniffing on upload.
+
+    Scoped through the owning article. kb_attachments has no account_id, and the ids
+    are sequential integers, so fetching by id alone let anyone walk /kb/attachments/1
+    upward and download every document every customer had uploaded.
     """
+    scope, scope_params = await accounts.scope_clause_at(2, "a")
     row = await db.fetchrow(
-        "SELECT filename, mime_type, storage, volume_path, content "
-        "FROM kb_attachments WHERE id = $1", attachment_id)
+        f"""SELECT t.filename, t.mime_type, t.storage, t.volume_path, t.content
+            FROM kb_attachments t
+            JOIN kb_articles a ON a.id = t.article_id
+            WHERE t.id = $1 AND {scope}""", attachment_id, *scope_params)
     if row is None:
         raise HTTPException(404, "Attachment not found")
 
@@ -775,10 +888,15 @@ async def download_attachment(attachment_id: int):
 @router.delete("/attachments/{attachment_id}",
                dependencies=[Depends(limiter("write"))])
 async def delete_attachment(attachment_id: int, request: Request):
+    """Remove an attachment from an article the current account owns."""
     actor = current_user(request)
+    scope, scope_params = await accounts.scope_clause_at(2, "a")
     row = await db.fetchrow(
-        "DELETE FROM kb_attachments WHERE id = $1 "
-        "RETURNING article_id, filename, storage, volume_path", attachment_id)
+        f"""DELETE FROM kb_attachments WHERE id = $1 AND EXISTS (
+                SELECT 1 FROM kb_articles a
+                 WHERE a.id = kb_attachments.article_id AND {scope})
+            RETURNING article_id, filename, storage, volume_path""",
+        attachment_id, *scope_params)
     if row is None:
         raise HTTPException(404, "Attachment not found")
     # The Volume file is deliberately left in place. Deleting it would be an

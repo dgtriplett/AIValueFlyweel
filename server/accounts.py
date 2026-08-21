@@ -440,3 +440,19 @@ async def owned_clause(column: str = "account_id", *, param_index: int = 1) -> t
     if account_id is None:
         return "true", []
     return f"{column} = ${param_index}", [account_id]
+
+
+async def scope_clause_at(param_index: int, alias: str = "") -> tuple[str, list]:
+    """`scope_clause` with the placeholder numbered `$param_index` instead of `$1`.
+
+    Needed by UPDATE/DELETE statements, where the scoping predicate is appended after
+    the SET values and so cannot be `$1`. Rewriting the `$1` of `scope_clause()` by
+    string substitution at each call site is the kind of thing that works until a
+    query has a `$10` in it, so the index is a parameter here instead.
+    """
+    prefix = f"{alias}." if alias else ""
+    account_id = await current()
+    if account_id is None:
+        return "true", []
+    return (f"({prefix}account_id = ${param_index} "
+            f"OR {prefix}account_id IS NULL)"), [account_id]

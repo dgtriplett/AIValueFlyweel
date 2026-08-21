@@ -33,7 +33,7 @@ from pydantic import BaseModel, Field
 
 from ..common import current_user, row_to_dict, rows_to_list, write_audit
 from ..db import db
-from .. import portfolio
+from .. import accounts, portfolio
 # Import the readiness rule rather than restating it: a local copy would let
 # this module silently disagree with how readiness is actually computed.
 from ..readiness import ready_assets, READY_STATUSES as READY
@@ -275,14 +275,20 @@ async def list_glossary(search: str | None = None, include_derived: bool = True)
     a definition and known systems of record, so re-typing 63 of them by hand would
     be busywork. Derived entries are marked so a user can tell which they can edit.
     """
-    curated = rows_to_list(await db.fetch("""
+    # Scoped: glossary_terms carries account_id (migration 009), and an unscoped
+    # read here showed one utility's vocabulary — their definitions, their owners,
+    # their systems of record — to every other tenant on the instance. NULL
+    # account_id stays visible to all, which is what the shipped reference terms use.
+    scope, scope_params = await accounts.scope_clause("gt")
+    curated = rows_to_list(await db.fetch(f"""
         SELECT gt.*, dd.label AS domain_label, dd.name AS domain_name,
                l.name AS lob_name
         FROM glossary_terms gt
         LEFT JOIN data_domains dd ON dd.id = gt.domain_id
         LEFT JOIN lobs l ON l.id = gt.lob_id
+        WHERE {scope}
         ORDER BY gt.term
-    """))
+    """, *scope_params))
     for term in curated:
         term["origin_kind"] = "curated"
 
@@ -349,18 +355,33 @@ async def list_glossary(search: str | None = None, include_derived: bool = True)
 @router.post("/glossary")
 async def create_term(body: GlossaryTermIn, request: Request):
     """Add a curated term. Attaching a domain_id supersedes that domain's derived
-    entry, so the same concept never shows twice."""
+    entry, so the same concept never shows twice.
+
+    The term is stored against the current account, so one utility defining
+    "feeder" does not overwrite or expose another's definition of it.
+    """
     actor = current_user(request)
+    account_id = await accounts.current()
+    # The duplicate check is scoped the same way the list read is, so a name another
+    # tenant happens to use does not read as "already exists" here — a 409 naming a
+    # term the caller cannot see is both confusing and a disclosure.
+    scope, scope_params = await accounts.scope_clause_at(2, "gt")
     existing = await db.fetchrow(
-        "SELECT id FROM glossary_terms WHERE lower(term) = lower($1)", body.term)
+        f"SELECT gt.id FROM glossary_terms gt "
+        f"WHERE lower(gt.term) = lower($1) AND {scope}",
+        body.term, *scope_params)
     if existing:
         raise HTTPException(409, f"A term named {body.term!r} already exists.")
+    # NOTE: glossary_terms.term is still globally UNIQUE in the schema (migration
+    # 005), so two accounts cannot yet hold the same term and the insert below will
+    # raise on a collision with another tenant's row. Relaxing that to
+    # UNIQUE (account_id, term) needs a migration, which a separate PR owns.
     row = await db.fetchrow(
         """INSERT INTO glossary_terms
-           (term, definition, domain_id, lob_id, synonyms, source_systems, owner,
-            origin, is_user_edited)
-           VALUES ($1,$2,$3,$4,$5,$6,$7,'manual',true) RETURNING *""",
-        body.term, body.definition, body.domain_id, body.lob_id,
+           (account_id, term, definition, domain_id, lob_id, synonyms,
+            source_systems, owner, origin, is_user_edited)
+           VALUES ($1,$2,$3,$4,$5,$6,$7,$8,'manual',true) RETURNING *""",
+        account_id, body.term, body.definition, body.domain_id, body.lob_id,
         body.synonyms, body.source_systems, body.owner)
     if row is None:
         raise HTTPException(503, "Database unavailable")
@@ -370,14 +391,25 @@ async def create_term(body: GlossaryTermIn, request: Request):
 
 @router.put("/glossary/{term_id}")
 async def update_term(term_id: int, body: GlossaryTermIn, request: Request):
+    """Edit a curated term the current account owns.
+
+    The ownership predicate is in the WHERE clause rather than a check before it, so
+    there is no window between "may I?" and the write, and a term belonging to
+    another tenant simply matches nothing. Selecting by id alone let any caller
+    rewrite any utility's vocabulary.
+    """
     actor = current_user(request)
+    scope, scope_params = await accounts.scope_clause_at(9)
     row = await db.fetchrow(
-        """UPDATE glossary_terms SET term=$1, definition=$2, domain_id=$3, lob_id=$4,
+        f"""UPDATE glossary_terms SET term=$1, definition=$2, domain_id=$3, lob_id=$4,
            synonyms=$5, source_systems=$6, owner=$7, is_user_edited=true,
-           updated_at=now() WHERE id=$8 RETURNING *""",
+           updated_at=now()
+           WHERE id=$8 AND {scope} RETURNING *""",
         body.term, body.definition, body.domain_id, body.lob_id,
-        body.synonyms, body.source_systems, body.owner, term_id)
+        body.synonyms, body.source_systems, body.owner, term_id, *scope_params)
     if row is None:
+        # Deliberately the same 404 whether the term is absent or owned by another
+        # account: a 403 would confirm that someone else's term exists.
         raise HTTPException(404, "Term not found")
     await write_audit("glossary_term", term_id, "update", actor, body.model_dump())
     return dict(row)
@@ -385,7 +417,13 @@ async def update_term(term_id: int, body: GlossaryTermIn, request: Request):
 
 @router.delete("/glossary/{term_id}")
 async def delete_term(term_id: int, request: Request):
+    """Delete a curated term the current account owns."""
     actor = current_user(request)
-    result = await db.execute("DELETE FROM glossary_terms WHERE id = $1", term_id)
+    scope, scope_params = await accounts.scope_clause_at(2)
+    row = await db.fetchrow(
+        f"DELETE FROM glossary_terms WHERE id = $1 AND {scope} RETURNING id",
+        term_id, *scope_params)
+    if row is None:
+        raise HTTPException(404, "Term not found")
     await write_audit("glossary_term", term_id, "delete", actor)
-    return {"deleted": result is not None}
+    return {"deleted": True}

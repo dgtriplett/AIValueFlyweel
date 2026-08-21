@@ -244,7 +244,7 @@ def safe_volume_filename(filename: str) -> str:
 # Search
 # ---------------------------------------------------------------------------
 def build_search_sql(*, has_query: bool, folder: bool, tag: bool,
-                     status: bool, entity: bool) -> str:
+                     status: bool, entity: bool, account: bool = False) -> str:
     """Assemble the article-search statement for the filters in play.
 
     Built here rather than inline so the shape is testable without a database, and
@@ -252,6 +252,12 @@ def build_search_sql(*, has_query: bool, folder: bool, tag: bool,
     plain_to_tsquery because it accepts what people actually type — quoted phrases,
     OR, a leading minus to exclude — without erroring on syntax the way
     to_tsquery does.
+
+    `account` adds the tenant predicate. It is a parameter rather than always-on
+    because the caller resolves the account id and there is a legitimate unscoped
+    case (no accounts configured yet), but the search route always passes it when an
+    account resolves — an unscoped search returned every tenant's articles, titles
+    and highlighted body excerpts included.
     """
     select = [
         "a.id", "a.title", "a.slug", "a.summary", "a.tags", "a.status",
@@ -309,6 +315,11 @@ def build_search_sql(*, has_query: bool, folder: bool, tag: bool,
         where.append(
             f"EXISTS (SELECT 1 FROM kb_links l WHERE l.article_id = a.id "
             f"AND l.entity_type = ${params - 1} AND l.entity_id = ${params})")
+    if account:
+        params += 1
+        # NULL account_id is the shipped reference library, visible to every tenant.
+        where.append(
+            f"(a.account_id = ${params} OR a.account_id IS NULL)")
 
     sql = ("SELECT " + ", ".join(select)
            + " FROM kb_articles a LEFT JOIN kb_folders f ON f.id = a.folder_id")
