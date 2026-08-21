@@ -82,11 +82,27 @@ class TestErrorClassification(AccountTestCase):
             sqlstate = "42501"
         self.assertFalse(acct.is_missing_relation(NoPermission("denied")))
 
-    def test_message_fallback_when_there_is_no_sqlstate(self):
-        """The stubbed asyncpg in tests raises plain exceptions."""
-        self.assertTrue(acct.is_missing_relation(
+    def test_no_sqlstate_fails_closed_even_if_the_message_looks_right(self):
+        """Reversed deliberately: this test used to assert the fail-open.
+
+        It previously required `is_missing_relation` to return True for
+        `Exception('relation "accounts" does not exist')`, on the reasoning that the
+        stubbed asyncpg raises plain exceptions. That made a SUBSTRING MATCH
+        sufficient to unscope every query — any layer can raise that text, and no
+        driver guarantees the wording.
+
+        Unscoped operation now requires positive proof (SQLSTATE 42P01). An error
+        carrying no SQLSTATE is not proof of anything.
+        """
+        self.assertFalse(acct.is_missing_relation(
             Exception('relation "accounts" does not exist')))
         self.assertFalse(acct.is_missing_relation(Exception("timeout")))
+
+    def test_class_name_alone_is_not_proof(self):
+        """A lookalike class name is not the driver's signal either."""
+        class UndefinedTableError(Exception):
+            pass
+        self.assertFalse(acct.is_missing_relation(UndefinedTableError("nope")))
 
 
 class TestDefaultAccountIdDistinguishesTheCases(AccountTestCase):

@@ -556,17 +556,34 @@ async def get_article(slug: str):
         column = "name" if entity_type in ("data_domain", "lob") else "title"
         if entity_type == "data_asset":
             column = "module"
-        # SCOPED for the account-owned tables. Unscoped, this resolved and RETURNED
-        # another tenant's roadmap-item and funding-request titles — the label is
-        # rendered straight into the UI, so it is a direct disclosure, not just an
-        # existence oracle. The shared catalog (use_cases, data_assets, data_domains,
-        # lobs) is identical for every tenant, so its labels are not account data.
-        if table in _ACCOUNT_OWNED_ENTITY_TABLES:
+        # SCOPED, and the label path needs the SAME rule as validation.
+        #
+        # Labels are rendered straight into the UI, so an unscoped resolve is a direct
+        # disclosure rather than just an existence oracle.
+        #
+        # use_cases needs membership scoping even though the table is the shared
+        # catalog, which is a correction to an earlier assumption here. "Shared
+        # catalog" is true of the SHIPPED rows, but `POST /api/use_cases` inserts
+        # CUSTOM, customer-authored use cases into that same table and only then adds
+        # them to the creator's account_portfolio_use_cases. So a use-case title can be
+        # one tenant's private text living in a shared table, and a link created before
+        # validation was scoped still points at it. Membership is the only predicate
+        # that separates them.
+        if entity_type == "use_case":
+            condition, condition_params = await portfolio.portfolio_condition(
+                "uc", param_index=2)
+            label_sql = (f"SELECT uc.id, uc.{column} AS label FROM use_cases uc "
+                         f"WHERE uc.id = ANY($1::int[]) AND {condition}")
+            label_args = [ids, *condition_params]
+        elif table in _ACCOUNT_OWNED_ENTITY_TABLES:
             owned, owned_params = await accounts.owned_clause(param_index=2)
             label_sql = (f"SELECT id, {column} AS label FROM {table} "
                          f"WHERE id = ANY($1::int[]) AND {owned}")
             label_args = [ids, *owned_params]
         else:
+            # data_assets, data_domains, lobs: shipped reference data with no
+            # per-tenant authoring path, so their labels are identical for every
+            # account and disclose nothing account-specific.
             label_sql = (f"SELECT id, {column} AS label FROM {table} "
                          f"WHERE id = ANY($1::int[])")
             label_args = [ids]

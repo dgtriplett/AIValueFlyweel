@@ -23,7 +23,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 import stubs  # noqa: E402,F401
-from fakedb import FakeDB, Row, run  # noqa: E402
+from fakedb import FakeDB, Row, UndefinedTable, run  # noqa: E402
 
 from server import accounts, readiness  # noqa: E402
 
@@ -47,7 +47,7 @@ class ScopedDB(FakeDB):
         self.queries.append(sql)
         if "asset_status_by_account" in sql:
             if not self.view_available:
-                raise RuntimeError('relation "asset_status_by_account" does not exist')
+                raise UndefinedTable("asset_status_by_account")
             return [Row(data_asset_id=k, ingestion_status=v)
                     for k, v in self.statuses.items()]
         if "FROM data_assets" in sql and "ingestion_status" in sql:
@@ -190,10 +190,14 @@ class TestAccountResolution(AccountTestCase):
             run(accounts.resolve(self.FakeRequest(params={"account": "999"}))), 1)
 
     def test_no_accounts_table_returns_none(self):
-        """Pre-migration installs must keep working, unscoped."""
+        """Pre-migration installs must keep working, unscoped.
+
+        The error must carry SQLSTATE 42P01. A bare RuntimeError no longer counts —
+        see fakedb.UndefinedTable for why guessing from the message was a fail-open.
+        """
         class NoTable(ScopedDB):
             async def fetchrow(self, sql, *args):
-                raise RuntimeError('relation "accounts" does not exist')
+                raise UndefinedTable("accounts")
         self.use(NoTable())
         self.assertIsNone(run(accounts.default_account_id()))
 
@@ -249,15 +253,18 @@ class TestScopeClause(AccountTestCase):
     def test_unscoped_when_there_are_no_accounts(self):
         """Pre-migration-009: no accounts table, so there is nothing to scope to.
 
-        The simulated error now has to LOOK like a missing relation. This fixture
-        raised a bare RuntimeError, and the code treated ANY exception as
-        "pre-migration" and returned `true` — so a dropped connection unscoped the
-        query and served every tenant's rows under one tenant's request. The two
-        cases are distinguished now; the test below pins the other side.
+        This fixture has been tightened twice, and the history is the lesson. It
+        originally raised a bare `RuntimeError("no accounts")`, and the code treated
+        ANY exception as pre-migration — so a dropped connection unscoped the query.
+        It then raised a RuntimeError whose MESSAGE mentioned a missing relation,
+        which the code matched on — still a fail-open, because any layer can raise
+        that text and no driver guarantees it.
+
+        Now only a positive SQLSTATE 42P01 counts, so the fixture carries one.
         """
         class NoTable(ScopedDB):
             async def fetchrow(self, sql, *args):
-                raise RuntimeError('relation "accounts" does not exist')
+                raise UndefinedTable("accounts")
         self.use(NoTable())
         clause, params = run(accounts.scope_clause())
         self.assertEqual((clause, params), ("true", []))
@@ -268,6 +275,19 @@ class TestScopeClause(AccountTestCase):
             async def fetchrow(self, sql, *args):
                 raise RuntimeError("connection reset by peer")
         self.use(Unreachable())
+        with self.assertRaises(accounts.AccountResolutionError):
+            run(accounts.scope_clause())
+
+    def test_message_that_merely_mentions_a_missing_relation_fails_closed(self):
+        """No SQLSTATE means no proof, and no proof must mean no unscoped query.
+
+        This is the exact shape that used to slip through: the words are right, the
+        driver signal is absent.
+        """
+        class Ambiguous(ScopedDB):
+            async def fetchrow(self, sql, *args):
+                raise RuntimeError('relation "accounts" does not exist')
+        self.use(Ambiguous())
         with self.assertRaises(accounts.AccountResolutionError):
             run(accounts.scope_clause())
 

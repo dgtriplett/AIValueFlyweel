@@ -22,6 +22,26 @@ class Row(dict):
     """
 
 
+class UndefinedTable(Exception):
+    """A realistic stand-in for asyncpg.UndefinedTableError.
+
+    MUST carry `sqlstate = "42P01"`. `accounts.is_missing_relation()` requires a
+    POSITIVE 42P01 to treat an error as "pre-migration install", and deliberately no
+    longer guesses from the class name or the message text — that guessing was a
+    fail-open, because a bare `RuntimeError('relation ... does not exist')` from any
+    layer was enough to make every scoped query unscoped.
+
+    So a fixture simulating an absent table has to look like the real driver signal.
+    Use this rather than raising a bare RuntimeError, or the test will be asserting
+    fail-CLOSED behaviour while believing it asserts the pre-migration path.
+    """
+
+    sqlstate = "42P01"
+
+    def __init__(self, relation: str = "accounts"):
+        super().__init__(f'relation "{relation}" does not exist')
+
+
 class FakeDB:
     """Substring-routed fake. Later-registered patterns win on ties.
 

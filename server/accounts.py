@@ -127,23 +127,27 @@ def is_missing_relation(exc: BaseException) -> bool:
     is the exact failure mode this module exists to prevent. Only `42P01`
     (undefined_table) genuinely means "this table does not exist".
 
-    DatabaseUnavailable is rejected explicitly rather than relying on the message
-    fallback below. It is a configured outage, and a security decision should not
-    depend on the wording of an exception string.
+    WHY A POSITIVE SQLSTATE AND NOTHING ELSE
+    ----------------------------------------
+    This used to fall back to the exception's class name and message text when there
+    was no SQLSTATE. That fallback was itself a fail-open: a bare
+    `RuntimeError('relation "accounts" does not exist')` — which any layer can raise,
+    and which no database driver guarantees the wording of — was classified as
+    pre-migration, so `default_account_id()` returned None and `scope_clause()` and
+    `write_clause_at()` returned the literal `true`. A cross-tenant read produced by
+    matching a substring.
+
+    So the rule is now: unscoped operation requires POSITIVE proof of an undefined
+    table, and the only trustworthy proof is `sqlstate == "42P01"` from the driver. An
+    exception carrying no SQLSTATE is not evidence of anything, and the safe reading
+    of "I cannot tell what this error is" is to fail closed.
+
+    The cost is that a genuinely pre-migration install whose driver does not set
+    SQLSTATE now fails closed instead of running unscoped. That is the correct
+    trade: an operator sees a 503 telling them to run the migration, rather than an
+    app that silently serves every tenant's rows to whoever asks.
     """
-    if isinstance(exc, DatabaseUnavailable):
-        return False
-    sqlstate = getattr(exc, "sqlstate", None)
-    if sqlstate == "42P01":
-        return True
-    if sqlstate is not None:
-        # A real SQLSTATE that is not undefined_table is a genuine error.
-        return False
-    if type(exc).__name__ == "UndefinedTableError":
-        return True
-    message = str(exc).lower()
-    return ("does not exist" in message and "relation" in message) \
-        or "undefinedtable" in message
+    return getattr(exc, "sqlstate", None) == "42P01"
 
 # Cached default so the common path is not a query per request. Invalidated whenever
 # an account is created, deleted, or made default.
@@ -167,6 +171,12 @@ async def default_account_id() -> int | None:
     try:
         row = await db.fetchrow(
             "SELECT id FROM accounts WHERE is_default AND is_active LIMIT 1")
+    except DatabaseUnavailable:
+        # Propagate UNWRAPPED so the app's DatabaseUnavailable handler turns it into a
+        # 503. Rewrapping it as AccountResolutionError made it a 500 on the paths the
+        # middleware exempts (/api/accounts/current), because nothing downstream
+        # recognised it any more. A configured outage is a 503 everywhere.
+        raise
     except Exception as exc:  # noqa: BLE001
         if is_missing_relation(exc):
             # Pre-migration-009 install: nothing is scoped because nothing is set up.
@@ -180,6 +190,8 @@ async def default_account_id() -> int | None:
         try:
             row = await db.fetchrow(
                 "SELECT id FROM accounts WHERE is_active ORDER BY id LIMIT 1")
+        except DatabaseUnavailable:
+            raise      # same reasoning as above: an outage must stay a 503
         except Exception as exc:  # noqa: BLE001
             if is_missing_relation(exc):
                 return None
@@ -208,6 +220,21 @@ async def default_account_id() -> int | None:
 # for attribution in an audit row but must never be the basis of an access
 # decision: anyone could send X-Grid-Atlas-User: admin@utility.com. So authorization
 # reads only the forwarded pair, and only when running as a Databricks App.
+#
+# THE TRUST BOUNDARY THIS ASSUMES
+# -------------------------------
+# X-Forwarded-* is trustworthy ONLY because the Apps proxy terminates auth in front of
+# this process and overwrites those headers on every request — the app is never
+# reachable directly. That assumption is load-bearing for `is_admin()`: if this app
+# were ever exposed on a port a client can reach without the proxy (a debug tunnel, a
+# sidecar, a future non-Apps deployment), these headers become client-settable and the
+# admin gate is bypassed by typing one.
+#
+# It is not defended in code here because under the documented deployment model there
+# is no way to observe the difference — a forged header and a real one are byte
+# identical, and the proxy guarantees the latter. If the app is ever deployed outside
+# Databricks Apps, this comment is the thing to revisit first: the fix would be a
+# shared secret or mTLS between proxy and app, not a header check.
 _TRUSTED_IDENTITY_HEADERS = ("x-forwarded-email", "x-forwarded-user")
 
 # Operators allowed to perform destructive account operations. Comma-separated
@@ -373,6 +400,31 @@ def install_middleware(app) -> None:
             try:
                 account_id = await resolve(request)
                 token = current_account_id.set(account_id)
+            except DatabaseUnavailable as exc:
+                # A configured outage is a 503 on EVERY path, including the ones
+                # exempted below. Those exemptions exist so a request that reads no
+                # tenant data can still be served during a resolution failure — but
+                # when the database itself is unreachable there is nothing to serve,
+                # and letting the request continue meant the handler's own
+                # DatabaseUnavailable surfaced as an opaque 500 (reproduced on
+                # /api/accounts/current).
+                #
+                # Two exceptions. /api/health reads the pool flags directly rather
+                # than querying, and reporting the outage is its whole job. The SPA
+                # shell and its assets are not API calls at all — they must load so
+                # the user sees an error page instead of a blank tab, and they touch
+                # no data.
+                if (not request.url.path.startswith("/api/health")
+                        and request.url.path.startswith("/api/")):
+                    logger.error("refusing %s: %s", request.url.path, exc)
+                    return JSONResponse(
+                        {"error": "The database is temporarily unavailable, so this "
+                                  "request cannot be served. No data was read or "
+                                  "written.",
+                         "detail": str(exc)},
+                        status_code=503)
+                logger.warning("database unavailable on %s — letting the health "
+                               "endpoint report it", request.url.path)
             except Exception as exc:  # noqa: BLE001
                 # FAIL CLOSED. This used to swallow the error and continue
                 # "unscoped", which meant scope_clause() returned `true` and the

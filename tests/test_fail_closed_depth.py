@@ -37,6 +37,14 @@ from fakedb import FakeDB, Row, run  # noqa: E402
 
 CONFIGURED = {"PGHOST": "lakebase.internal", "PGUSER": "app"}
 
+# Either exception means the call refused to guess. Which one depends on how far the
+# failure got: a configured outage now propagates DatabaseUnavailable UNWRAPPED so the
+# app's handler can turn it into a 503 (round 3 — rewrapping it as
+# AccountResolutionError made it an opaque 500 on /api/accounts/current), while a
+# non-outage read failure is still an AccountResolutionError. What matters to these
+# tests is that neither returns a value the caller can mistake for "no accounts".
+FAILED_CLOSED = (acct.AccountResolutionError, DatabaseUnavailable)
+
 
 def configured_outage_pool(exc=None):
     """A pool whose PGHOST is set but which cannot connect — a real outage."""
@@ -154,26 +162,26 @@ class TestOutageCannotUnscopeAQuery(OutageTestCase):
     def test_default_account_id_raises(self):
         pool = self.outage()
         with mock.patch.object(acct, "db", pool):
-            with self.assertRaises(acct.AccountResolutionError):
+            with self.assertRaises(FAILED_CLOSED):
                 run(acct.default_account_id())
 
     def test_scope_clause_does_not_return_true(self):
         pool = self.outage()
         with mock.patch.object(acct, "db", pool):
-            with self.assertRaises(acct.AccountResolutionError):
+            with self.assertRaises(FAILED_CLOSED):
                 clause, _ = run(acct.scope_clause("a"))
                 self.fail(f"scope_clause returned {clause!r} during an outage")
 
     def test_write_clause_does_not_return_true(self):
         pool = self.outage()
         with mock.patch.object(acct, "db", pool):
-            with self.assertRaises(acct.AccountResolutionError):
+            with self.assertRaises(FAILED_CLOSED):
                 run(acct.write_clause_at(2))
 
     def test_owned_clause_does_not_return_true(self):
         pool = self.outage()
         with mock.patch.object(acct, "db", pool):
-            with self.assertRaises(acct.AccountResolutionError):
+            with self.assertRaises(FAILED_CLOSED):
                 run(acct.owned_clause())
 
 
@@ -504,6 +512,301 @@ class TestEntityReadsAreScoped(unittest.TestCase):
             "leak through link label resolution")
 
 
+# ---------------------------------------------------------------------------
+# ROUND 3 — BLOCKING 1: no guessing without a SQLSTATE
+# ---------------------------------------------------------------------------
+class TestOnlyAPositiveSqlstateAllowsUnscopedOperation(unittest.TestCase):
+    """Unscoped operation requires PROOF of an undefined table, not a lookalike.
+
+    `is_missing_relation()` fell back to the exception's class name and message when
+    there was no SQLSTATE. That fallback was itself a fail-open: a bare
+    `RuntimeError('relation "accounts" does not exist')` — which any layer can raise
+    and no driver guarantees the wording of — was read as "pre-migration install", so
+    `default_account_id()` returned None and `scope_clause()` / `write_clause_at()`
+    returned the literal `true`. A cross-tenant read caused by a substring match.
+    """
+
+    def setUp(self):
+        acct.invalidate_default()
+        self.addCleanup(acct.invalidate_default)
+
+    def test_positive_42p01_is_still_pre_migration(self):
+        """The legitimate path must keep working."""
+        class Undefined(Exception):
+            sqlstate = "42P01"
+        self.assertTrue(acct.is_missing_relation(Undefined("no relation")))
+
+    def test_message_alone_is_not_proof(self):
+        self.assertFalse(
+            acct.is_missing_relation(
+                RuntimeError('relation "accounts" does not exist')),
+            "a message substring must not be able to unscope every query")
+
+    def test_class_name_alone_is_not_proof(self):
+        class UndefinedTableError(Exception):
+            pass
+        self.assertFalse(acct.is_missing_relation(UndefinedTableError("nope")))
+
+    def test_lowercase_undefinedtable_text_is_not_proof(self):
+        self.assertFalse(acct.is_missing_relation(Exception("undefinedtable")))
+
+    def test_empty_sqlstate_is_not_proof(self):
+        class NoState(Exception):
+            sqlstate = None
+        self.assertFalse(acct.is_missing_relation(NoState("who knows")))
+
+    def test_a_message_lookalike_cannot_unscope_a_query(self):
+        """End to end: the shape that used to slip through now fails closed."""
+        class Ambiguous(FakeDB):
+            async def fetchrow(self, sql, *args):
+                raise RuntimeError('relation "accounts" does not exist')
+
+            async def fetch(self, sql, *args):
+                raise RuntimeError('relation "accounts" does not exist')
+
+        with mock.patch.object(acct, "db", Ambiguous(has_pool=True)):
+            for label, call in (("scope_clause", acct.scope_clause("a")),
+                                ("write_clause_at", acct.write_clause_at(2)),
+                                ("owned_clause", acct.owned_clause()),
+                                ("default_account_id", acct.default_account_id())):
+                with self.subTest(helper=label):
+                    acct.invalidate_default()
+                    with self.assertRaises(acct.AccountResolutionError):
+                        run(call)
+
+
+# ---------------------------------------------------------------------------
+# ROUND 3 — BLOCKING 2: custom use-case titles are account data
+# ---------------------------------------------------------------------------
+class TestUseCaseLabelsAreMembershipScoped(unittest.TestCase):
+    """Link LABEL resolution needs the same membership rule as link VALIDATION.
+
+    Round two scoped validation but left labels unconditional, on the reasoning that
+    `use_cases` is the shared shipped catalog. That reasoning was incomplete:
+    `POST /api/use_cases` inserts CUSTOM, customer-authored use cases into the SAME
+    table and only then records membership. So a use-case title can be one tenant's
+    private text in a shared table, and a link created before validation was scoped
+    still resolves it — the title is rendered straight into the UI.
+    """
+
+    def setUp(self):
+        acct.invalidate_default()
+        self.addCleanup(acct.invalidate_default)
+        self.db = _RecordingDB()
+        for target in (acct, kbr, portfolio):
+            patcher = mock.patch.object(target, "db", self.db)
+            patcher.start()
+            self.addCleanup(patcher.stop)
+        common = mock.patch("server.common.db", self.db)
+        common.start()
+        self.addCleanup(common.stop)
+
+    def _label_queries(self):
+        self.db.calls.clear()
+        try:
+            run(kbr.get_article("t"))
+        except Exception:  # noqa: BLE001 - the QUERIES are under test
+            pass
+        return [" ".join(sql.split()) for sql, _ in self.db.calls
+                if "AS label" in sql]
+
+    def test_use_case_labels_are_scoped_through_membership(self):
+        labels = [q for q in self._label_queries() if "use_cases" in q]
+        self.assertTrue(labels, "no use-case label resolution happened")
+        self.assertIn(
+            "account_portfolio_use_cases", labels[0],
+            "an unconditional use-case label query returns another account's CUSTOM "
+            f"use-case titles: {labels[0][:160]}")
+
+    def test_a_custom_use_case_outside_membership_is_not_resolved(self):
+        """The reproduction: a title the caller must never see."""
+        leaked = "Other Account Custom Use Case"
+
+        class MembershipAware(_RecordingDB):
+            async def fetch(self, sql, *args):
+                self.calls.append((sql, args))
+                if "FROM accounts" in sql:
+                    return [Row(id=5)]
+                if "AS label" in sql and "use_cases" in sql:
+                    # Honour the predicate the way Postgres would: with a membership
+                    # check present, the other account's row does not match.
+                    if "account_portfolio_use_cases" in sql:
+                        return []
+                    return [Row(id=42, label=leaked)]
+                if "FROM kb_links" in sql:
+                    return [Row(id=1, entity_type="use_case", entity_id=42,
+                                relation="explains", created_by="x",
+                                created_at=None)]
+                return []
+
+        db = MembershipAware()
+        for target in (acct, kbr, portfolio):
+            patcher = mock.patch.object(target, "db", db)
+            patcher.start()
+            self.addCleanup(patcher.stop)
+
+        try:
+            article = run(kbr.get_article("t"))
+        except Exception:  # noqa: BLE001
+            article = None
+        if article is not None:
+            rendered = str(article)
+            self.assertNotIn(
+                leaked, rendered,
+                "another account's custom use-case title reached the response")
+
+    def test_shared_catalog_labels_still_resolve(self):
+        """data_assets / data_domains / lobs have no per-tenant authoring path."""
+        for table in ("data_assets", "data_domains", "lobs"):
+            self.assertNotIn(
+                table, kbr._ACCOUNT_OWNED_ENTITY_TABLES,
+                f"{table} is shipped reference data; scoping its labels would blank "
+                f"them for every tenant")
+
+
+# ---------------------------------------------------------------------------
+# ROUND 3 — BLOCKING 3: every configured failure is a 503
+# ---------------------------------------------------------------------------
+class TestAnyConnectionFailureBecomes503(OutageTestCase):
+    """Not just auth: a pool that OPENED and then broke must also surface.
+
+    Only `_AUTH_ERRORS` were caught, so an `OSError` from `pool.acquire()` propagated
+    as a raw 500 with `is_degraded` still False — bypassing the DatabaseUnavailable
+    handler AND leaving /api/health reporting healthy through the outage.
+    """
+
+    def _broken_open_pool(self, exc):
+        class Acquire:
+            def acquire(self):
+                raise exc
+
+        class Pool(DatabasePool):
+            async def get_pool(inner):
+                inner._unconfigured = False
+                return Acquire()
+
+        return Pool()
+
+    FAILURES = {
+        "econnreset": OSError("connection reset by peer"),
+        "timeout": __import__("asyncio").TimeoutError(),
+        "postgres_connection": __import__("asyncpg").PostgresConnectionError("lost"),
+        "interface": __import__("asyncpg").InterfaceError("closed"),
+    }
+
+    def test_fetch_converts_every_connection_failure(self):
+        for label, exc in self.FAILURES.items():
+            with self.subTest(failure=label):
+                pool = self._broken_open_pool(exc)
+                with self.assertRaises(DatabaseUnavailable):
+                    run(pool.fetch("SELECT 1"))
+
+    def test_execute_converts_every_connection_failure(self):
+        for label, exc in self.FAILURES.items():
+            with self.subTest(failure=label):
+                pool = self._broken_open_pool(exc)
+                with self.assertRaises(DatabaseUnavailable):
+                    run(pool.execute("INSERT INTO x VALUES (1)"))
+
+    def test_is_degraded_is_set_so_health_reports_it(self):
+        """Without this, /api/health stays green through an outage."""
+        pool = self._broken_open_pool(OSError("connection reset by peer"))
+        try:
+            run(pool.fetch("SELECT 1"))
+        except DatabaseUnavailable:
+            pass
+        self.assertTrue(pool.is_degraded)
+        self.assertFalse(pool.is_demo_mode)
+        self.assertIn("connection reset", pool.last_error)
+
+    def test_query_errors_are_not_turned_into_outages(self):
+        """A 42P01 must stay a 42P01, or the pre-migration path breaks.
+
+        This is the other side of the fix: too broad a catch here would convert every
+        undefined-table and constraint violation into a 503.
+        """
+        import asyncpg
+
+        for exc in (asyncpg.UndefinedTableError("no table"),
+                    asyncpg.UniqueViolationError("dup")):
+            with self.subTest(error=type(exc).__name__):
+                class Conn:
+                    async def fetch(self, *a):
+                        raise exc
+
+                    async def __aenter__(self):
+                        return self
+
+                    async def __aexit__(self, *a):
+                        return False
+
+                class Acquire:
+                    def acquire(self):
+                        return Conn()
+
+                class Pool(DatabasePool):
+                    async def get_pool(inner):
+                        inner._unconfigured = False
+                        return Acquire()
+
+                with self.assertRaises(type(exc)):
+                    run(Pool().fetch("SELECT 1"))
+
+
+class TestOutageIs503OnEveryApiPath(unittest.TestCase):
+    """Including /api/accounts/current, which returned 500.
+
+    The middleware exempts that path from account-resolution failures, so the request
+    proceeded and the handler's own DatabaseUnavailable — wrapped by
+    AccountResolutionError — surfaced as an opaque 500.
+    """
+
+    EXPECTED = {
+        "/api/accounts/current": 503,
+        "/api/accounts": 503,
+        "/api/health": 503,          # reports the outage; that is its job
+        "/api/kb/articles": 503,
+        "/portfolio": 200,           # SPA shell: no data, must render an error page
+        "/index.html": 200,
+    }
+
+    def test_every_path_reports_honestly_during_a_pool_creation_outage(self):
+        import warnings
+
+        warnings.filterwarnings("ignore")
+        from fastapi.testclient import TestClient
+        import app as appmod
+
+        acct.invalidate_default()
+        self.addCleanup(acct.invalidate_default)
+        with mock.patch.dict(os.environ, CONFIGURED, clear=True), \
+             mock.patch("server.db.get_oauth_token", return_value="token"), \
+             mock.patch("asyncpg.create_pool", side_effect=OSError("no route")):
+            client = TestClient(appmod.app, raise_server_exceptions=False)
+            for path, expected in self.EXPECTED.items():
+                with self.subTest(path=path):
+                    self.assertEqual(
+                        client.get(path).status_code, expected,
+                        f"{path} must not report a configured outage as "
+                        f"anything but {expected}")
+
+    def test_unconfigured_install_is_unaffected(self):
+        """The demo path must stay 200 everywhere."""
+        import warnings
+
+        warnings.filterwarnings("ignore")
+        from fastapi.testclient import TestClient
+        import app as appmod
+
+        acct.invalidate_default()
+        self.addCleanup(acct.invalidate_default)
+        with mock.patch.dict(os.environ, {}, clear=True):
+            client = TestClient(appmod.app, raise_server_exceptions=False)
+            for path in ("/api/health", "/api/accounts/current", "/portfolio"):
+                with self.subTest(path=path):
+                    self.assertEqual(client.get(path).status_code, 200)
+
+
 class TestAccountsEndpointDoesNotMisdiagnoseAnOutage(unittest.TestCase):
     """`/api/accounts` must not tell an operator to run an applied migration.
 
@@ -610,6 +913,13 @@ class _RecordingDB(FakeDB):
             return [Row(id=5)]
         if "SELECT slug FROM kb_articles" in sql:
             return [Row(slug="taken")]
+        # A link must come back, or get_article never reaches label resolution and a
+        # test asserting on the label query would vacuously pass.
+        if "FROM kb_links" in sql:
+            return [Row(id=1, entity_type="use_case", entity_id=42,
+                        relation="explains", created_by="x", created_at=None)]
+        if "AS label" in sql:
+            return [Row(id=42, label="Some Use Case")]
         return []
 
     async def fetchrow(self, sql, *args):

@@ -40,6 +40,27 @@ _AUTH_ERRORS = (
     asyncpg.InvalidPasswordError,
 )
 
+# Failures that mean "the connection is not usable", as opposed to "the query was
+# wrong". These become DatabaseUnavailable -> 503, because the caller cannot tell from
+# an opaque 500 whether their write applied.
+#
+# The distinction matters in both directions. Too narrow (auth only, as it was) and a
+# broken pool raises a raw OSError that bypasses the 503 handler with is_degraded
+# still False, so /api/health keeps saying healthy through an outage. Too broad
+# (`except Exception`) and a 42P01 undefined-table becomes a 503, which would break
+# the legitimate pre-migration path and every route that handles its own DB errors.
+#
+# OSError covers the socket-level cases (ECONNRESET, EPIPE, DNS) and is asyncpg's own
+# base for connection loss; asyncpg.PostgresConnectionError covers the protocol-level
+# ones the driver classifies itself; TimeoutError covers command_timeout and pool
+# acquire timeouts, which are not OSErrors.
+_CONNECTION_ERRORS = (
+    OSError,
+    asyncio.TimeoutError,
+    asyncpg.PostgresConnectionError,
+    asyncpg.InterfaceError,
+)
+
 
 class DatabaseUnavailable(RuntimeError):
     """Lakebase is configured but unreachable, and the caller must not paper over it.
@@ -174,6 +195,39 @@ class DatabasePool:
                 f"({self._last_error}). Refusing to return an empty result that "
                 "would read as 'no data' and silently unscope this request.")
 
+    def _connection_failed(self, exc: Exception) -> "DatabaseUnavailable":
+        """Record a connection-level failure and convert it to DatabaseUnavailable.
+
+        WHY THIS IS NEEDED BEYOND `_require_available`
+        ----------------------------------------------
+        `_require_available` only fires when there is NO pool, which covers a failed
+        pool CREATION. But a pool that opened successfully and later breaks — the
+        database restarts, the network drops, `acquire()` times out — raised its raw
+        OSError straight through. That produced a 500 with `is_degraded` still False,
+        bypassing the DatabaseUnavailable handler entirely, so:
+
+          * the response was an opaque server error rather than an honest 503,
+          * /api/health still reported healthy, because nothing had recorded a failure.
+
+        Only authentication errors were being caught here, and an expired token is not
+        the only way a live pool stops working. So ANY connection-level failure now
+        records `_last_error` (making `is_degraded` true, which /api/health reads) and
+        re-raises as DatabaseUnavailable.
+
+        Query-level errors — a syntax error, a constraint violation, an undefined table
+        — are deliberately NOT routed here. Those are bugs or expected conditions the
+        caller handles, not outages, and turning a 42P01 into a 503 would break the
+        pre-migration path along with every route that catches its own DB errors.
+        """
+        self._last_error = f"{type(exc).__name__}: {exc}"
+        self._pool = None      # force a fresh pool on the next call
+        logger.error("Lakebase query failed at the connection level (%s: %s) — "
+                     "reporting unavailable rather than an opaque 500",
+                     type(exc).__name__, exc)
+        return DatabaseUnavailable(
+            "Lakebase is configured (PGHOST is set) but the connection failed "
+            f"({self._last_error}). No data was read or written.")
+
     # -- query helpers ------------------------------------------------------
     async def fetch(self, sql: str, *args):
         _charge_budget()
@@ -190,8 +244,13 @@ class DatabasePool:
             if pool is None:
                 self._require_available()
                 return []
-            async with pool.acquire() as conn:
-                return await conn.fetch(sql, *args)
+            try:
+                async with pool.acquire() as conn:
+                    return await conn.fetch(sql, *args)
+            except _CONNECTION_ERRORS as exc:
+                raise self._connection_failed(exc) from exc
+        except _CONNECTION_ERRORS as exc:
+            raise self._connection_failed(exc) from exc
 
     async def fetchrow(self, sql: str, *args):
         rows = await self.fetch(sql, *args)
@@ -217,9 +276,12 @@ class DatabasePool:
             self._require_available()
             yield None
             return
-        async with pool.acquire() as conn:
-            async with conn.transaction():
-                yield conn
+        try:
+            async with pool.acquire() as conn:
+                async with conn.transaction():
+                    yield conn
+        except _CONNECTION_ERRORS as exc:
+            raise self._connection_failed(exc) from exc
 
     async def execute(self, sql: str, *args):
         _charge_budget()
@@ -236,8 +298,16 @@ class DatabasePool:
             if pool is None:
                 self._require_available()
                 return None
-            async with pool.acquire() as conn:
-                return await conn.execute(sql, *args)
+            try:
+                async with pool.acquire() as conn:
+                    return await conn.execute(sql, *args)
+            except _CONNECTION_ERRORS as exc:
+                raise self._connection_failed(exc) from exc
+        except _CONNECTION_ERRORS as exc:
+            # Especially important for a write: without this the caller sees a 500 and
+            # cannot tell whether the statement was applied. A 503 says plainly that
+            # it was not.
+            raise self._connection_failed(exc) from exc
 
 
 db = DatabasePool()
