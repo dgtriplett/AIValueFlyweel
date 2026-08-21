@@ -307,6 +307,7 @@ with empty values.
 | `GENIE_SPACE_ID` | Genie space over the portfolio mirror. | Genie |
 | `GENIE_MIRROR_CATALOG` / `GENIE_MIRROR_SCHEMA` | UC target for the mirror. | Genie |
 | `DEMO_MODE` | Header toggle + `/api/demo/*`. **Ship `off`** — it can reset the portfolio. | no |
+| `APP_ENV` | Visible environment pill/marker. Allowed values are `DEV` and `PROD`; the repository ships `DEV`, and deploy sets the target value. | no |
 | `LOG_LEVEL` | `INFO` normally; `DEBUG` raises detail on a running app with no redeploy. | no |
 | `RATE_LIMITS` | `on` by default. Set `off` for a demo where clicking fast is deliberate. | no |
 | `DATABRICKS_PROFILE` | **Local development only.** The CLI profile used when not running inside Databricks Apps, where the service principal is injected instead. | local |

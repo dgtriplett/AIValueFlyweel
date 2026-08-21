@@ -89,10 +89,11 @@ def ensure_database(profile, project, branch, endpoint, database):
     conn.close()
 
 
-def parse_args(defaults_project="grid-atlas-db", defaults_profile="fe-vm-grid-ops-demo"):
+def parse_args(defaults_project=None, defaults_profile="DEFAULT"):
     ap = argparse.ArgumentParser()
     ap.add_argument("--profile", default=defaults_profile)
-    ap.add_argument("--project", default=defaults_project)
+    ap.add_argument("--project", default=defaults_project,
+                    required=defaults_project is None)
     ap.add_argument("--branch", default="production")
     ap.add_argument("--endpoint", default="primary")
     ap.add_argument("--db", default="app")
