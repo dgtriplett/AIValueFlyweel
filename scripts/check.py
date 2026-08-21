@@ -127,24 +127,25 @@ def main() -> int:
         results.append(run("lint (ruff)", ["ruff", "check", "."],
                            optional_tool="ruff"))
         results.append(check_console_bundle())
-        # The SPA bundle is committed and serves the app's front door. An unpatched
-        # one silently reverts the grouped nav and hides the knowledge base and the
-        # proposal agent — features become invisible without anything failing.
-        results.append(run("SPA nav patch applied",
+        # frontend/dist is committed and serves the app's front door, and it is now
+        # BUILT from frontend/src rather than patched in place. The failure this
+        # catches is a stale dist: source says one thing, the bundle a customer
+        # loads says another, and nothing else notices. It asserts the behaviour —
+        # grouped nav, the knowledge-base and proposal links, the drawer's proposal
+        # action, the current product name, no customer-visible phase text — on the
+        # exact chunk index.html references.
+        #
+        # This replaces the historical patch_spa_grouped_nav.py,
+        # patch_spa_proposal_button.py, and patch_spa_customer_visibility.py
+        # `--check` gates. Those asserted
+        # minified identifiers (`Dg.find(x=>x.id===`) that a minifier reassigns on
+        # every build, so they could only ever pass for one historical bundle.
+        # The structural half of what they guarded moved to
+        # tests/test_console_nav.py::TestSpaSourceIsTheSourceOfTruth, which checks
+        # the source and is a stronger claim than a substring of minified output.
+        results.append(run("SPA bundle carries the source's behaviour",
                            [sys.executable, str(ROOT / "scripts"
-                                                / "patch_spa_grouped_nav.py"),
-                            "--check"]))
-        # Same reasoning: an unpatched bundle silently removes the drawer's
-        # "Write proposal" action, and the feature goes back to being reachable
-        # only by typing an id into a form.
-        results.append(run("SPA proposal button applied",
-                           [sys.executable, str(ROOT / "scripts"
-                                                / "patch_spa_proposal_button.py"),
-                            "--check"]))
-        results.append(run("SPA customer visibility applied",
-                           [sys.executable, str(ROOT / "scripts"
-                                                / "patch_spa_customer_visibility.py"),
-                            "--check"]))
+                                                / "check_spa_bundle.py")]))
 
     print("\n" + "=" * 62)
     for result in results:
