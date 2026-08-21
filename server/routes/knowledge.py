@@ -44,9 +44,10 @@ from pydantic import BaseModel, Field
 
 from .. import accounts
 from .. import knowledge as kb
+from .. import portfolio
 from ..common import current_user, rows_to_list, write_audit
 from ..config import ATLAS_CATALOG, ATLAS_SCHEMA, discovery_configured
-from ..db import db
+from ..db import DatabaseUnavailable, db
 from ..limits import limiter
 
 logger = logging.getLogger(__name__)
@@ -128,7 +129,7 @@ class LinkIn(BaseModel):
 # NULL means "shared reference library, visible to all" and is what the shipped
 # seeded content uses, so the read predicate keeps NULL rows while the write path
 # stamps the current account.
-async def _article_by_slug(slug: str, *, columns: str = "id"):
+async def _article_by_slug(slug: str, *, columns: str = "id", for_write: bool = False):
     """One article the current account may see, or None.
 
     Every by-slug handler goes through this rather than querying `WHERE slug = $1`
@@ -136,8 +137,15 @@ async def _article_by_slug(slug: str, *, columns: str = "id"):
     caller read, edit, archive or hard-delete another tenant's article by guessing
     or listing its slug — and article slugs are derived from titles, so they are
     guessable.
+
+    `for_write=True` uses the strict ownership predicate, excluding the shared
+    (`account_id IS NULL`) reference library. Callers that go on to MUTATE the article
+    — or anything hanging off it, like links and attachments — must pass it, or a
+    tenant can alter the shipped library for every other customer. Read-only callers
+    leave it False so shared content stays visible.
     """
-    scope, params = await accounts.scope_clause_at(2)
+    scope, params = (await accounts.write_clause_at(2) if for_write
+                     else await accounts.scope_clause_at(2))
     return await db.fetchrow(
         f"SELECT {columns} FROM kb_articles WHERE slug = $1 AND {scope}",
         slug, *params)
@@ -148,6 +156,62 @@ async def _folder_visible(folder_id: int) -> bool:
     scope, params = await accounts.scope_clause_at(2)
     row = await db.fetchrow(
         f"SELECT id FROM kb_folders WHERE id = $1 AND {scope}", folder_id, *params)
+    return row is not None
+
+
+# Which of the linkable entity tables carry an account_id of their own.
+#
+# use_cases, data_assets, data_domains and lobs deliberately do NOT: migration 009
+# calls them "shared reference data — the library the product ships", curated once
+# and improved for everyone. Copying them per account would fork the catalog.
+#
+# For use_cases the account-specific part is MEMBERSHIP, held in
+# account_portfolio_use_cases (migration 014), so "may this account link to it" is a
+# portfolio question, not a column comparison — hence the special case below.
+_ACCOUNT_OWNED_ENTITY_TABLES = {"roadmap_items", "funding_requests"}
+
+
+async def _entity_exists(entity_type: str, entity_id: int) -> bool:
+    """Whether the current account may link to this entity.
+
+    WHY THIS IS NOT JUST `SELECT id FROM <table> WHERE id = $1`
+    ----------------------------------------------------------
+    That version was an existence oracle. `roadmap_items` and `funding_requests` are
+    account-owned, so an unscoped probe let a caller walk ids and learn which of
+    another tenant's roadmap items and funding requests exist purely from the 404 vs
+    200 difference — without ever reading a field.
+
+    The three cases are genuinely different, so they are handled differently rather
+    than forced into one predicate:
+
+      * account-owned tables  -> ownership predicate on account_id;
+      * use_cases             -> portfolio membership, because the catalog row is
+                                 shared but a given account's selection is not;
+      * the rest of the shared catalog (data_assets, data_domains, lobs) -> a plain
+        existence check is correct. These are the shipped library, identical for
+        every tenant, so confirming a row exists discloses nothing account-specific.
+    """
+    table = _ENTITY_TABLES.get(entity_type)
+    if not table:
+        return False
+
+    if entity_type == "use_case":
+        # Reuses the existing membership helper rather than reimplementing the
+        # portfolio predicate, so this cannot drift from how the portfolio is read
+        # everywhere else.
+        condition, params = await portfolio.portfolio_condition("uc", param_index=2)
+        row = await db.fetchrow(
+            f"SELECT uc.id FROM use_cases uc WHERE uc.id = $1 AND {condition}",
+            entity_id, *params)
+        return row is not None
+
+    if table in _ACCOUNT_OWNED_ENTITY_TABLES:
+        scope, params = await accounts.owned_clause(param_index=2)
+        row = await db.fetchrow(
+            f"SELECT id FROM {table} WHERE id = $1 AND {scope}", entity_id, *params)
+        return row is not None
+
+    row = await db.fetchrow(f"SELECT id FROM {table} WHERE id = $1", entity_id)
     return row is not None
 
 
@@ -289,11 +353,20 @@ async def update_folder(folder_id: int, body: FolderPatch, request: Request):
         if clash is not None:
             raise HTTPException(409, f"A folder already exists at {new_path}.")
 
-    update_scope, update_params = await accounts.scope_clause_at(5)
-    await db.execute(f"""
+    # write_clause_at, NOT scope_clause_at: the read predicate includes
+    # `account_id IS NULL`, which would let this tenant rename a SHARED folder for
+    # every other customer on the instance.
+    update_scope, update_params = await accounts.write_clause_at(5)
+    updated = await db.execute(f"""
         UPDATE kb_folders SET name = $1, parent_id = $2, path = $3,
                updated_at = now() WHERE id = $4 AND {update_scope}
     """, new_name, new_parent_id, new_path, folder_id, *update_params)
+    if updated is not None and updated.endswith(" 0"):
+        # The lookup above found it (possibly as a shared row) but the write matched
+        # nothing, which means it is not ours to change.
+        raise HTTPException(
+            404, "Folder not found, or it is shared reference content that cannot "
+                 "be modified from here.")
 
     # Re-path descendants. Their stored paths all begin with the old path, so one
     # UPDATE fixes the subtree; doing it per-row would leave a partially-repathed
@@ -303,7 +376,7 @@ async def update_folder(folder_id: int, body: FolderPatch, request: Request):
     # other tenants, and re-pathing those would silently rewrite another customer's
     # folder tree as a side effect of renaming one of ours.
     if new_path != old_path:
-        descendant_scope, descendant_params = await accounts.scope_clause_at(5)
+        descendant_scope, descendant_params = await accounts.write_clause_at(5)
         await db.execute(f"""
             UPDATE kb_folders
                SET path = $1 || substring(path from char_length($2) + 1),
@@ -333,16 +406,30 @@ async def delete_folder(folder_id: int, request: Request):
         folder_id, *scope_params)
     if folder is None:
         raise HTTPException(404, "Folder not found")
-    article_scope, _ = await accounts.scope_clause_at(2, "a")
+
+    # BOTH halves are scoped, including the inner folder-path subquery. Left
+    # unscoped, the subquery matched same-path folders in OTHER accounts, so the
+    # reported count included articles belonging to other tenants — a wrong number
+    # in a confirmation dialog, derived from data the caller cannot see.
+    article_scope, article_params = await accounts.scope_clause_at(2, "a")
+    inner_scope, inner_params = await accounts.scope_clause_at(3, "f2")
     affected = await db.fetchrow(f"""
         SELECT count(*) AS n FROM kb_articles a
         WHERE a.folder_id IN (
-            SELECT id FROM kb_folders WHERE path LIKE $1
+            SELECT f2.id FROM kb_folders f2 WHERE f2.path LIKE $1 AND {inner_scope}
         ) AND {article_scope}""",
-        kb.descendant_pattern(folder["path"]), *scope_params)
-    await db.execute(
-        f"DELETE FROM kb_folders WHERE id = $1 AND {scope}",
-        folder_id, *scope_params)
+        kb.descendant_pattern(folder["path"]), *article_params, *inner_params)
+
+    # write_clause_at: a shared folder must not be deletable by one tenant for
+    # everyone. The lookup above may have matched it as a readable shared row.
+    write_scope, write_params = await accounts.write_clause_at(2)
+    deleted = await db.execute(
+        f"DELETE FROM kb_folders WHERE id = $1 AND {write_scope}",
+        folder_id, *write_params)
+    if deleted is not None and deleted.endswith(" 0"):
+        raise HTTPException(
+            404, "Folder not found, or it is shared reference content that cannot "
+                 "be deleted from here.")
     await write_audit("kb_folder", folder_id, "delete", actor,
                       {"path": folder["path"]})
     return {"deleted": True,
@@ -469,12 +556,28 @@ async def get_article(slug: str):
         column = "name" if entity_type in ("data_domain", "lob") else "title"
         if entity_type == "data_asset":
             column = "module"
+        # SCOPED for the account-owned tables. Unscoped, this resolved and RETURNED
+        # another tenant's roadmap-item and funding-request titles — the label is
+        # rendered straight into the UI, so it is a direct disclosure, not just an
+        # existence oracle. The shared catalog (use_cases, data_assets, data_domains,
+        # lobs) is identical for every tenant, so its labels are not account data.
+        if table in _ACCOUNT_OWNED_ENTITY_TABLES:
+            owned, owned_params = await accounts.owned_clause(param_index=2)
+            label_sql = (f"SELECT id, {column} AS label FROM {table} "
+                         f"WHERE id = ANY($1::int[]) AND {owned}")
+            label_args = [ids, *owned_params]
+        else:
+            label_sql = (f"SELECT id, {column} AS label FROM {table} "
+                         f"WHERE id = ANY($1::int[])")
+            label_args = [ids]
         try:
-            found = await db.fetch(
-                f"SELECT id, {column} AS label FROM {table} WHERE id = ANY($1::int[])",
-                ids)
+            found = await db.fetch(label_sql, *label_args)
             for item in found:
                 names[(entity_type, item["id"])] = item["label"]
+        except DatabaseUnavailable:
+            # A configured outage must not be swallowed by the nicety-handler below,
+            # or the article renders with silently missing labels during an incident.
+            raise
         except Exception:  # noqa: BLE001 - a resolvable name is a nicety
             pass
     for link in links:
@@ -515,10 +618,16 @@ async def update_article(slug: str, body: ArticleUpdate, request: Request):
     """Edit an article, snapshotting the previous version first."""
     actor = current_user(request)
     _check_status(body.status)
+    # for_write, and it must be checked BEFORE the version snapshot below: a
+    # read-scoped lookup would match a shared article, write a kb_article_versions
+    # row for it, and only then have the UPDATE match nothing — leaving a phantom
+    # version on content the caller never changed.
     row = await _article_by_slug(
-        slug, columns="id, title, body_md, summary, version")
+        slug, columns="id, title, body_md, summary, version", for_write=True)
     if row is None:
-        raise HTTPException(404, "Article not found")
+        raise HTTPException(
+            404, "Article not found, or it is shared reference content that cannot "
+                 "be modified from here.")
 
     if body.folder_id is not None and not await _folder_visible(body.folder_id):
         raise HTTPException(404, "Folder not found")
@@ -540,10 +649,10 @@ async def update_article(slug: str, body: ArticleUpdate, request: Request):
         """, row["id"], row["version"], row["title"], row["body_md"],
             row["summary"], body.change_note, actor)
 
-    # The ownership predicate is repeated on the write even though the lookup above
-    # was scoped. Belt and braces: it makes the statement safe to read in isolation,
-    # and a future edit that changes how `row` is fetched cannot silently widen it.
-    write_scope, write_params = await accounts.scope_clause_at(10)
+    # write_clause_at (strict equality, never NULL): the lookup above is
+    # NULL-inclusive so a shared article is READABLE, but editing one would rewrite
+    # the shipped library for every tenant on the instance.
+    write_scope, write_params = await accounts.write_clause_at(10)
     updated = await db.fetchrow(f"""
         UPDATE kb_articles SET
             title    = COALESCE($2, title),
@@ -580,22 +689,31 @@ async def delete_article(slug: str, request: Request, hard: bool = False):
     drop out of search but keep their links and history.
     """
     actor = current_user(request)
-    row = await _article_by_slug(slug, columns="id, title")
+    row = await _article_by_slug(slug, columns="id, title", for_write=True)
     if row is None:
-        raise HTTPException(404, "Article not found")
-    # Scoped on the write as well as the lookup: a hard delete is irreversible, so
-    # this is the last statement that should ever be reachable by id alone.
+        raise HTTPException(
+            404, "Article not found, or it is shared reference content that cannot "
+                 "be deleted from here.")
+    # write_clause_at on BOTH paths. The lookup is NULL-inclusive so a shared article
+    # is readable; deleting or archiving one here would remove it for every tenant,
+    # and a hard delete is irreversible.
+    shared_refusal = ("Article not found, or it is shared reference content that "
+                      "cannot be modified from here.")
     if hard:
-        scope, params = await accounts.scope_clause_at(2)
-        await db.execute(
+        scope, params = await accounts.write_clause_at(2)
+        result = await db.execute(
             f"DELETE FROM kb_articles WHERE id = $1 AND {scope}",
             row["id"], *params)
+        if result is not None and result.endswith(" 0"):
+            raise HTTPException(404, shared_refusal)
         await write_audit("kb_article", row["id"], "delete", actor, {"slug": slug})
         return {"deleted": True, "slug": slug}
-    scope, params = await accounts.scope_clause_at(3)
-    await db.execute(
+    scope, params = await accounts.write_clause_at(3)
+    result = await db.execute(
         f"UPDATE kb_articles SET status = 'archived', updated_by = $2, "
         f"updated_at = now() WHERE id = $1 AND {scope}", row["id"], actor, *params)
+    if result is not None and result.endswith(" 0"):
+        raise HTTPException(404, shared_refusal)
     await write_audit("kb_article", row["id"], "archive", actor, {"slug": slug})
     return {"archived": True, "slug": slug}
 
@@ -625,10 +743,14 @@ async def restore_version(slug: str, version: int, request: Request):
     recover from.
     """
     actor = current_user(request)
+    # for_write, checked before the snapshot INSERT below for the same reason as
+    # update_article: otherwise a shared article gains a phantom version row.
     row = await _article_by_slug(
-        slug, columns="id, title, body_md, summary, version")
+        slug, columns="id, title, body_md, summary, version", for_write=True)
     if row is None:
-        raise HTTPException(404, "Article not found")
+        raise HTTPException(
+            404, "Article not found, or it is shared reference content that cannot "
+                 "be modified from here.")
     target = await db.fetchrow(
         "SELECT title, body_md, summary FROM kb_article_versions "
         "WHERE article_id = $1 AND version = $2", row["id"], version)
@@ -643,7 +765,9 @@ async def restore_version(slug: str, version: int, request: Request):
     """, row["id"], row["version"], row["title"], row["body_md"], row["summary"],
         f"Replaced by a restore of version {version}", actor)
 
-    scope, params = await accounts.scope_clause_at(6)
+    # write_clause_at: restoring rewrites the article's live text, so a shared row
+    # must not be reachable here even though it is readable.
+    scope, params = await accounts.write_clause_at(6)
     updated = await db.fetchrow(f"""
         UPDATE kb_articles SET title = $2, body_md = $3, summary = $4,
                version = version + 1, updated_by = $5, updated_at = now()
@@ -651,7 +775,9 @@ async def restore_version(slug: str, version: int, request: Request):
     """, row["id"], target["title"], target["body_md"], target["summary"], actor,
         *params)
     if updated is None:
-        raise HTTPException(404, "Article not found")
+        raise HTTPException(
+            404, "Article not found, or it is shared reference content that cannot "
+                 "be modified from here.")
 
     await write_audit("kb_article", row["id"], "restore", actor,
                       {"slug": slug, "restored_from": version,
@@ -671,17 +797,23 @@ async def add_link(slug: str, body: LinkIn, request: Request):
     if body.relation not in RELATIONS:
         raise HTTPException(422, f"relation must be one of {RELATIONS}")
 
-    article = await _article_by_slug(slug)
+    # for_write: adding a link mutates the article's relationships, so a shared
+    # reference article must not be attachable-to by one tenant for everyone.
+    article = await _article_by_slug(slug, for_write=True)
     if article is None:
-        raise HTTPException(404, "Article not found")
+        raise HTTPException(
+            404, "Article not found, or it is shared reference content that cannot "
+                 "be modified from here.")
 
     # kb_links has no FK (it is polymorphic by design), so the route verifies the
     # target exists. Without this a typo silently creates a link to nothing, and
     # the article looks attached to a use case nobody can find.
-    table = _ENTITY_TABLES[body.entity_type]
-    target = await db.fetchrow(f"SELECT id FROM {table} WHERE id = $1",
-                               body.entity_id)
-    if target is None:
+    #
+    # SCOPED, because this read is an existence oracle: unscoped, a caller could walk
+    # entity ids and learn which roadmap items and funding requests exist on other
+    # accounts from whether they got a 404 or a 200.
+    target = await _entity_exists(body.entity_type, body.entity_id)
+    if not target:
         raise HTTPException(
             404, f"No {body.entity_type.replace('_', ' ')} with id "
                  f"{body.entity_id}")
@@ -711,7 +843,10 @@ async def remove_link(link_id: int, request: Request):
     articles from their portfolio entities.
     """
     actor = current_user(request)
-    scope, scope_params = await accounts.scope_clause_at(2, "a")
+    # write_clause_at on the owning-article predicate: detaching a link MUTATES the
+    # article's relationships, so a shared article's links must not be strippable by
+    # one tenant for everyone.
+    scope, scope_params = await accounts.write_clause_at(2, "a")
     row = await db.fetchrow(
         f"""DELETE FROM kb_links WHERE id = $1 AND EXISTS (
                 SELECT 1 FROM kb_articles a
@@ -763,9 +898,13 @@ async def upload_attachment(slug: str, request: Request,
                             file: UploadFile = File(...)):
     """Attach a document. Validated against its actual bytes, not its filename."""
     actor = current_user(request)
-    article = await _article_by_slug(slug)
+    # for_write: uploading mutates the article, and a tenant must not be able to
+    # attach files to the shared reference library that every account then sees.
+    article = await _article_by_slug(slug, for_write=True)
     if article is None:
-        raise HTTPException(404, "Article not found")
+        raise HTTPException(
+            404, "Article not found, or it is shared reference content that cannot "
+                 "be modified from here.")
 
     content = await file.read()
     try:
@@ -890,7 +1029,9 @@ async def download_attachment(attachment_id: int):
 async def delete_attachment(attachment_id: int, request: Request):
     """Remove an attachment from an article the current account owns."""
     actor = current_user(request)
-    scope, scope_params = await accounts.scope_clause_at(2, "a")
+    # write_clause_at: removing an attachment mutates the owning article, so a shared
+    # article's attachments must not be deletable by a single tenant.
+    scope, scope_params = await accounts.write_clause_at(2, "a")
     row = await db.fetchrow(
         f"""DELETE FROM kb_attachments WHERE id = $1 AND EXISTS (
                 SELECT 1 FROM kb_articles a

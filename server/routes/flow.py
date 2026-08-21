@@ -32,7 +32,7 @@ from fastapi import APIRouter, HTTPException, Query, Request
 from pydantic import BaseModel, Field
 
 from ..common import current_user, row_to_dict, rows_to_list, write_audit
-from ..db import db
+from ..db import DatabaseUnavailable, db
 from .. import accounts, portfolio
 # Import the readiness rule rather than restating it: a local copy would let
 # this module silently disagree with how readiness is actually computed.
@@ -256,6 +256,24 @@ async def sankey(
 # ---------------------------------------------------------------------------
 # Glossary
 # ---------------------------------------------------------------------------
+def _is_unique_violation(exc: BaseException) -> bool:
+    """Whether this error is a unique-constraint violation (SQLSTATE 23505).
+
+    Used to turn the race the pre-check cannot close — two concurrent creates of the
+    same term — into a 409 rather than a 500. `DatabaseUnavailable` is excluded
+    explicitly: an outage must keep propagating to the 503 handler rather than being
+    reported to the user as "that name is taken".
+    """
+    if isinstance(exc, DatabaseUnavailable):
+        return False
+    if getattr(exc, "sqlstate", None) == "23505":
+        return True
+    if type(exc).__name__ == "UniqueViolationError":
+        return True
+    message = str(exc).lower()
+    return "unique constraint" in message or "duplicate key" in message
+
+
 class GlossaryTermIn(BaseModel):
     term: str = Field(..., min_length=1, max_length=200)
     definition: str | None = None
@@ -362,27 +380,44 @@ async def create_term(body: GlossaryTermIn, request: Request):
     """
     actor = current_user(request)
     account_id = await accounts.current()
-    # The duplicate check is scoped the same way the list read is, so a name another
-    # tenant happens to use does not read as "already exists" here — a 409 naming a
-    # term the caller cannot see is both confusing and a disclosure.
-    scope, scope_params = await accounts.scope_clause_at(2, "gt")
+    # DELIBERATELY GLOBAL, matching the DB constraint.
+    #
+    # `glossary_terms.term` is `TEXT NOT NULL UNIQUE` (migration 005) — unique across
+    # ALL accounts, not per account. Scoping this check to the current account was
+    # worse than useless: a collision with another tenant's term passed the check and
+    # then hit the unique index at INSERT, surfacing as an unhandled 500 instead of
+    # the 409 the user needed.
+    #
+    # So the check must have the same scope as the constraint it is predicting. It
+    # reads `id` only — no definition, owner or account_id — so it reveals that a term
+    # name is taken, not what anyone said about it.
+    #
+    # TODO(multi-tenant): relaxing this to `UNIQUE (account_id, term)` so two
+    # utilities can each define "feeder" needs a migration that a separate PR owns.
+    # Until then the global namespace is the real constraint and this reflects it.
     existing = await db.fetchrow(
-        f"SELECT gt.id FROM glossary_terms gt "
-        f"WHERE lower(gt.term) = lower($1) AND {scope}",
-        body.term, *scope_params)
+        "SELECT id FROM glossary_terms WHERE lower(term) = lower($1)", body.term)
     if existing:
-        raise HTTPException(409, f"A term named {body.term!r} already exists.")
-    # NOTE: glossary_terms.term is still globally UNIQUE in the schema (migration
-    # 005), so two accounts cannot yet hold the same term and the insert below will
-    # raise on a collision with another tenant's row. Relaxing that to
-    # UNIQUE (account_id, term) needs a migration, which a separate PR owns.
-    row = await db.fetchrow(
-        """INSERT INTO glossary_terms
-           (account_id, term, definition, domain_id, lob_id, synonyms,
-            source_systems, owner, origin, is_user_edited)
-           VALUES ($1,$2,$3,$4,$5,$6,$7,$8,'manual',true) RETURNING *""",
-        account_id, body.term, body.definition, body.domain_id, body.lob_id,
-        body.synonyms, body.source_systems, body.owner)
+        raise HTTPException(
+            409, f"A term named {body.term!r} already exists. Glossary terms are "
+                 "currently unique across the whole instance.")
+    try:
+        row = await db.fetchrow(
+            """INSERT INTO glossary_terms
+               (account_id, term, definition, domain_id, lob_id, synonyms,
+                source_systems, owner, origin, is_user_edited)
+               VALUES ($1,$2,$3,$4,$5,$6,$7,$8,'manual',true) RETURNING *""",
+            account_id, body.term, body.definition, body.domain_id, body.lob_id,
+            body.synonyms, body.source_systems, body.owner)
+    except Exception as exc:  # noqa: BLE001
+        # Belt and braces for the race the check above cannot close: two concurrent
+        # creates of the same term both pass the SELECT, and one loses at the index.
+        # A 409 is the honest answer; a 500 would look like a server bug.
+        if _is_unique_violation(exc):
+            raise HTTPException(
+                409, f"A term named {body.term!r} already exists. Glossary terms "
+                     "are currently unique across the whole instance.") from exc
+        raise
     if row is None:
         raise HTTPException(503, "Database unavailable")
     await write_audit("glossary_term", row["id"], "create", actor, body.model_dump())
@@ -399,18 +434,32 @@ async def update_term(term_id: int, body: GlossaryTermIn, request: Request):
     rewrite any utility's vocabulary.
     """
     actor = current_user(request)
-    scope, scope_params = await accounts.scope_clause_at(9)
-    row = await db.fetchrow(
-        f"""UPDATE glossary_terms SET term=$1, definition=$2, domain_id=$3, lob_id=$4,
-           synonyms=$5, source_systems=$6, owner=$7, is_user_edited=true,
-           updated_at=now()
-           WHERE id=$8 AND {scope} RETURNING *""",
-        body.term, body.definition, body.domain_id, body.lob_id,
-        body.synonyms, body.source_systems, body.owner, term_id, *scope_params)
+    # write_clause_at, not scope_clause_at: the read predicate matches shared
+    # (account_id IS NULL) reference terms, so this let one tenant rewrite the
+    # shipped glossary for every customer on the instance.
+    scope, scope_params = await accounts.write_clause_at(9)
+    try:
+        row = await db.fetchrow(
+            f"""UPDATE glossary_terms SET term=$1, definition=$2, domain_id=$3,
+               lob_id=$4, synonyms=$5, source_systems=$6, owner=$7,
+               is_user_edited=true, updated_at=now()
+               WHERE id=$8 AND {scope} RETURNING *""",
+            body.term, body.definition, body.domain_id, body.lob_id,
+            body.synonyms, body.source_systems, body.owner, term_id, *scope_params)
+    except Exception as exc:  # noqa: BLE001
+        # Renaming into a name another account already holds hits the same global
+        # UNIQUE as create_term, and deserves the same 409 rather than a 500.
+        if _is_unique_violation(exc):
+            raise HTTPException(
+                409, f"A term named {body.term!r} already exists. Glossary terms "
+                     "are currently unique across the whole instance.") from exc
+        raise
     if row is None:
-        # Deliberately the same 404 whether the term is absent or owned by another
-        # account: a 403 would confirm that someone else's term exists.
-        raise HTTPException(404, "Term not found")
+        # Deliberately the same 404 whether the term is absent, owned by another
+        # account, or shared: a 403 would confirm that someone else's term exists.
+        raise HTTPException(
+            404, "Term not found, or it is shared reference content that cannot be "
+                 "modified from here.")
     await write_audit("glossary_term", term_id, "update", actor, body.model_dump())
     return dict(row)
 
@@ -419,11 +468,15 @@ async def update_term(term_id: int, body: GlossaryTermIn, request: Request):
 async def delete_term(term_id: int, request: Request):
     """Delete a curated term the current account owns."""
     actor = current_user(request)
-    scope, scope_params = await accounts.scope_clause_at(2)
+    # write_clause_at: a shared reference term must not be deletable by one tenant
+    # for every other customer.
+    scope, scope_params = await accounts.write_clause_at(2)
     row = await db.fetchrow(
         f"DELETE FROM glossary_terms WHERE id = $1 AND {scope} RETURNING id",
         term_id, *scope_params)
     if row is None:
-        raise HTTPException(404, "Term not found")
+        raise HTTPException(
+            404, "Term not found, or it is shared reference content that cannot be "
+                 "deleted from here.")
     await write_audit("glossary_term", term_id, "delete", actor)
     return {"deleted": True}

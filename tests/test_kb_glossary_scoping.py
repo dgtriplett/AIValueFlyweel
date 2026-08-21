@@ -52,6 +52,13 @@ ALLOWED_UNSCOPED = (
     # candidate list must span all rows or the INSERT violates the constraint.
     # Reads slugs only — no titles, bodies or account ids.
     "SELECT slug FROM kb_articles",
+    # glossary_terms.term is globally UNIQUE (migration 005), so the duplicate check
+    # MUST have the same scope as the constraint it predicts. Scoping it (which an
+    # earlier version of this file wrongly required) meant a collision with another
+    # tenant's term passed the check and then hit the unique index at INSERT as an
+    # unhandled 500 instead of a 409. Reads `id` only.
+    # See test_fail_closed_depth.TestGlossaryUniquenessMatchesTheConstraint.
+    "SELECT id FROM glossary_terms WHERE lower(term)",
 )
 
 SCOPED_TABLES = ("kb_articles", "kb_folders", "glossary_terms")

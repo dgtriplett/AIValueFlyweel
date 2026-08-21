@@ -72,21 +72,21 @@ class AccountTestCase(unittest.TestCase):
 
 class TestErrorClassification(AccountTestCase):
     def test_missing_table_is_not_a_failure(self):
-        self.assertTrue(acct._is_missing_relation(MissingTable("no relation")))
+        self.assertTrue(acct.is_missing_relation(MissingTable("no relation")))
 
     def test_connection_loss_is_a_failure(self):
-        self.assertFalse(acct._is_missing_relation(ConnectionLost("gone")))
+        self.assertFalse(acct.is_missing_relation(ConnectionLost("gone")))
 
     def test_permission_error_is_a_failure(self):
         class NoPermission(Exception):
             sqlstate = "42501"
-        self.assertFalse(acct._is_missing_relation(NoPermission("denied")))
+        self.assertFalse(acct.is_missing_relation(NoPermission("denied")))
 
     def test_message_fallback_when_there_is_no_sqlstate(self):
         """The stubbed asyncpg in tests raises plain exceptions."""
-        self.assertTrue(acct._is_missing_relation(
+        self.assertTrue(acct.is_missing_relation(
             Exception('relation "accounts" does not exist')))
-        self.assertFalse(acct._is_missing_relation(Exception("timeout")))
+        self.assertFalse(acct.is_missing_relation(Exception("timeout")))
 
 
 class TestDefaultAccountIdDistinguishesTheCases(AccountTestCase):

@@ -124,11 +124,21 @@ async def list_accounts(request: Request, include_inactive: bool = False):
             FROM accounts a {where} ORDER BY a.is_default DESC, lower(a.name)
         """))
     except Exception as exc:  # noqa: BLE001
-        # Pre-migration installs have no accounts table. Report that plainly rather
-        # than 500ing, so the setup screen can say what to run.
-        logger.info("accounts unavailable (%s)", type(exc).__name__)
-        return {"accounts": [], "current_account_id": None,
-                "note": "Run migration 009 to enable accounts."}
+        # ONLY an absent table earns the friendly "run the migration" answer. This
+        # used to catch everything, so a real outage was reported as a pre-migration
+        # install: the setup screen told the operator to run migration 009 — which was
+        # already applied — while the actual cause was that Lakebase was unreachable.
+        # Wrong diagnosis on the one endpoint someone checks first.
+        if acct.is_missing_relation(exc):
+            logger.info("accounts table absent (%s) — reporting pre-migration",
+                        type(exc).__name__)
+            return {"accounts": [], "current_account_id": None,
+                    "note": "Run migration 009 to enable accounts."}
+        logger.error("accounts unavailable (%s: %s)", type(exc).__name__, exc)
+        raise HTTPException(
+            503, "The accounts table could not be read, so the account list is "
+                 f"unavailable. This is not a missing migration: {type(exc).__name__}"
+                 f": {exc}") from exc
     return {"accounts": rows, "current_account_id": await acct.current()}
 
 

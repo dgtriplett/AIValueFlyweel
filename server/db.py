@@ -41,6 +41,16 @@ _AUTH_ERRORS = (
 )
 
 
+class DatabaseUnavailable(RuntimeError):
+    """Lakebase is configured but unreachable, and the caller must not paper over it.
+
+    Deliberately NOT raised when Lakebase is unconfigured (no PGHOST): there, empty
+    reads and no-op writes are the correct, documented behaviour. This is only for
+    the case where a real database is expected and cannot be reached, so returning a
+    benign empty would be a lie the caller acts on — see `_require_available`.
+    """
+
+
 class DatabasePool:
     """The Lakebase pool, plus an honest account of why there isn't one.
 
@@ -139,11 +149,37 @@ class DatabasePool:
             await self._pool.close()
             self._pool = None
 
+    def _require_available(self) -> None:
+        """Raise if Lakebase is configured but unreachable.
+
+        THE BUG THIS EXISTS TO PREVENT
+        -----------------------------
+        `get_pool()` returns None for two unrelated reasons, and the query helpers
+        used to turn both into a benign `[]` / `None`. Downstream that is not benign
+        at all:
+
+          * `default_account_id()` reads `fetchrow() -> None` as "no accounts exist",
+            so `scope_clause()` returns the literal `true` and the request reads
+            EVERY tenant's rows;
+          * `execute()` returning None is indistinguishable from a successful write,
+            so a create/update reports 200 having persisted nothing.
+
+        A configured outage must therefore raise, not return a value a caller can
+        mistake for data. The explicitly-unconfigured path (no PGHOST) keeps its
+        benign empties — there, "no rows" really is the right answer.
+        """
+        if self.is_degraded:
+            raise DatabaseUnavailable(
+                "Lakebase is configured (PGHOST is set) but unreachable "
+                f"({self._last_error}). Refusing to return an empty result that "
+                "would read as 'no data' and silently unscope this request.")
+
     # -- query helpers ------------------------------------------------------
     async def fetch(self, sql: str, *args):
         _charge_budget()
         pool = await self.get_pool()
         if pool is None:
+            self._require_available()
             return []
         try:
             async with pool.acquire() as conn:
@@ -152,6 +188,7 @@ class DatabasePool:
             await self.refresh_token()
             pool = await self.get_pool()
             if pool is None:
+                self._require_available()
                 return []
             async with pool.acquire() as conn:
                 return await conn.fetch(sql, *args)
@@ -164,9 +201,11 @@ class DatabasePool:
     async def transaction(self):
         """One connection, one transaction, for writes that must not half-apply.
 
-        Yields an asyncpg connection, or None when there is no pool — so a caller
-        must handle None exactly as it handles `execute()` returning None, rather
-        than assuming a connection and crashing in demo mode.
+        Yields an asyncpg connection, or None only when Lakebase is explicitly
+        UNCONFIGURED — so a caller handles None exactly as it handles `execute()`
+        returning None. A configured-but-unreachable pool raises instead, because
+        yielding None there would let a caller report success for a transaction that
+        never ran.
 
         Needed because `execute()` takes a fresh connection per call, so a
         multi-statement invariant (clear the old default, then set the new one) can
@@ -175,6 +214,7 @@ class DatabasePool:
         """
         pool = await self.get_pool()
         if pool is None:
+            self._require_available()
             yield None
             return
         async with pool.acquire() as conn:
@@ -185,6 +225,7 @@ class DatabasePool:
         _charge_budget()
         pool = await self.get_pool()
         if pool is None:
+            self._require_available()
             return None
         try:
             async with pool.acquire() as conn:
@@ -193,6 +234,7 @@ class DatabasePool:
             await self.refresh_token()
             pool = await self.get_pool()
             if pool is None:
+                self._require_available()
                 return None
             async with pool.acquire() as conn:
                 return await conn.execute(sql, *args)

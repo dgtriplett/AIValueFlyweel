@@ -57,7 +57,7 @@ import logging
 import os
 from contextvars import ContextVar
 
-from .db import db
+from .db import DatabaseUnavailable, db
 
 logger = logging.getLogger(__name__)
 
@@ -110,25 +110,36 @@ def _requires_account_scope(path: str) -> bool:
     return not path.startswith(_UNSCOPED_PREFIXES)
 
 
-def _is_missing_relation(exc: BaseException) -> bool:
-    """True when the error means "the accounts table isn't there yet".
+def is_missing_relation(exc: BaseException) -> bool:
+    """True ONLY when the error means "the accounts table was never created".
 
-    That is the pre-migration state and it is legitimate. Anything else — a dropped
-    connection, a permission error, a timeout — is a failure and must not be
-    mistaken for it.
+    That is the pre-migration state, it is legitimate, and it is the one case where
+    operating unscoped is safe — there are no other tenants to leak to. Every other
+    error must fail closed.
 
-    Matched on SQLSTATE first (42P01 undefined_table, 3F000 invalid_schema_name),
-    since that is asyncpg's structured signal, with a class-name and message check
-    behind it so the tests' stubbed asyncpg and any wrapped exception still classify
-    correctly.
+    WHY ONLY 42P01
+    --------------
+    `3F000` (invalid_schema_name) was previously accepted here too, and that was
+    wrong in a way that mattered: it means the schema in `search_path` does not
+    resolve — a misconfigured deployment pointing at the wrong database. The tables
+    and every tenant's rows exist; we are simply looking in the wrong place. Treating
+    it as "pre-migration" let a configuration error enable unscoped operation, which
+    is the exact failure mode this module exists to prevent. Only `42P01`
+    (undefined_table) genuinely means "this table does not exist".
+
+    DatabaseUnavailable is rejected explicitly rather than relying on the message
+    fallback below. It is a configured outage, and a security decision should not
+    depend on the wording of an exception string.
     """
+    if isinstance(exc, DatabaseUnavailable):
+        return False
     sqlstate = getattr(exc, "sqlstate", None)
-    if sqlstate in ("42P01", "3F000"):
+    if sqlstate == "42P01":
         return True
     if sqlstate is not None:
-        # A real SQLSTATE that is not "missing relation" is a genuine error.
+        # A real SQLSTATE that is not undefined_table is a genuine error.
         return False
-    if type(exc).__name__ in ("UndefinedTableError", "InvalidSchemaNameError"):
+    if type(exc).__name__ == "UndefinedTableError":
         return True
     message = str(exc).lower()
     return ("does not exist" in message and "relation" in message) \
@@ -157,7 +168,7 @@ async def default_account_id() -> int | None:
         row = await db.fetchrow(
             "SELECT id FROM accounts WHERE is_default AND is_active LIMIT 1")
     except Exception as exc:  # noqa: BLE001
-        if _is_missing_relation(exc):
+        if is_missing_relation(exc):
             # Pre-migration-009 install: nothing is scoped because nothing is set up.
             return None
         raise AccountResolutionError(
@@ -170,7 +181,7 @@ async def default_account_id() -> int | None:
             row = await db.fetchrow(
                 "SELECT id FROM accounts WHERE is_active ORDER BY id LIMIT 1")
         except Exception as exc:  # noqa: BLE001
-            if _is_missing_relation(exc):
+            if is_missing_relation(exc):
                 return None
             raise AccountResolutionError(
                 f"could not read the accounts table ({type(exc).__name__}: {exc})"
@@ -442,6 +453,36 @@ async def owned_clause(column: str = "account_id", *, param_index: int = 1) -> t
     return f"{column} = ${param_index}", [account_id]
 
 
+async def write_clause_at(param_index: int, alias: str = "") -> tuple[str, list]:
+    """A WHERE fragment for MUTATING rows: matches ONLY the caller's own account.
+
+    READ AND WRITE ARE NOT THE SAME PREDICATE
+    -----------------------------------------
+    `scope_clause*` includes `account_id IS NULL` because NULL means "shared
+    reference content, visible to every tenant" — the seeded KB folders, the shipped
+    glossary. That is right for a SELECT.
+
+    Reusing it for UPDATE/DELETE was a real defect: `OR account_id IS NULL` matches
+    every shared row, so any single tenant could rename, re-path, archive or
+    hard-delete the shared library **for every other customer on the instance**. One
+    tenant deleting "Protection Standards" deleted it for everybody.
+
+    So mutations use this instead: strict equality, never NULL, never another
+    account. A shared row is read-only to tenants by construction — changing the
+    shipped library is a seed/migration operation, not something a tenant API can do.
+
+    Like `scope_clause_at`, the placeholder index is a parameter because an UPDATE
+    appends its predicate after the SET values.
+    """
+    prefix = f"{alias}." if alias else ""
+    account_id = await current()
+    if account_id is None:
+        # No accounts exist yet, so there is no other tenant to protect and no
+        # account_id to match on. Writes are unscoped for the same reason reads are.
+        return "true", []
+    return f"{prefix}account_id = ${param_index}", [account_id]
+
+
 async def scope_clause_at(param_index: int, alias: str = "") -> tuple[str, list]:
     """`scope_clause` with the placeholder numbered `$param_index` instead of `$1`.
 
@@ -449,6 +490,10 @@ async def scope_clause_at(param_index: int, alias: str = "") -> tuple[str, list]
     the SET values and so cannot be `$1`. Rewriting the `$1` of `scope_clause()` by
     string substitution at each call site is the kind of thing that works until a
     query has a `$10` in it, so the index is a parameter here instead.
+
+    FOR READS ONLY. This includes `account_id IS NULL`, so using it in an UPDATE or
+    DELETE lets a tenant mutate the shared library for everyone — use
+    `write_clause_at` for anything that mutates.
     """
     prefix = f"{alias}." if alias else ""
     account_id = await current()

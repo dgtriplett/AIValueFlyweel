@@ -79,15 +79,39 @@ class TestSpaCatchAllContainment(unittest.TestCase):
                         f"{path} leaked a file outside frontend/dist "
                         f"(matched {marker!r})")
 
-    def test_traversal_is_indistinguishable_from_not_found(self):
-        """No filesystem oracle: a path that escapes looks like any other miss.
+    def test_escape_attempts_return_404(self):
+        """A rejected traversal is a 404, not a 200 with the SPA.
 
-        If an escaping path 404'd while a merely-absent one served the SPA, the
-        difference would let a caller probe which files exist outside the root.
+        Originally these fell through to the SPA index, which meant a probe got the
+        same 200 as a real page: nothing in the response said "rejected", and access
+        logs could not distinguish an attack from a deep link. The containment
+        decision was already correct; only the reporting was misleading.
         """
-        escaped = self.client.get("/..%2f..%2fapp.py")
-        absent = self.client.get("/no-such-file-anywhere.txt")
-        self.assertEqual(escaped.status_code, absent.status_code)
+        for path in ("/..%2f..%2fapp.py", "/%2e%2e%2f%2e%2e%2fapp.py",
+                     "/..%2fserver%2fdb.py"):
+            with self.subTest(path=path):
+                self.assertEqual(self.client.get(path).status_code, 404)
+
+    def test_escaping_paths_do_not_reveal_what_exists_outside(self):
+        """No filesystem oracle AMONG escapes: real and fake targets look identical.
+
+        This is the property that actually matters. `escapes_root` decides on the
+        resolved path's SHAPE and never asks whether the target exists, so a path
+        naming a real file outside the root is indistinguishable from one naming
+        nothing. A caller learns "that was rejected", never "that file is there".
+        """
+        real_target = self.client.get("/..%2f..%2fapp.py")
+        fake_target = self.client.get("/..%2f..%2fno-such-file-at-all.py")
+        self.assertEqual(real_target.status_code, fake_target.status_code)
+        self.assertEqual(real_target.text, fake_target.text)
+
+    def test_client_side_routes_are_not_treated_as_escapes(self):
+        """The 404 must apply to escapes only — deep links still render the SPA."""
+        for path in ("/portfolio", "/knowledge/some-article", "/no-such-page"):
+            with self.subTest(path=path):
+                response = self.client.get(path)
+                self.assertEqual(response.status_code, 200,
+                                 "a normal client route must not 404")
 
     def test_real_spa_assets_are_still_served(self):
         """The fix must not break the thing the route is for."""

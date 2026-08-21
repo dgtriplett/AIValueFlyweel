@@ -14,7 +14,7 @@ from fastapi.staticfiles import StaticFiles
 
 from server import limits, logging_setup
 from server.config import AI_QUERY_ENDPOINT, IS_DATABRICKS_APP, SERVING_ENDPOINT, GENIE_SPACE_ID
-from server.db import db, token_refresh_loop
+from server.db import DatabaseUnavailable, db, token_refresh_loop
 from server.routes import (
     lobs,
     data_assets,
@@ -89,26 +89,17 @@ def env_pill_html() -> str:
     )
 
 
-def safe_static_path(root: Path, requested: str) -> Path | None:
-    """The file `requested` names inside `root`, or None if it escapes.
+def _contained_path(root: Path, requested: str) -> Path | None:
+    """Resolve `requested` under `root`, or None if it lands outside.
 
-    WHY THIS EXISTS
-    ---------------
-    The SPA catch-all captures `{full_path:path}`, which happily contains `..`.
-    Joining that onto a directory and serving the result is an unauthenticated
-    arbitrary file read: `GET /..%2f..%2fapp.py` returned this file's source, and
-    the same trick reaches anything the app process can read. This route is the
-    app's front door, matched before any auth runs, so the check has to live here.
+    Decides containment WITHOUT asking whether the target exists — deliberately, so
+    the escape verdict cannot become a filesystem oracle. `escapes_root` and
+    `safe_static_path` both build on this so there is exactly one containment rule.
 
-    Containment is decided on the RESOLVED paths, and the root is resolved too, so
-    a symlink pointing out of the tree cannot smuggle a path past the comparison —
-    `..` collapsing alone is not enough. `strict=False` because a miss must be a
-    404/SPA fallback, not an exception.
-
-    Returns None for anything that is not a real contained file, so every rejection
-    — escape, directory, missing file, empty path — takes the SPA fallback and the
-    caller cannot distinguish "outside the root" from "not found". That difference
-    is itself a filesystem oracle.
+    Containment is decided on the RESOLVED paths, and the root is resolved too, so a
+    symlink pointing out of the tree cannot smuggle a path past the comparison —
+    collapsing `..` alone is not enough. `strict=False` because a path that does not
+    exist must still be classifiable rather than raising.
     """
     if not requested:
         return None
@@ -123,6 +114,40 @@ def safe_static_path(root: Path, requested: str) -> Path | None:
         # An overlong or otherwise unrepresentable path resolves to nothing useful.
         return None
     if candidate != root_resolved and root_resolved not in candidate.parents:
+        return None
+    return candidate
+
+
+def escapes_root(root: Path, requested: str) -> bool:
+    """Whether `requested` tries to leave `root` — a traversal attempt.
+
+    Existence is never consulted, so `/..%2fapp.py` (a real file) and
+    `/..%2fnope.txt` (not a file) are both simply "escaped". The caller can turn this
+    into a flat 404 without revealing which paths exist outside the tree.
+
+    The empty path is not an escape — it means "/" and belongs to the SPA.
+    """
+    if not requested:
+        return False
+    return _contained_path(root, requested) is None
+
+
+def safe_static_path(root: Path, requested: str) -> Path | None:
+    """The file `requested` names inside `root`, or None if it escapes or is absent.
+
+    WHY THIS EXISTS
+    ---------------
+    The SPA catch-all captures `{full_path:path}`, which happily contains `..`.
+    Joining that onto a directory and serving the result is an unauthenticated
+    arbitrary file read: `GET /..%2f..%2fapp.py` returned this file's source, and
+    the same trick reaches anything the app process can read. This route is the
+    app's front door, matched before any auth runs, so the check has to live here.
+
+    Returns None for anything that is not a real contained file — escape, directory,
+    missing file, empty path — so a caller can never serve a path it did not verify.
+    """
+    candidate = _contained_path(root, requested)
+    if candidate is None:
         return None
     try:
         if not candidate.is_file():
@@ -183,6 +208,26 @@ logging_setup.install_middleware(app)
 # warnings carry a request id.
 from server import accounts as _accounts  # noqa: E402
 _accounts.install_middleware(app)
+
+
+@app.exception_handler(DatabaseUnavailable)
+async def database_unavailable_handler(request, exc: DatabaseUnavailable):
+    """A configured-but-unreachable Lakebase is a 503, not a 500 and not a 200.
+
+    The query helpers raise rather than returning an empty result, because an empty
+    result reads as "no data" and silently unscopes the request. That raise has to
+    land somewhere useful: without this handler it is an opaque 500 with a stack
+    trace, and the actual cause — the database is down — is only in the log.
+
+    503 is the honest status: the request was fine, the dependency is not, and a
+    retry may succeed.
+    """
+    logger.error("refusing %s: %s", request.url.path, exc)
+    return JSONResponse(
+        {"error": "The database is temporarily unavailable, so this request cannot "
+                  "be served. No data was read or written.",
+         "detail": str(exc)},
+        status_code=503)
 
 # --- API routers -----------------------------------------------------------
 for module in (lobs, data_assets, use_cases, dependencies, values, roadmap,
@@ -299,9 +344,23 @@ if FRONTEND_DIST.exists():
     async def serve_spa(full_path: str):
         if full_path.startswith("api/"):
             return JSONResponse({"error": "Not found"}, status_code=404)
+        if escapes_root(FRONTEND_DIST, full_path):
+            # An explicit 404 for a path that tried to leave the directory. Serving
+            # the SPA with a 200 here (the previous behaviour) meant a probe got the
+            # same success status as a real page, so nothing in the response said
+            # "that was rejected" — bad for the caller and worse for anyone reading
+            # access logs looking for traversal attempts.
+            #
+            # This is NOT a filesystem oracle: `escapes_root` decides on the path's
+            # SHAPE after resolution and never asks whether the target exists, so
+            # /..%2fapp.py and /..%2fno-such-file both 404 identically. What leaks is
+            # "you tried to escape", which the caller already knows.
+            return JSONResponse({"error": "Not found"}, status_code=404)
         candidate = safe_static_path(FRONTEND_DIST, full_path)
         if candidate is not None:
             return FileResponse(str(candidate))
+        # Inside the root but not a file: a client-side route like /portfolio. The
+        # SPA renders it.
         return spa_index_response()
 else:
     @app.get("/")
