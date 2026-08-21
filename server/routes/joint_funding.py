@@ -8,12 +8,13 @@ LLM-generated one-page funding brief.
 """
 import json
 
-from fastapi import APIRouter, HTTPException, Request
+from fastapi import APIRouter, Depends, HTTPException, Request
 from pydantic import BaseModel
 
 from .. import accounts, portfolio
 from ..common import current_user, write_audit
 from ..db import db
+from ..limits import limiter
 from ..value_engine import load_assumptions, EFFORT_COST, asset_cost, use_case_value
 # Import the readiness rule rather than restating it: a local copy would let
 # this module silently disagree with how readiness is actually computed.
@@ -197,7 +198,7 @@ class BriefIn(BaseModel):
     asset_id: int
 
 
-@router.post("/brief")
+@router.post("/brief", dependencies=[Depends(limiter("research"))])
 async def brief(body: BriefIn):
     """LLM-generated one-page funding brief (markdown) for the opportunity."""
     assumptions, assets, ucs, lobs, by_asset, req_by_uc, prereqs_built = await _context()

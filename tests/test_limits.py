@@ -442,6 +442,7 @@ class TestLimiterRunsBeforeBodyValidation(LimitsTestCase):
             "/api/agents/recommend": {"top_n": "not-an-integer"},
             "/api/agents/estimate-value": {"use_case_id": "not-an-integer"},
             "/api/agents/decompose-source": {"not_the_expected_field": "x"},
+            "/api/joint-funding/brief": {"asset_id": "not-an-integer"},
         }
         burst = limits.LIMITS["research"].burst
 
@@ -492,6 +493,7 @@ class TestExpensiveEndpointsAreLimited(unittest.TestCase):
         "server/routes/genie.py": [('/ask"', "research"),
                                     ('/provision"', "sweep")],
         "server/routes/research.py": [('/company"', "research"), ('/apply"', "write")],
+        "server/routes/joint_funding.py": [('/brief"', "research")],
         "server/routes/generate.py": [('/use-cases"', "generate"),
                                       ('/use-cases/commit"', "write")],
         "server/routes/taxonomy.py": [('/classify"', "generate")],
@@ -603,10 +605,7 @@ class TestExpensiveEndpointsAreLimited(unittest.TestCase):
         from pathlib import Path
 
         root = Path(__file__).parent.parent
-        # joint_funding calls llm_text from a GET (a narrative brief). GETs are not
-        # rate limited here; it is a single call on an explicit user action, and the
-        # 'write'/'generate' classes cover the paths that mutate or cost the most.
-        exempt = {"server/routes/joint_funding.py", "server/routes/agents.py"}
+        exempt = {"server/routes/agents.py"}
         uncovered = []
         for path in (root / "server" / "routes").glob("*.py"):
             relative = f"server/routes/{path.name}"
