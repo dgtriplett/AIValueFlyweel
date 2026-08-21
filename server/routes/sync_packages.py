@@ -368,6 +368,8 @@ async def _lookup_or_create_use_case(raw: dict[str, Any], source_app: str, actor
             uc["status"], uc["effort_tshirt"], uc["priority_score"], uc["risk_tags"],
             uc["compliance_tags"], json.dumps(uc["hypothesized_value_json"])
             if uc["hypothesized_value_json"] else None, actor)
+        if row is None:
+            raise HTTPException(503, "Database unavailable")
         local_id = int(row["id"])
         action = "created"
 
