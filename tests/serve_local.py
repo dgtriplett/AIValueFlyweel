@@ -3,10 +3,17 @@
     python3 tests/serve_local.py [--port 8000]
 
 Serves the real FastAPI app — real routers, real handlers, real static files — but
-with `asyncpg`/`openai`/`aiohttp` stubbed and Lakebase absent, so it needs no
-database, no Databricks workspace, and no network. Read-only endpoints answer from
-a small in-memory fixture; anything requiring the warehouse returns the same
-degraded response a misconfigured install would.
+with `asyncpg`/`openai`/`aiohttp` forcibly stubbed and Lakebase absent, so it needs
+no database, no Databricks workspace, no credentials, and no network. Read-only
+endpoints answer from a small in-memory fixture; model and Genie clients return
+deterministic canned responses instead of contacting Databricks.
+
+Real Databricks calls are allowed only with an explicit opt-in:
+
+    AI_VALUE_FLYWHEEL_LOCAL_ONLINE=1 python3 tests/serve_local.py
+
+That mode still uses FakeDB, but preserves installed clients and ambient Databricks
+credentials for developers intentionally testing live model or Genie integration.
 
 The point is to exercise the console's rendering and error paths — including the
 "nothing is configured yet" state a customer sees first, which is otherwise the
@@ -27,14 +34,44 @@ ROOT = HERE.parent
 sys.path.insert(0, str(ROOT))
 sys.path.insert(0, str(HERE))
 
-import stubs  # noqa: E402,F401  (must precede any server.* import)
+import stubs  # noqa: E402  (must precede any server.* import)
+
+ONLINE_ENV = "AI_VALUE_FLYWHEEL_LOCAL_ONLINE"
+ONLINE = os.environ.get(ONLINE_ENV, "").lower() in {"1", "true", "yes"}
+stubs.install(force=not ONLINE)
 
 # No Lakebase, no discovery catalog: the fresh-install state.
 os.environ.pop("PGHOST", None)
 os.environ.pop("ATLAS_CATALOG", None)
 os.environ.setdefault("SERVING_ENDPOINT", "databricks-claude-sonnet-4-5")
 
+if not ONLINE:
+    for name in (
+        "DATABRICKS_APP_NAME",
+        "DATABRICKS_CLIENT_ID",
+        "DATABRICKS_CLIENT_SECRET",
+        "DATABRICKS_CONFIG_PROFILE",
+        "DATABRICKS_HOST",
+        "DATABRICKS_PROFILE",
+        "DATABRICKS_TOKEN",
+        "DATABRICKS_WAREHOUSE_ID",
+        "GENIE_SPACE_ID",
+    ):
+        os.environ.pop(name, None)
+
 from fakedb import FakeDB, Row  # noqa: E402
+
+from server import config as config_module  # noqa: E402
+
+if not ONLINE:
+    config_module.get_workspace_client = stubs.offline_workspace_client
+    config_module.get_oauth_token = lambda: "offline-token"
+    config_module.get_workspace_host = lambda: "https://offline.invalid"
+
+from server import llm as llm_module  # noqa: E402
+
+if not ONLINE:
+    llm_module.get_llm_client = stubs.offline_llm_client
 
 from server import db as db_module  # noqa: E402
 
@@ -177,7 +214,8 @@ def main() -> None:
 
     from app import app
 
-    print("\n  AI Value Flywheel (local, stubbed drivers)")
+    mode = "online opt-in" if ONLINE else "offline, stubbed drivers"
+    print(f"\n  AI Value Flywheel (local, {mode})")
     print(f"  Console:   http://{args.host}:{args.port}/console")
     print(f"  API docs:  http://{args.host}:{args.port}/docs")
     print(f"  Portfolio: http://{args.host}:{args.port}/  (built SPA)\n")

@@ -9,6 +9,10 @@ Importing this module BEFORE any `server.*` import registers minimal stand-ins i
 `sys.modules` for whichever of them is genuinely missing. If the real package is
 installed, it is left completely alone — so this never masks the real library in
 a full environment, and CI with a real install exercises the real code paths.
+
+The local UI harness is the deliberate exception: it calls ``install(force=True)``
+to guarantee that its documented offline mode cannot reach real services merely
+because the optional packages happen to be installed.
 """
 from __future__ import annotations
 
@@ -110,10 +114,55 @@ def _asyncpg() -> types.ModuleType:
 
 def _aiohttp() -> types.ModuleType:
     mod = types.ModuleType("aiohttp")
+    mod.__offline_stub__ = True
 
-    class ClientSession:  # pragma: no cover
-        def __init__(self, *a, **k):
-            raise RuntimeError("aiohttp is stubbed in tests")
+    class Response:
+        status = 200
+
+        def __init__(self, method: str, url: str):
+            self.method = method
+            self.url = url
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, exc_type, exc, traceback):
+            return False
+
+        async def json(self):
+            if self.method == "GET" and "/messages/" in self.url:
+                return {
+                    "status": "COMPLETED",
+                    "attachments": [{
+                        "text": {"content": "Offline Genie response (no network)."}
+                    }],
+                }
+            if self.method == "POST" and (
+                self.url.endswith("/start-conversation")
+                or "/messages" in self.url
+            ):
+                return {
+                    "conversation_id": "offline-conversation",
+                    "message": {"id": "offline-message"},
+                }
+            return {}
+
+    class ClientSession:
+        def __init__(self, *args, **kwargs):
+            self.args = args
+            self.kwargs = kwargs
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, exc_type, exc, traceback):
+            return False
+
+        def get(self, url, **kwargs):
+            return Response("GET", url)
+
+        def post(self, url, **kwargs):
+            return Response("POST", url)
 
     mod.ClientSession = ClientSession
     return mod
@@ -121,13 +170,60 @@ def _aiohttp() -> types.ModuleType:
 
 def _openai() -> types.ModuleType:
     mod = types.ModuleType("openai")
+    mod.__offline_stub__ = True
 
-    class AsyncOpenAI:  # pragma: no cover
-        def __init__(self, *a, **k):
-            raise RuntimeError("openai is stubbed in tests")
+    class Completions:
+        async def create(self, **kwargs):
+            content = (
+                "{}" if kwargs.get("response_format")
+                else "Offline model response (no network)."
+            )
+            message = types.SimpleNamespace(content=content, tool_calls=[])
+            choice = types.SimpleNamespace(message=message)
+            return types.SimpleNamespace(choices=[choice])
+
+    class AsyncOpenAI:
+        def __init__(self, *args, **kwargs):
+            self.args = args
+            self.kwargs = kwargs
+            self.chat = types.SimpleNamespace(completions=Completions())
 
     mod.AsyncOpenAI = AsyncOpenAI
     return mod
+
+
+def offline_llm_client():
+    """Return the deterministic OpenAI-compatible client used by serve_local."""
+    return _openai().AsyncOpenAI(api_key="offline", base_url="https://offline.invalid")
+
+
+def offline_workspace_client():
+    """Return a non-networking stand-in for config.get_workspace_client()."""
+    config = types.SimpleNamespace(
+        host="https://offline.invalid",
+        token="offline-token",
+        authenticate=lambda: {"Authorization": "Bearer offline-token"},
+    )
+    current_user = types.SimpleNamespace(
+        me=lambda: types.SimpleNamespace(
+            user_name="offline-local", display_name="Offline Local"
+        )
+    )
+    unavailable = types.SimpleNamespace(
+        create=_offline_workspace_operation,
+        upload=_offline_workspace_operation,
+        download=_offline_workspace_operation,
+    )
+    return types.SimpleNamespace(
+        config=config,
+        current_user=current_user,
+        files=unavailable,
+        volumes=unavailable,
+    )
+
+
+def _offline_workspace_operation(*args, **kwargs):
+    raise RuntimeError("Databricks workspace operations are disabled in offline mode")
 
 
 def _multipart() -> types.ModuleType:
@@ -167,10 +263,14 @@ def _quiet_logging() -> None:
     logging.disable(logging.CRITICAL)
 
 
-def install() -> None:
-    _ensure("asyncpg", _asyncpg)
-    _ensure("aiohttp", _aiohttp)
-    _ensure("openai", _openai)
+def install(*, force: bool = False) -> None:
+    def force_install(name: str, build) -> None:
+        sys.modules[name] = build()
+
+    installer = force_install if force else _ensure
+    installer("asyncpg", _asyncpg)
+    installer("aiohttp", _aiohttp)
+    installer("openai", _openai)
     _ensure("multipart", _multipart)
     _quiet_logging()
 
