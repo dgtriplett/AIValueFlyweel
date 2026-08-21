@@ -259,7 +259,6 @@ async def _set_account_asset_status(asset_id: int, status: str, actor: str) -> N
             "UPDATE data_assets SET ingestion_status=$1, updated_at=now() WHERE id=$2",
             status, asset_id)
         return
-    order = {"not_started": 0, "landed": 1, "curated": 2, "governed": 3}
     await db.execute("""
         INSERT INTO account_asset_status
             (account_id, data_asset_id, ingestion_status, is_user_edited,
