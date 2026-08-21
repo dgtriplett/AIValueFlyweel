@@ -117,8 +117,24 @@ class TestGatesAreNotSilentlyDropped(unittest.TestCase):
         self.assertIn("--check", self.source)
         self.assertIn("console.js", self.source)
 
-    def test_it_checks_customer_visibility_patch(self):
-        self.assertIn("patch_spa_customer_visibility.py", self.source)
+    def test_it_checks_the_spa_bundle_matches_its_source(self):
+        """The SPA gate must survive the move from patching to building.
+
+        It used to run `patch_spa_customer_visibility.py --check` (plus two sibling
+        patch scripts) against the committed bundle, because frontend/src did not
+        exist and a regex patch was the only way to change the SPA. Now the source
+        is committed and dist is built from it, so the gate is
+        `check_spa_bundle.py`, which asserts the same customer-visible behaviour on
+        the chunk index.html actually loads.
+
+        Asserted by name because the point of this class is that a gate cannot be
+        deleted quietly — if this script is renamed again, this test should be the
+        thing that notices.
+        """
+        self.assertIn("check_spa_bundle.py", self.source,
+                      "the SPA bundle gate was dropped from check.py")
+        self.assertTrue((ROOT / "scripts" / "check_spa_bundle.py").is_file(),
+                        "check.py references a SPA gate script that does not exist")
 
     def test_it_checks_for_secrets(self):
         self.assertIn("check_no_secrets", self.source)

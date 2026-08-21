@@ -1,0 +1,419 @@
+// The portfolio: the use cases this customer has actually committed to.
+//
+// Table and Kanban are the same rows read two ways — the table is for triage
+// ("what is worth the most, what is blocked"), the board is for a standup. The
+// list is owned by the shell (it feeds the KPI strip too), so `useCases`,
+// `loading` and `error` arrive as props; the two mutations that write a row live
+// here because only this view offers them.
+
+import { useMemo, useState } from 'react'
+import type { ReactNode } from 'react'
+import { useMutation, useQueryClient } from '@tanstack/react-query'
+import { ArrowDownUp, BookOpen, Plus, SquareKanban, Table, Trash2 } from 'lucide-react'
+
+import { api } from '../api'
+import {
+  KANBAN_PHASES,
+  LOB_COLORS,
+  PHASE_COLORS,
+  PHASE_LABELS,
+  READINESS_COLORS,
+  STATUSES,
+  STATUS_COLORS,
+  STATUS_LABELS,
+  fmtMoney,
+} from '../constants'
+import { ReadinessBadge } from '../components/Badges'
+import { RecommendPanel } from '../components/RecommendPanel'
+import { SourceRecommendPanel } from '../components/SourceRecommendPanel'
+import { matchesUseCase, useFilters } from '../context/FilterContext'
+import type { Lob, Readiness, Status, UseCase } from '../types'
+
+/** Sort keys are read off the row, so they mirror field names where one exists. */
+type SortKey = 'title' | 'status' | 'readiness' | 'priority_score' | 'computed_value' | 'realized'
+
+/** Readiness and status are ordinal, not alphabetical — a table sort has to know that. */
+const READINESS_RANK: Record<Readiness, number> = {
+  shovel_ready: 4,
+  awaiting_prerequisites: 3,
+  nearly_ready: 2,
+  blocked: 1,
+}
+const STATUS_RANK: Record<Status, number> = {
+  not_started: 1,
+  scoping: 2,
+  in_progress: 3,
+  live: 4,
+  value_realized: 5,
+}
+
+interface Column {
+  key: string
+  label: string
+  color: string
+  match: (useCase: UseCase) => boolean
+}
+
+export function PortfolioView({
+  useCases = [],
+  lobs = [],
+  onOpen,
+  onNew,
+  onBrowseCatalog,
+  loading = false,
+  error = false,
+}: {
+  useCases?: UseCase[]
+  lobs?: Lob[]
+  onOpen?: (useCaseId: number) => void
+  onNew?: () => void
+  onBrowseCatalog?: () => void
+  loading?: boolean
+  error?: boolean
+}) {
+  const queryClient = useQueryClient()
+  const { filters } = useFilters()
+  const [view, setView] = useState<'table' | 'kanban'>('table')
+  const [grouping, setGrouping] = useState<'status' | 'phase'>('status')
+  const [sort, setSort] = useState<{ key: SortKey; dir: number }>({
+    key: 'computed_value',
+    dir: -1,
+  })
+  const [sorted, setSorted] = useState(false)
+
+  const remove = useMutation({
+    mutationFn: (id: number) => api.deleteUseCase(id),
+    onSuccess: () => queryClient.invalidateQueries({ queryKey: ['use-cases'] }),
+  })
+  // Advancing a use case can flip an asset's ingestion status server-side, so the
+  // data-asset list is stale the moment a status lands.
+  const setStatus = useMutation({
+    mutationFn: ({ id, status }: { id: number; status: string }) => api.setStatus(id, status),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ['use-cases'] })
+      queryClient.invalidateQueries({ queryKey: ['data-assets'] })
+    },
+  })
+
+  const lobName = (lobId?: number | null) =>
+    lobId != null ? (lobs.find((lob) => lob.id === lobId)?.name ?? '—') : '—'
+
+  const visible = useMemo(
+    () => useCases.filter((useCase) => matchesUseCase(useCase, filters)),
+    [useCases, filters],
+  )
+
+  const realizedOf = (useCase: UseCase) => useCase.realized?.value ?? 0
+
+  // Until a header is clicked, delivered value outranks hypothesized value: a
+  // customer opening this view wants to see what has actually paid off, first.
+  const rows = useMemo(() => {
+    return [...visible].sort((left, right) => {
+      if (!sorted) {
+        const leftHasRealized = realizedOf(left) > 0 ? 1 : 0
+        const rightHasRealized = realizedOf(right) > 0 ? 1 : 0
+        if (leftHasRealized !== rightHasRealized) return rightHasRealized - leftHasRealized
+        const byRealized = realizedOf(right) - realizedOf(left)
+        if (byRealized !== 0) return byRealized
+        return (right.computed_value ?? 0) - (left.computed_value ?? 0)
+      }
+      let a: string | number = 0
+      let b: string | number = 0
+      if (sort.key === 'readiness') {
+        a = left.readiness ? READINESS_RANK[left.readiness] : 0
+        b = right.readiness ? READINESS_RANK[right.readiness] : 0
+      } else if (sort.key === 'status') {
+        a = left.status ? STATUS_RANK[left.status] : 0
+        b = right.status ? STATUS_RANK[right.status] : 0
+      } else if (sort.key === 'title') {
+        a = left.title
+        b = right.title
+      } else if (sort.key === 'realized') {
+        a = realizedOf(left)
+        b = realizedOf(right)
+      } else {
+        a = left[sort.key] ?? 0
+        b = right[sort.key] ?? 0
+      }
+      if (a < b) return -1 * sort.dir
+      if (a > b) return 1 * sort.dir
+      return 0
+    })
+  }, [visible, sorted, sort])
+
+  const applySort = (key: SortKey) => {
+    setSorted(true)
+    setSort((current) => (current.key === key ? { key, dir: current.dir * -1 } : { key, dir: -1 }))
+  }
+
+  const columns: Column[] =
+    grouping === 'status'
+      ? STATUSES.map((status) => ({
+          key: status,
+          label: STATUS_LABELS[status],
+          color: STATUS_COLORS[status],
+          match: (useCase: UseCase) => useCase.status === status,
+        }))
+      : KANBAN_PHASES.map((phase) => ({
+          key: String(phase),
+          label: `P${phase} · ${PHASE_LABELS[phase]}`,
+          color: PHASE_COLORS[phase],
+          match: (useCase: UseCase) => useCase.phase === phase,
+        }))
+
+  return (
+    <div className="space-y-4">
+      <RecommendPanel onOpen={onOpen} />
+      <SourceRecommendPanel onOpenUseCase={onOpen} />
+
+      <div className="flex items-center justify-between flex-wrap gap-2">
+        <div className="flex items-center gap-2">
+          <div className="bg-navy-700 border border-navy-600 rounded p-0.5 flex">
+            <button
+              className={`px-3 py-1.5 rounded text-sm flex items-center gap-1.5 ${
+                view === 'table' ? 'bg-lava/20 text-lava-300' : 'text-navy-400'
+              }`}
+              onClick={() => setView('table')}
+            >
+              <Table className="w-4 h-4" /> Table
+            </button>
+            <button
+              className={`px-3 py-1.5 rounded text-sm flex items-center gap-1.5 ${
+                view === 'kanban' ? 'bg-lava/20 text-lava-300' : 'text-navy-400'
+              }`}
+              onClick={() => setView('kanban')}
+            >
+              <SquareKanban className="w-4 h-4" /> Kanban
+            </button>
+          </div>
+          {view === 'kanban' && (
+            <div className="bg-navy-700 border border-navy-600 rounded p-0.5 flex text-xs">
+              <button
+                className={`px-2.5 py-1.5 rounded ${
+                  grouping === 'status' ? 'bg-info/20 text-info' : 'text-navy-400'
+                }`}
+                onClick={() => setGrouping('status')}
+              >
+                by Status
+              </button>
+              <button
+                className={`px-2.5 py-1.5 rounded ${
+                  grouping === 'phase' ? 'bg-info/20 text-info' : 'text-navy-400'
+                }`}
+                onClick={() => setGrouping('phase')}
+              >
+                by Phase
+              </button>
+            </div>
+          )}
+          <span className="text-sm text-navy-500">{visible.length} use cases</span>
+        </div>
+        <button className="btn-primary text-sm" onClick={() => onNew?.()}>
+          <Plus className="w-4 h-4" /> New Use Case
+        </button>
+      </div>
+
+      {loading && <div className="text-navy-400">Loading…</div>}
+      {error && <div className="text-lava-300 text-sm">Couldn't load use cases. Please retry.</div>}
+
+      {!loading &&
+        !error &&
+        visible.length === 0 &&
+        (useCases.length === 0 ? (
+          <div className="card text-center py-10 px-6">
+            <BookOpen className="w-8 h-8 text-navy-500 mx-auto mb-3" />
+            <div className="text-white font-medium">Your portfolio is empty</div>
+            <div className="text-navy-400 text-sm mt-1 max-w-md mx-auto">
+              Browse the <span className="text-lava-300">Use Case Catalog</span> to bring in
+              predefined ideas, or add your own with{' '}
+              <span className="text-lava-300">New use case</span>.
+            </div>
+            <div className="flex items-center justify-center gap-2 mt-4">
+              {onBrowseCatalog && (
+                <button
+                  className="btn-primary text-sm flex items-center gap-1.5"
+                  onClick={onBrowseCatalog}
+                >
+                  <BookOpen className="w-4 h-4" /> Browse the catalog
+                </button>
+              )}
+              <button
+                className="btn-secondary text-sm flex items-center gap-1.5"
+                onClick={() => onNew?.()}
+              >
+                <Plus className="w-4 h-4" /> Add your own
+              </button>
+            </div>
+          </div>
+        ) : (
+          <div className="card text-center text-navy-500 text-sm py-8">
+            No use cases match the current filters.
+          </div>
+        ))}
+
+      {view === 'table' ? (
+        <div className="card p-0 overflow-x-auto">
+          <table className="w-full text-sm min-w-[960px]">
+            <thead className="text-xs uppercase text-navy-500 border-b border-navy-600">
+              <tr>
+                <SortableHeader onClick={() => applySort('title')}>Use case</SortableHeader>
+                <th className="text-left px-3 py-2.5 font-medium">Domain</th>
+                <SortableHeader onClick={() => applySort('status')}>Status</SortableHeader>
+                <SortableHeader onClick={() => applySort('readiness')}>Readiness</SortableHeader>
+                <SortableHeader onClick={() => applySort('priority_score')}>Priority</SortableHeader>
+                <SortableHeader onClick={() => applySort('computed_value')}>
+                  Hyp. value
+                </SortableHeader>
+                <th className="text-left px-3 py-2.5 font-medium">Realized</th>
+                <th className="px-3 py-2.5" />
+              </tr>
+            </thead>
+            <tbody>
+              {rows.map((useCase) => (
+                <tr
+                  key={useCase.id}
+                  className="border-b border-navy-600 hover:bg-lava/5 cursor-pointer"
+                  onClick={() => onOpen?.(useCase.id)}
+                >
+                  <td className="px-3 py-2.5">
+                    <div className="font-medium text-white">{useCase.title}</div>
+                  </td>
+                  <td className="px-3 py-2.5">
+                    <span className="inline-flex items-center gap-1.5 text-navy-300">
+                      <span
+                        className="w-2 h-2 rounded-full"
+                        style={{ background: LOB_COLORS[lobName(useCase.lob_id)] ?? '#618794' }}
+                      />
+                      {lobName(useCase.lob_id)}
+                    </span>
+                  </td>
+                  <td className="px-3 py-2.5" onClick={(event) => event.stopPropagation()}>
+                    <select
+                      id={`status-${useCase.id}`}
+                      name={`status-${useCase.id}`}
+                      aria-label={`Status for ${useCase.title}`}
+                      value={useCase.status ?? 'not_started'}
+                      disabled={setStatus.isPending}
+                      onChange={(event) =>
+                        setStatus.mutate({ id: useCase.id, status: event.target.value })
+                      }
+                      className="text-xs font-semibold rounded-full px-2 py-1 border bg-navy-800 cursor-pointer focus:outline-none focus:ring-1 focus:ring-info"
+                      style={{
+                        color: STATUS_COLORS[useCase.status ?? 'not_started'],
+                        borderColor: `${STATUS_COLORS[useCase.status ?? 'not_started']}66`,
+                      }}
+                    >
+                      {STATUSES.map((status) => (
+                        <option
+                          key={status}
+                          value={status}
+                          style={{ color: '#E6EDF3', background: '#0B2026' }}
+                        >
+                          {STATUS_LABELS[status]}
+                        </option>
+                      ))}
+                    </select>
+                  </td>
+                  <td className="px-3 py-2.5">
+                    <ReadinessBadge
+                      readiness={useCase.readiness}
+                      pendingPrereqs={useCase.pending_prereqs}
+                    />
+                  </td>
+                  <td className="px-3 py-2.5 text-navy-300">{useCase.priority_score}</td>
+                  <td className="px-3 py-2.5 text-lava-300 font-medium">
+                    {fmtMoney(useCase.computed_value)}
+                  </td>
+                  <td className="px-3 py-2.5 text-success font-medium">
+                    {useCase.realized && useCase.realized.value
+                      ? fmtMoney(useCase.realized.value)
+                      : '—'}
+                  </td>
+                  <td className="px-3 py-2.5">
+                    <button
+                      aria-label={`Delete ${useCase.title}`}
+                      className="text-navy-600 hover:text-lava"
+                      onClick={(event) => {
+                        event.stopPropagation()
+                        if (confirm(`Delete "${useCase.title}"?`)) remove.mutate(useCase.id)
+                      }}
+                    >
+                      <Trash2 className="w-4 h-4" />
+                    </button>
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      ) : (
+        <div
+          className={`grid gap-3 ${
+            grouping === 'status' ? 'grid-cols-2 md:grid-cols-5' : 'grid-cols-1 md:grid-cols-3'
+          }`}
+        >
+          {columns.map((column) => {
+            const cards = rows.filter(column.match)
+            return (
+              <div
+                key={column.key}
+                className="bg-navy-800/60 border border-navy-600 rounded-card p-2"
+              >
+                <div className="flex items-center justify-between px-1 pb-2 mb-2 border-b border-navy-600">
+                  <div
+                    className="text-xs font-bold flex items-center gap-1.5"
+                    style={{ color: column.color }}
+                  >
+                    <span className="w-2 h-2 rounded-full" style={{ background: column.color }} />
+                    {column.label}
+                  </div>
+                  <span className="text-xs text-navy-500">{cards.length}</span>
+                </div>
+                <div className="space-y-2 max-h-[62vh] overflow-y-auto">
+                  {cards.map((useCase) => (
+                    <button
+                      key={useCase.id}
+                      onClick={() => onOpen?.(useCase.id)}
+                      className="w-full text-left card p-2.5 hover:border-navy-500 transition-colors border-l-2"
+                      style={{
+                        borderLeftColor: useCase.readiness
+                          ? READINESS_COLORS[useCase.readiness]
+                          : '#2A4A56',
+                      }}
+                    >
+                      <div className="text-sm font-medium leading-snug line-clamp-2 text-white">
+                        {useCase.title}
+                      </div>
+                      <div className="flex items-center justify-between mt-1.5 text-xs">
+                        <span
+                          style={{ color: LOB_COLORS[lobName(useCase.lob_id)] ?? '#90A5B1' }}
+                        >
+                          {lobName(useCase.lob_id)}
+                        </span>
+                        <span className="text-lava-300">{fmtMoney(useCase.computed_value)}</span>
+                      </div>
+                    </button>
+                  ))}
+                </div>
+              </div>
+            )
+          })}
+        </div>
+      )}
+    </div>
+  )
+}
+
+function SortableHeader({ children, onClick }: { children: ReactNode; onClick: () => void }) {
+  return (
+    <th
+      className="text-left px-3 py-2.5 font-medium cursor-pointer hover:text-navy-300 select-none"
+      onClick={onClick}
+    >
+      <span className="inline-flex items-center gap-1">
+        {children}
+        <ArrowDownUp className="w-3 h-3 opacity-50" />
+      </span>
+    </th>
+  )
+}

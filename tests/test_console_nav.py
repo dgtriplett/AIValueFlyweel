@@ -381,187 +381,241 @@ class TestKnowledgeBaseView(unittest.TestCase):
         self.assertIn('$("#nav")', JS)
 
 
-class TestSpaGroupedNav(unittest.TestCase):
-    """The SPA at / must carry the grouped nav and link to the new features.
+class TestSpaSourceIsTheSourceOfTruth(unittest.TestCase):
+    """The SPA's behaviour must be expressed in frontend/src, not in a patch script.
 
-    THE GAP THIS CLOSES: every nav improvement this session went into /console. The
-    SPA is the app's front door, and it still showed nine flat tabs plus a link
-    labelled "Get Started & Discovery" — a console tab that no longer exists under
-    that name — with nothing pointing at the knowledge base or the proposal agent.
-    Both features were invisible from the first screen a customer sees.
+    HISTORY THIS CLOSES: frontend/src did not exist, so the only way to change the
+    SPA was to regex-patch the minified bundle. That workflow is gone — the source
+    is committed and dist is built from it — but the guarantees the patches bought
+    still matter, so they moved rather than disappeared.
 
-    The SPA's React source is not in this repo, so the change is a patch to the
-    committed bundle applied by a re-runnable script. These tests guard the two ways
-    that goes wrong: the patch silently not being applied, and the patched bundle not
-    parsing — which would serve a blank page to every user.
+    Asserted HERE (against source, where it is a real structural claim):
+      - the nav groups are DERIVED from the tab array rather than restating it
+      - the drawer's proposal link reads the id prop and is guarded on it
+      - phase stays out of the customer-facing views
+
+    Asserted against the BUILT BUNDLE by TestSpaBundleShipsTheBehaviour below,
+    because the bundle is what a customer actually loads.
+
+    What is deliberately NOT asserted anywhere any more: the exact minified spellings
+    (`Dg.find(x=>x.id===`, `proposals/${e}`, `e?a.jsx`). Those were substrings of one
+    historical bundle; a minifier assigns those names fresh on every build, so
+    pinning them would pin the repo to a bundle nobody can reproduce.
     """
 
     @classmethod
     def setUpClass(cls):
-        html = (ROOT / "frontend" / "dist" / "index.html").read_text()
-        match = re.search(r"/assets/(index-[\w-]+\.js)", html)
-        assert match, "index.html references no entry bundle"
-        cls.bundle_name = match.group(1)
-        cls.bundle = (ROOT / "frontend" / "dist" / "assets"
-                      / cls.bundle_name).read_text(errors="surrogateescape")
+        src = ROOT / "frontend" / "src"
+        if not src.is_dir():
+            raise unittest.SkipTest("frontend/src is missing")
+        cls.header = (src / "components" / "Header.tsx").read_text()
+        cls.drawer = (src / "components" / "UseCaseDrawer.tsx").read_text()
+        cls.views = {path.name: path.read_text()
+                     for path in sorted((src / "views").glob("*.tsx"))}
+        cls.components = {path.name: path.read_text()
+                          for path in sorted((src / "components").glob("*.tsx"))}
 
-    def test_the_entry_bundle_is_patched(self):
-        """index.html's bundle specifically — not merely one of the chunks.
+    def test_the_tab_list_is_declared_once(self):
+        """One TABS array is the single source of what the nav can reach."""
+        self.assertIn("export const TABS", self.header,
+                      "the tab list must be exported data, not markup")
+        for tab_id in ("portfolio", "catalog", "registry", "flywheel",
+                       "dashboards", "roadmap", "funding", "value"):
+            self.assertIn(f"id: '{tab_id}'", self.header,
+                          f"the {tab_id} tab is not in TABS")
 
-        assets/ holds several index-*.js files and only the one index.html loads is
-        served. Patching a different chunk would pass a naive check while changing
-        nothing a user sees.
+    def test_groups_resolve_tabs_by_id_instead_of_restating_them(self):
+        """The replacement for the old `Dg.find(x=>x.id===` assertion.
+
+        Groups hold IDS and look the tab up, so a renamed label or a reordered
+        TABS still resolves and the group definition cannot drift out of sync with
+        what the tab actually is.
         """
-        self.assertIn("gaGroupedNav", self.bundle,
-                      f"{self.bundle_name} (the bundle index.html loads) does not "
-                      "carry the grouped nav — run scripts/patch_spa_grouped_nav.py")
+        self.assertIn("TABS.find(", self.header,
+                      "nav groups must look tabs up in TABS, not restate them")
+        self.assertRegex(self.header, r"NAV_GROUPS[^=]*=\s*\[",
+                         "the groups must be declared as data")
+        # The group members must be ids that exist, not free-standing labels.
+        groups = re.search(r"const NAV_GROUPS[^=]*=\s*\[(.*?)\n\]",
+                           self.header, re.S)
+        self.assertIsNotNone(groups, "could not parse NAV_GROUPS")
+        declared = set(re.findall(r"id: '([a-z]+)'", self.header))
+        for member in re.findall(r"'([a-z]+)'", groups.group(1)):
+            if member in ("Analyze", "Plan"):
+                continue
+            self.assertIn(member, declared,
+                          f"nav group references {member!r}, which is not a tab id")
 
-    def test_links_to_the_knowledge_base_and_proposals(self):
-        for href in ("/console/#kb", "/console/#proposals"):
-            self.assertIn(href, self.bundle,
-                          f"the SPA does not link to {href}, so that feature is "
-                          "invisible from the app's front door")
+    def test_every_grouped_tab_is_reachable(self):
+        """A tab in TABS but in no group, and not top-level, is dead code."""
+        groups = re.search(r"const NAV_GROUPS[^=]*=\s*\[(.*?)\n\]",
+                           self.header, re.S).group(1)
+        grouped = set(re.findall(r"'([a-z]+)'", groups))
+        declared = set(re.findall(r"id: '([a-z]+)'", self.header))
+        # Portfolio is rendered as a standalone top-level button, not in a menu.
+        unreachable = declared - grouped - {"portfolio"}
+        self.assertEqual(unreachable, set(),
+                         f"tabs unreachable from the nav: {sorted(unreachable)}")
 
-    def test_the_stale_console_label_is_gone(self):
-        """"Get Started & Discovery" was a console tab that has been merged away."""
-        self.assertNotIn("Get Started & Discovery", self.bundle)
+    def test_the_console_links_are_present(self):
+        for href in ("/console/#kb", "/console/#proposals", "/console/"):
+            self.assertIn(href, self.header,
+                          f"the SPA header does not link to {href}")
 
-    def test_groups_reuse_the_existing_tab_array(self):
-        """The patch must not restate the tab list.
+    def test_the_menus_are_accessible(self):
+        """A dropdown a keyboard cannot close is a trap."""
+        self.assertIn("aria-haspopup", self.header)
+        self.assertIn("aria-expanded", self.header)
+        self.assertIn("role=\"menu\"", self.header)
+        self.assertIn("Escape", self.header,
+                      "Escape must dismiss an open menu")
 
-        Looking tabs up in Dg by id means a reordered or extended Dg still resolves,
-        and tab state and routing stay untouched — the patch changes only how the
-        tabs are presented.
+    def test_the_drawer_proposal_link_uses_the_id_prop(self):
+        """It must read the ID, not the edit-form draft.
+
+        The original patch bound this to the edit draft, which is only populated
+        in edit mode — so the link never rendered on a normal open. It deployed
+        looking like the patch had failed. In source the binding is explicit.
         """
-        self.assertIn("Dg.find(x=>x.id===", self.bundle)
+        self.assertIn("data-gaProposalBtn", self.drawer)
+        self.assertIn("/console/#proposals/${ucId}", self.drawer,
+                      "the drawer link must interpolate the ucId prop")
+        self.assertNotIn("proposals/${draft", self.drawer,
+                         "the draft is only populated in edit mode")
 
-    def test_patched_bundle_parses(self):
-        """A bundle that does not parse is a blank page for every user.
+    def test_the_drawer_proposal_link_is_guarded_on_the_id(self):
+        """The drawer renders before its data arrives; an unguarded link would
+        read #proposals/undefined and open the console pointed at nothing."""
+        index = self.drawer.index("data-gaProposalBtn")
+        self.assertIn("ucId ?", self.drawer[max(0, index - 200):index],
+                      "the proposal link is not guarded on the id being present")
 
-        The first version of this patch injected a statement before the `Dg` binding
-        — which sits inside a chained `const` declaration — and produced exactly
-        that. Checked as .mjs because the bundle is an ES module and `node --check`
-        rejects `export` in a .js file.
-        """
-        import shutil
-        import subprocess
-        import tempfile
-
-        if shutil.which("node") is None:
-            self.skipTest("node not installed")
-        with tempfile.NamedTemporaryFile("w", suffix=".mjs", delete=False,
-                                         errors="surrogateescape") as handle:
-            handle.write(self.bundle)
-            temp = handle.name
-        try:
-            result = subprocess.run(["node", "--check", temp],
-                                    capture_output=True, text=True)
-            self.assertEqual(result.returncode, 0,
-                             "the patched SPA bundle does not parse")
-        finally:
-            os.unlink(temp)
-
-    def test_the_drawer_has_a_proposal_action(self):
-        """Reachability, not just existence.
-
-        The proposal agent was only reachable by navigating to the console and
-        typing a use-case id into a box. You decide to write a proposal while
-        looking AT a use case, so the action belongs in its detail drawer.
-        """
-        self.assertIn("gaProposalBtn", self.bundle,
-                      "the use-case drawer has no Write proposal action — run "
-                      "scripts/patch_spa_proposal_button.py")
-        self.assertIn("/console/#proposals/", self.bundle,
-                      "the drawer link must carry the use case id across")
-
-    def test_the_drawer_link_uses_the_id_prop(self):
-        """It must read the ID PROP, not the edit-form draft.
-
-        The first version used `m`, which is the edit draft and is only populated
-        while the drawer is in edit mode — so the condition was false on a normal
-        open and the link never rendered at all. It deployed and looked like the
-        patch had silently failed; the bundle was correct and the binding was wrong.
-        `e` is the id, which the adjacent header confirms by rendering
-        `"Use Case #", e`.
-        """
-        self.assertIn("proposals/${e}", self.bundle,
-                      "the drawer link must interpolate the id prop `e`")
-        self.assertNotIn("proposals/${m.id}", self.bundle,
-                         "`m` is the edit-form draft; the link would not render")
-
-    def test_the_drawer_link_guards_a_missing_id(self):
-        """The drawer renders before its data arrives; a link built then would read
-        #proposals/undefined and open the console pointed at nothing."""
-        index = self.bundle.index("gaProposalBtn")
-        self.assertIn("e?a.jsx", self.bundle[index - 40:index],
-                      "the link is not guarded on the id being present")
-
-    def test_the_product_name_is_current(self):
-        """The user-visible name must be AI Value Flywheel everywhere.
-
-        The product has been renamed twice (Value Flywheel -> Grid Atlas ->
-        AI Value Flywheel) and the SPA bundle can only be rebranded by a patch
-        script, so a rebuild silently reverts it. This asserts the CURRENT name
-        and the absence of the superseded one.
-
-        Deliberately checks the display name only. `grid-atlas` / `grid_atlas`
-        remain as identifiers — the app name, the UC schemas, the Lakebase project
-        and the bundle target — because renaming those is a data migration, not a
-        rebrand.
-        """
-        self.assertIn("AI Value Flywheel", self.bundle,
-                      "the SPA bundle does not carry the current product name — "
-                      "run scripts/rebrand_bundle.py")
-        self.assertNotIn("Grid Atlas", self.bundle,
-                         "the superseded product name is back in the bundle")
-
-    def test_the_feature_name_survives_the_rebrand(self):
-        """"Value Flywheel" is also a real FEATURE (the flywheel tab, blast radius).
-
-        The rebrand must not consume it: a rule that replaced every occurrence
-        would rename the tab to "AI Value Flywheel" and lose the distinction
-        between the product and one of its views.
-        """
-        self.assertIn('label:"Value Flywheel"', self.bundle,
-                      "the Value Flywheel TAB lost its name to the rebrand")
-
-    def test_prerequisite_readiness_does_not_wrap_and_explains_itself(self):
-        self.assertIn("gaCustomerVisibility", self.bundle,
-                      "the readiness/prerequisite UI patch is missing — run "
-                      "scripts/patch_spa_customer_visibility.py")
-        self.assertIn("whitespace-nowrap", self.bundle,
+    def test_the_readiness_badge_explains_itself(self):
+        badges = self.components["Badges.tsx"]
+        self.assertIn("data-gaCustomerVisibility", badges)
+        self.assertIn("whitespace-nowrap", badges,
                       "Awaiting prerequisites must stay on one line in tables")
-        self.assertIn("Required prerequisites", self.bundle,
-                      "the readiness tooltip must name the prerequisite use cases")
-        self.assertIn("details", self.bundle,
+        self.assertIn("Required prerequisites", badges,
+                      "the tooltip must name the prerequisite use cases")
+        self.assertIn("details", badges,
                       "users need an obvious affordance to inspect prerequisites")
 
-    def test_phase_is_not_customer_visible_in_the_spa(self):
-        for stale in (
-            'children:"Phase"',
-            "Derived phase:",
-            "Filter by phase",
-            "All phases",
-            "Phase updates automatically",
-            "Derived from prerequisite depth",
-        ):
-            self.assertNotIn(stale, self.bundle,
-                             f"customer-visible phase text is back: {stale}")
+    def test_phase_is_not_customer_visible_in_the_source(self):
+        """Phase is derived from prerequisite depth. Shown to a customer it reads
+        as a delivery commitment the derivation cannot support, so it is absent
+        from the filters, the portfolio table and the drawer.
 
-    def test_the_patch_script_is_idempotent_and_checkable(self):
-        source = (ROOT / "scripts" / "patch_spa_grouped_nav.py").read_text()
-        self.assertIn("--check", source, "needs a no-op status mode for CI")
-        self.assertIn("is_patched", source, "must skip an already-patched bundle")
-        self.assertIn("_syntax_error", source,
-                      "must refuse to WRITE a bundle that does not parse")
+        The dashboards readiness heatmap still groups by it internally — that is
+        an analysis surface, not a promise — so PhaseBadge stays defined.
+        """
+        customer_facing = {
+            **{f"views/{name}": text for name, text in self.views.items()
+               if name != "DashboardsView.tsx"},
+            **{f"components/{name}": text for name, text in self.components.items()
+               if name != "Badges.tsx"},
+        }
+        for where, text in customer_facing.items():
+            for stale in ("Filter by phase", "All phases", "Derived phase:",
+                          "Phase updates automatically",
+                          "Derived from prerequisite depth"):
+                self.assertNotIn(stale, text,
+                                 f"customer-visible phase text in {where}: {stale}")
 
-    def test_the_customer_visibility_patch_script_is_checkable(self):
-        source = (ROOT / "scripts" / "patch_spa_customer_visibility.py").read_text()
-        self.assertIn("--check", source, "needs a no-op status mode for CI")
-        self.assertIn("_syntax_error", source,
-                      "must refuse to WRITE a bundle that does not parse")
+    def test_the_product_name_is_current_in_the_source(self):
+        """The wordmark accents its second half, so in JSX the name is split
+        across an element (`AI Value <span>Flywheel</span>`) rather than being one
+        contiguous literal. Both halves and the accent are asserted here; the
+        assembled string is asserted against the built bundle."""
+        self.assertRegex(
+            self.header,
+            r"AI Value\s*<span[^>]*#FF3621[^>]*>\s*Flywheel\s*</span>",
+            "the header wordmark is not the current product name")
+        # The footer carries the name as a single literal, so it can be exact.
+        app = (ROOT / "frontend" / "src" / "App.tsx").read_text()
+        self.assertIn("AI Value Flywheel · Powered by Databricks", app,
+                      "the footer does not carry the current product name")
+        combined = self.header + app + "".join(self.views.values()) \
+            + "".join(self.components.values())
+        self.assertNotIn("Grid Atlas", combined,
+                         "the superseded product name is back in the source")
+
+    def test_the_feature_name_survives_the_rebrand(self):
+        """"Value Flywheel" is also a real FEATURE — the tab and the blast radius.
+        A blanket rename would lose the distinction between the product and one
+        of its views."""
+        self.assertIn("label: 'Value Flywheel'", self.header,
+                      "the Value Flywheel TAB lost its name")
 
 
+class TestSpaBundleShipsTheBehaviour(unittest.TestCase):
+    """The committed bundle must carry what the source promises.
+
+    frontend/dist is committed and is what the app serves, so source alone is not
+    enough: a stale dist ships old behaviour with a clean source tree. The detailed
+    assertions live in scripts/check_spa_bundle.py so that the same check runs from
+    a laptop before committing; this delegates to it rather than restating the list
+    in two places that can disagree.
+    """
+
+    @classmethod
+    def setUpClass(cls):
+        html_path = ROOT / "frontend" / "dist" / "index.html"
+        if not html_path.is_file():
+            raise unittest.SkipTest("frontend/dist is not built")
+        match = re.search(r"/assets/(index-[\w-]+\.js)", html_path.read_text())
+        assert match, "index.html references no entry bundle"
+        cls.bundle_name = match.group(1)
+        cls.bundle_path = ROOT / "frontend" / "dist" / "assets" / cls.bundle_name
+
+    def test_the_served_bundle_carries_the_behaviour(self):
+        """Delegates to the gate CI runs, so the two can never disagree."""
+        import subprocess
+        done = subprocess.run(
+            [sys.executable, str(ROOT / "scripts" / "check_spa_bundle.py")],
+            capture_output=True, text=True)
+        self.assertEqual(done.returncode, 0,
+                         "the committed bundle does not match the source's "
+                         f"behaviour:\n{done.stdout}{done.stderr}")
+
+    def test_index_html_loads_a_bundle_that_exists(self):
+        self.assertTrue(self.bundle_path.is_file(),
+                        f"index.html loads {self.bundle_name}, which is not in "
+                        "frontend/dist/assets — run `npm run build` in frontend/")
+
+    def test_the_bundle_is_reproducible_from_source(self):
+        """The point of the whole exercise: dist comes from frontend/src.
+
+        Asserts the tooling and entry point a rebuild needs are present and wired
+        to each other. Actually running the build here would need node_modules,
+        which CI does not install, so this checks the wiring and
+        scripts/check_spa_bundle.py checks the output.
+        """
+        frontend = ROOT / "frontend"
+        self.assertTrue((frontend / "src" / "main.tsx").is_file(),
+                        "frontend/src/main.tsx is missing — dist would not be "
+                        "reproducible")
+        package = (frontend / "package.json").read_text()
+        self.assertIn('"build": "tsc && vite build"', package,
+                      "the build script changed; dist may no longer come from src")
+        self.assertIn("/src/main.tsx", (frontend / "index.html").read_text(),
+                      "frontend/index.html must load the real entry module")
+
+    def test_the_shipped_title_matches_the_source_html(self):
+        """dist/index.html is GENERATED from frontend/index.html.
+
+        These drifted under the patch workflow: rebrand_bundle.py rewrote the title
+        in the built copy only, so a rebuild silently reverted it. Now they must
+        agree, which is what makes the rebrand script unnecessary.
+        """
+        source_title = re.search(
+            r"<title>(.*?)</title>",
+            (ROOT / "frontend" / "index.html").read_text()).group(1)
+        built_title = re.search(
+            r"<title>(.*?)</title>",
+            (ROOT / "frontend" / "dist" / "index.html").read_text()).group(1)
+        self.assertEqual(source_title, built_title,
+                         "frontend/index.html and the built dist/index.html "
+                         "disagree on the page title — rebuild")
 
 
 class TestSyncResultIsVisible(unittest.TestCase):
