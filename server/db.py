@@ -7,6 +7,7 @@
 import os
 import asyncio
 import logging
+from contextlib import asynccontextmanager
 from typing import Optional
 
 import asyncpg
@@ -158,6 +159,27 @@ class DatabasePool:
     async def fetchrow(self, sql: str, *args):
         rows = await self.fetch(sql, *args)
         return rows[0] if rows else None
+
+    @asynccontextmanager
+    async def transaction(self):
+        """One connection, one transaction, for writes that must not half-apply.
+
+        Yields an asyncpg connection, or None when there is no pool — so a caller
+        must handle None exactly as it handles `execute()` returning None, rather
+        than assuming a connection and crashing in demo mode.
+
+        Needed because `execute()` takes a fresh connection per call, so a
+        multi-statement invariant (clear the old default, then set the new one) can
+        be interrupted between statements and leave the table with no default at
+        all — every unscoped request then resolves to nothing.
+        """
+        pool = await self.get_pool()
+        if pool is None:
+            yield None
+            return
+        async with pool.acquire() as conn:
+            async with conn.transaction():
+                yield conn
 
     async def execute(self, sql: str, *args):
         _charge_budget()

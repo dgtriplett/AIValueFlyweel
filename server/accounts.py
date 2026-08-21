@@ -25,18 +25,36 @@ There is deliberately no "no account" state. Every read is scoped, and a request
 cannot resolve an account is a bug rather than a global view — a query silently
 spanning tenants is exactly the failure this module exists to prevent.
 
-WHAT THIS IS NOT
-----------------
-This is scoping, not authorization. It decides WHICH account's rows a request reads;
-it does not decide whether the caller is allowed to. The app runs behind Databricks
-Apps auth and every user of one instance is trusted with that instance's data. If
-that ever stops being true — a shared instance across unrelated customers — this
-module is where the check belongs, and the ContextVar already carries the identity
-needed to make it.
+SCOPING VERSUS AUTHORIZATION
+----------------------------
+Most of this module is SCOPING: it decides WHICH account's rows a request reads. The
+deployment model is one instance per customer behind Databricks Apps auth, so every
+authenticated user of an instance is trusted with that instance's data, and there is
+no per-account membership table to consult.
+
+That model does NOT justify letting any caller hard-delete an account or enumerate
+every tenant on the instance, which is what the routes previously allowed — the
+account selector was read from a client-settable header and checked only for
+existence. So the Authorization section below adds what is actually enforceable on
+top of the platform-attributed identity:
+
+  * `trusted_identity()` — the identity the Apps proxy injects, which the browser
+    cannot forge (unlike the X-Grid-Atlas-User header current_user() also accepts
+    for local dev, which is fine for audit attribution and useless for access
+    control).
+  * `require_admin()` — an allowlist gate, failing closed, on the destructive and
+    cross-tenant operations.
+  * `authorize_account_read()` — the seam a real membership model plugs into, so
+    there is one place to change rather than four call sites and one that was
+    forgotten.
+
+See the TODO(multi-tenant) notes below for what an `account_members` table would
+change.
 """
 from __future__ import annotations
 
 import logging
+import os
 from contextvars import ContextVar
 
 from .db import db
@@ -165,8 +183,135 @@ async def default_account_id() -> int | None:
     return row["id"]
 
 
+# ---------------------------------------------------------------------------
+# Authorization
+# ---------------------------------------------------------------------------
+# HEADERS THE PLATFORM SETS, AND THE ONES IT DOES NOT
+# ---------------------------------------------------
+# Databricks Apps terminates auth in front of this process and injects
+# X-Forwarded-Email / X-Forwarded-User. Those cannot be set by the browser — the
+# proxy overwrites them — so they are a TRUSTED identity.
+#
+# server/common.py's current_user() also accepts X-Grid-Atlas-User and
+# X-GridValue-User for local development. Those ARE client-settable, which is fine
+# for attribution in an audit row but must never be the basis of an access
+# decision: anyone could send X-Grid-Atlas-User: admin@utility.com. So authorization
+# reads only the forwarded pair, and only when running as a Databricks App.
+_TRUSTED_IDENTITY_HEADERS = ("x-forwarded-email", "x-forwarded-user")
+
+# Operators allowed to perform destructive account operations. Comma-separated
+# emails; matched case-insensitively against the platform-attributed identity.
+#
+# TODO(multi-tenant): this is an allowlist, not a membership model. The app has no
+# per-account membership table yet, so there is no way to express "alice may see
+# account 3 but not account 7" — every authenticated user of an instance can read
+# every account on it, which is the documented deployment model (one instance per
+# customer, see the WHAT THIS IS NOT note at the top of this module). What an
+# allowlist CAN do is stop any authenticated user from hard-deleting a customer's
+# account or enumerating every tenant, and that is what it is used for below.
+#
+# When a membership model arrives (an `account_members` table keyed by identity),
+# authorize_account_read() is the single place that has to learn about it.
+def _admin_emails() -> set[str]:
+    raw = os.environ.get("GRID_ATLAS_ADMINS", "")
+    return {part.strip().lower() for part in raw.split(",") if part.strip()}
+
+
+def trusted_identity(request) -> str | None:
+    """The caller's platform-attributed identity, or None if there isn't one.
+
+    None means "not authenticated by the platform" — a local run, or a direct hit
+    on the container bypassing the proxy. Callers must treat None as unprivileged.
+    """
+    for header in _TRUSTED_IDENTITY_HEADERS:
+        value = request.headers.get(header)
+        if value and value.strip():
+            return value.strip().lower()
+    return None
+
+
+def is_admin(request) -> bool:
+    """Whether this caller may perform destructive account operations.
+
+    Fails CLOSED by default: with no GRID_ATLAS_ADMINS configured, nobody is an
+    admin and the destructive paths are simply unavailable. That is deliberate —
+    the alternative (empty allowlist means everyone) would make an unconfigured
+    deployment maximally permissive, which is the wrong default for hard-delete.
+
+    Outside Databricks Apps there are no trusted headers, so local development
+    would lock itself out of its own account management. GRID_ATLAS_ADMINS is
+    honoured there via the same allowlist, so a local operator sets it explicitly
+    rather than the check being silently skipped.
+    """
+    admins = _admin_emails()
+    if not admins:
+        return False
+    identity = trusted_identity(request)
+    if identity is None:
+        return False
+    return identity in admins
+
+
+def require_admin(request, action: str) -> str:
+    """Authorize a destructive account operation, or raise 403.
+
+    Returns the authorized identity so the caller can put it in the audit row —
+    the point of an admin gate is partly that the log says who used it.
+    """
+    from fastapi import HTTPException
+
+    identity = trusted_identity(request)
+    if not is_admin(request):
+        logger.warning("refused %s: %s is not an authorized account admin",
+                       action, identity or "an unauthenticated caller")
+        raise HTTPException(
+            403,
+            f"{action} requires an account administrator. Add the operator's "
+            "Databricks email to the GRID_ATLAS_ADMINS setting to permit it. "
+            "This operation is refused by default because it destroys or exposes "
+            "another customer's data.")
+    return identity
+
+
+async def authorize_account_read(request, account_id: int) -> None:
+    """Authorize the caller to READ `account_id`, or raise 403.
+
+    TODO(multi-tenant): with no membership table, the only enforceable rule is the
+    documented one — an authenticated user of this instance may read the accounts on
+    it. So this verifies the caller is authenticated by the platform (when running
+    as a Databricks App) and otherwise lets the read proceed.
+
+    It exists as a named seam anyway: when membership arrives, this function is the
+    one place that changes, and every caller is already routed through it. Inlining
+    the check at each call site is how you end up with four of them and one that was
+    never updated.
+    """
+    from fastapi import HTTPException
+    from .config import IS_DATABRICKS_APP
+
+    if IS_DATABRICKS_APP and trusted_identity(request) is None:
+        # Deployed behind the Apps proxy, which always sets these headers. Their
+        # absence means the request did not come through it.
+        logger.warning("account read refused: no platform identity on the request")
+        raise HTTPException(
+            403, "This request carries no Databricks identity, so the account it "
+                 "may read cannot be established.")
+
+
 async def resolve(request) -> int | None:
-    """Resolve the account for a request. Returns None only pre-migration."""
+    """Resolve the account for a request. Returns None only pre-migration.
+
+    The selector arrives in a client-controlled header or query parameter, so what
+    it can select is an authorization question, not just an existence one.
+
+    TODO(multi-tenant): the only check enforceable without a membership table is
+    that the caller is authenticated by the platform — see
+    `authorize_account_read()`. That is deliberately NOT called here: middleware runs
+    for every request including /api/health and the SPA, and raising a 403 from this
+    depth would turn "no identity" into a blanket outage. Selection is validated
+    here; the per-account read decision belongs at the routes, where the exempt
+    paths are already known.
+    """
     raw = (request.headers.get(ACCOUNT_HEADER)
            or request.query_params.get("account"))
     if raw:
