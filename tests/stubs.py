@@ -27,15 +27,68 @@ def _ensure(name: str, build) -> None:
 
 
 def _asyncpg() -> types.ModuleType:
+    """A stand-in exposing exactly the asyncpg surface `server/db.py` touches.
+
+    THE FAILURE MODE THIS GUARDS
+    ----------------------------
+    `server/db.py` builds its `except` tuples at MODULE scope, so every exception
+    class it names is resolved at import time. A name missing here is therefore not a
+    quiet gap in one test — it is an `AttributeError` while importing `server.db`,
+    which cascades into an ImportError for every module that transitively imports it.
+    That collapsed the stdlib-only suite from ~1090 collected tests to 709 with 56
+    `_FailedTest` import errors across unrelated modules (test_limits, test_logging,
+    test_value_engine, ...), and the failures pointed at those modules rather than at
+    the real cause.
+
+    It is invisible in an environment with real asyncpg installed, because `_ensure`
+    correctly leaves the real package alone — which is exactly how it was missed. The
+    stdlib-only path is what `scripts/check.py` and CI run.
+
+    So: when `server/db.py` starts referencing a new `asyncpg.X`, it must be added
+    here, and it must be a real Exception subclass (an `except` clause rejects
+    anything else with a TypeError). The inheritance below deliberately mirrors real
+    asyncpg 0.31.0 rather than making everything a bare Exception, because code that
+    catches a BASE class must still catch the stubbed subclasses:
+
+        PostgresError            <- PostgresConnectionError
+        PostgresError            <- InvalidAuthorizationSpecificationError
+                                        <- InvalidPasswordError
+        Exception                <- InterfaceError
+
+    Getting that wrong would make the stub quietly disagree with production about
+    which handler wins.
+    """
     mod = types.ModuleType("asyncpg")
 
-    # server/db.py references these classes in an `except` tuple, so they have to
-    # be real exception types, not sentinels.
-    class InvalidAuthorizationSpecificationError(Exception):
+    class PostgresError(Exception):
+        """Base for server-reported errors, as in real asyncpg."""
+
+    class InterfaceError(Exception):
+        """Driver-side misuse / closed connection. NOT a PostgresError upstream."""
+
+    class PostgresConnectionError(PostgresError):
+        """Connection lost at the protocol level."""
+
+    class InvalidAuthorizationSpecificationError(PostgresError):
         pass
 
-    class InvalidPasswordError(Exception):
-        pass
+    class InvalidPasswordError(InvalidAuthorizationSpecificationError):
+        """Subclasses the auth error upstream, so the auth-retry tuple catches it."""
+
+    class UndefinedTableError(PostgresError):
+        """SQLSTATE 42P01. Carries the sqlstate attribute the real driver sets.
+
+        `accounts.is_missing_relation()` requires a positive 42P01 and deliberately
+        does not guess from the class name, so the stub must carry the real signal or
+        tests exercising the pre-migration path would silently assert fail-closed.
+        """
+
+        sqlstate = "42P01"
+
+    class UniqueViolationError(PostgresError):
+        """SQLSTATE 23505, used by the glossary duplicate-term path."""
+
+        sqlstate = "23505"
 
     class Pool:  # pragma: no cover - identity only; tests never open a pool
         pass
@@ -43,8 +96,13 @@ def _asyncpg() -> types.ModuleType:
     async def create_pool(*args, **kwargs):  # pragma: no cover
         raise RuntimeError("asyncpg is stubbed in tests; use tests.fakedb.FakeDB")
 
+    mod.PostgresError = PostgresError
+    mod.InterfaceError = InterfaceError
+    mod.PostgresConnectionError = PostgresConnectionError
     mod.InvalidAuthorizationSpecificationError = InvalidAuthorizationSpecificationError
     mod.InvalidPasswordError = InvalidPasswordError
+    mod.UndefinedTableError = UndefinedTableError
+    mod.UniqueViolationError = UniqueViolationError
     mod.Pool = Pool
     mod.create_pool = create_pool
     return mod
