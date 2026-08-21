@@ -209,6 +209,80 @@ class UnicodeDigitNodeIds(unittest.TestCase):
         self.assertEqual(("asset", 12), impact._split_node_id("asset-12"))
 
 
+class OverLongDigitNodeIds(unittest.TestCase):
+    """A digit run can be all-ASCII, all-digits, and still not convertible.
+
+    The third thing `int()` refuses, after non-digits and non-ASCII digits: CPython
+    caps integer string conversion at `sys.get_int_max_str_digits()` — 4300 by
+    default since 3.11, itself a DoS guard — so a 5000-digit id passed
+    `isascii() and isdigit()` and raised ValueError anyway. `GET /api/impact/uc-<5000
+    nines>` was a 500 that any unauthenticated caller could produce at will.
+
+    Two layers close it: a length bound (no real bigint serial has 20 digits) and a
+    try/except around the conversion. The bound alone would not be correct — the
+    limit is settable at runtime via `sys.set_int_max_str_digits()`, so a bound
+    picked against today's default is a heuristic. `test_try_except_is_load_bearing`
+    below proves the net actually carries weight rather than documenting intent.
+    """
+
+    LENGTHS = (20, 4301, 5000)
+
+    def test_over_long_ids_are_422_not_500(self):
+        c = client()
+        for kind in ("uc", "asset", "lob"):
+            for length in self.LENGTHS:
+                with self.subTest(kind=kind, digits=length):
+                    resp = c.get(f"/api/impact/{kind}-" + "9" * length)
+                    self.assertEqual(422, resp.status_code,
+                                     f"{kind}- with {length} digits returned "
+                                     f"{resp.status_code}")
+
+    def test_the_premise(self):
+        """int() really does reject what isascii()+isdigit() accepted."""
+        raw = "9" * 5000
+        self.assertTrue(raw.isascii() and raw.isdigit())
+        with self.assertRaises(ValueError):
+            int(raw)
+
+    def test_plausible_ids_still_parse(self):
+        """The bound must not reject an id the database could actually hold.
+
+        19 digits is the width of a bigint, so it has to survive; a real id never
+        gets near it, but a bound that clipped valid ids would be a worse bug than
+        the one being fixed.
+        """
+        self.assertEqual(("uc", int("9" * 19)),
+                         impact._split_node_id("uc-" + "9" * 19))
+        self.assertEqual(("asset", 12), impact._split_node_id("asset-12"))
+
+    def test_try_except_is_load_bearing(self):
+        """With the limit lowered under it, the parser still must not raise.
+
+        This is the case the length bound cannot cover: the conversion limit is
+        settable at runtime, so lower it and an id that clears the bound becomes
+        unconvertible anyway. With the try/except removed and only the bound kept,
+        this raises ValueError instead of returning None — so the test fails if the
+        net is ever dropped as redundant.
+
+        640 is the smallest value CPython accepts, which is still far above
+        `_MAX_ID_DIGITS`. So the id below is raised past the *interpreter* limit
+        while the bound is temporarily widened past it too, isolating the
+        conversion as the thing that fails.
+        """
+        original = sys.get_int_max_str_digits()
+        sys.set_int_max_str_digits(640)
+        self.addCleanup(sys.set_int_max_str_digits, original)
+
+        raw = "9" * 700
+        self.assertTrue(raw.isascii() and raw.isdigit())
+        with self.assertRaises(ValueError):
+            int(raw)
+
+        with mock.patch.object(impact, "_MAX_ID_DIGITS", 1000):
+            # Clears the (widened) bound, so only the try/except can catch it.
+            self.assertIsNone(impact._split_node_id("uc-" + raw))
+
+
 class NoneWritesDB(FakeDB):
     """A pool that is up enough to read but returns no row from any RETURNING write.
 

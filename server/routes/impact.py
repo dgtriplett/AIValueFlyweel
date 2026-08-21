@@ -15,6 +15,11 @@ router = APIRouter(prefix="/impact", tags=["impact"])
 
 _NODE_KINDS = ("asset", "uc", "lob")
 
+# Every id here is a bigint serial, so 19 digits is already past what the column can
+# hold. The bound exists to keep a hostile URL from making us build a huge int at
+# all; it is NOT what makes the parse safe — see the try/except in _split_node_id.
+_MAX_ID_DIGITS = 19
+
 
 async def _load_graph():
     ucs = await db.fetch("SELECT * FROM use_cases ORDER BY id")
@@ -45,13 +50,28 @@ def _split_node_id(node_id: str) -> tuple[str, int] | None:
     ('asset-²' was still a 500 after the first fix), and also True for other
     scripts' digits, which int() ACCEPTS — so '٣'.isdigit() plus a try/except
     would quietly resolve `uc-٣` to use case 3. An id the app never generates
-    should be rejected, not reinterpreted, so the test is `isascii() and isdigit()`
-    rather than a guarded int().
+    should be rejected, not reinterpreted, so the character test comes first.
+
+    But a character test cannot decide the whole question either: `int()` also
+    rejects an over-long digit run, because CPython caps integer string conversion
+    at `sys.get_int_max_str_digits()` (4300 by default since 3.11, as a DoS guard).
+    So `uc-<5000 nines>` passed isascii()+isdigit() and still 500'd. The length
+    bound below keeps us from building an absurd int at all, and the try/except is
+    the actual guarantee — the limit is configurable at runtime, so a bound chosen
+    against today's default is a heuristic, not a proof. Both layers, deliberately.
     """
     kind, _, raw = node_id.partition("-")
     if kind not in _NODE_KINDS or not (raw.isascii() and raw.isdigit()):
         return None
-    return kind, int(raw)
+    if len(raw) > _MAX_ID_DIGITS:
+        return None
+    try:
+        return kind, int(raw)
+    except ValueError:
+        # Unreachable via the checks above on a default-configured interpreter, and
+        # kept anyway: this function's contract is "None on anything unparseable",
+        # and the alternative to a two-line net is another 500 in production.
+        return None
 
 
 @router.get("/top-asset")
