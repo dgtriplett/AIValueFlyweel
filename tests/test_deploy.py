@@ -167,9 +167,13 @@ class TestSettingsParity(unittest.TestCase):
         into another's workspace."""
         with open(APP_YAML) as fh:
             text = fh.read()
-        for name in ("PGHOST", "PGUSER", "ATLAS_CATALOG", "GENIE_MIRROR_CATALOG"):
+        for name in ("PGHOST", "PGUSER", "ATLAS_CATALOG", "ATLAS_SCHEMA",
+                     "GENIE_MIRROR_CATALOG", "GENIE_MIRROR_SCHEMA",
+                     "GENIE_SPACE_ID"):
             self.assertEqual(_env_value(text, name), "",
                              f"{name} has a baked-in value; it must ship empty")
+        self.assertEqual(_env_value(text, "APP_ENV"), "DEV",
+                         "APP_ENV must ship with the safe DEV default")
         match = re.search(r"sql_warehouse:\s*\n\s*id:\s*\"([^\"]*)\"", text)
         self.assertEqual(match.group(1), "", "a warehouse id is baked into app.yaml")
 

@@ -33,8 +33,7 @@ ROOT = Path(__file__).parent.parent
 # Substrings that mark a match as illustrative rather than real.
 PLACEHOLDER_MARKERS = (
     "xxxx", "xxx", "example", "your-", "<", "abc123", "aaaa", "0000",
-    "changeme", "placeholder", "my-", "foo", "bar", "redacted", "dummy",
-    "deadbeef", "e2e", "test", "fake",
+    "changeme", "placeholder", "redacted", "dummy", "deadbeef",
 )
 
 PATTERNS: list[tuple[str, re.Pattern, str]] = [
@@ -55,9 +54,18 @@ PATTERNS: list[tuple[str, re.Pattern, str]] = [
      re.compile(r"-----BEGIN (?:RSA |EC |OPENSSH |PGP )?PRIVATE KEY-----"),
      "a private key"),
     ("Lakebase endpoint host",
-     # A concrete provisioned endpoint, e.g. ep-cool-name-12345678.database...
-     re.compile(r"\bep-[a-z0-9\-]*\d{4,}[a-z0-9\-]*\.database\.[a-z0-9.\-]+"),
+     # A concrete provisioned endpoint, e.g. ep-cool-name.database...
+     re.compile(r"\bep-[a-z0-9\-]+\.database\.[a-z0-9.\-]+"),
      "a provisioned Lakebase endpoint host (workspace-specific)"),
+    ("UUID",
+     re.compile(r"\b[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\b"),
+     "a UUID that may identify a workspace service principal"),
+    ("warehouse id",
+     re.compile(r"\b[0-9a-f]{16}\b"),
+     "a 16-character Databricks SQL warehouse id"),
+    ("Genie space id",
+     re.compile(r"\b[0-9a-f]{32}\b"),
+     "a 32-character Genie space id"),
     ("deployed app hostname",
      re.compile(r"\b[a-z0-9\-]+-\d{10,}\.[a-z0-9.\-]*databricksapps\.com"),
      "a deployed app hostname containing a workspace id"),
@@ -95,6 +103,22 @@ def looks_like_a_placeholder(match: str) -> bool:
     return any(marker in lowered for marker in PLACEHOLDER_MARKERS)
 
 
+def is_legitimate_identifier_fixture(relative: str, label: str,
+                                     text: str, match: re.Match) -> bool:
+    """Allow non-config identifiers without weakening credential detection."""
+    if label not in {"UUID", "warehouse id", "Genie space id"}:
+        return False
+    if relative.startswith("tests/"):
+        return True
+    line_start = text.rfind("\n", 0, match.start()) + 1
+    line_end = text.find("\n", match.end())
+    line = text[line_start:line_end if line_end != -1 else len(text)]
+    if label == "warehouse id":
+        value = match.group(0)
+        return value.isdigit() or "request_id" in line
+    return False
+
+
 def main() -> int:
     findings: list[str] = []
     scanned = 0
@@ -115,6 +139,8 @@ def main() -> int:
             for match in pattern.finditer(text):
                 value = match.group(0)
                 if looks_like_a_placeholder(value):
+                    continue
+                if is_legitimate_identifier_fixture(relative, label, text, match):
                     continue
                 line = text[:match.start()].count("\n") + 1
                 # Truncated: the finding must not itself publish the secret into

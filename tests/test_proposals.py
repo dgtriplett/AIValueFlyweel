@@ -366,7 +366,7 @@ class TestRouteWiring(unittest.TestCase):
 
     def test_routes_are_mounted(self):
         import app
-        paths = {r.path for r in app.app.routes}
+        paths = set(app.app.openapi()["paths"])
         self.assertIn("/api/proposals/use-cases/{use_case_id}", paths)
         self.assertIn("/api/proposals/use-cases/{use_case_id}/context", paths)
 
