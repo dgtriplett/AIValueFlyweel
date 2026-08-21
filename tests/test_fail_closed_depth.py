@@ -807,6 +807,313 @@ class TestOutageIs503OnEveryApiPath(unittest.TestCase):
                     self.assertEqual(client.get(path).status_code, 200)
 
 
+# ---------------------------------------------------------------------------
+# ROUND 4 — the AUTH-failure paths
+# ---------------------------------------------------------------------------
+# Previous rounds closed the CONNECTION-error paths. `_AUTH_ERRORS` is a SEPARATE
+# tuple with separate handling (refresh the token, retry once), and two places missed
+# it: transaction() caught only _CONNECTION_ERRORS, and refresh_token() awaited
+# pool.close() outside any handler.
+def _auth_error():
+    import asyncpg
+
+    return asyncpg.InvalidPasswordError("OAuth token expired")
+
+
+class _AuthFailingPool:
+    """A pool whose acquire() raises an auth error, optionally only the first time.
+
+    `heals=True` models the normal case a token refresh is FOR: the credential was
+    stale, the refresh fixed it, the retry works. `heals=False` models a persistent
+    auth failure, which is a real outage.
+    """
+
+    def __init__(self, *, heals: bool, exc=None):
+        self.heals = heals
+        self.exc = exc or _auth_error()
+        self.attempts = 0
+
+    def acquire(pool_self):
+        class Ctx:
+            async def __aenter__(self):
+                pool_self.attempts += 1
+                if pool_self.heals and pool_self.attempts > 1:
+                    return _TxConnection()
+                raise pool_self.exc
+
+            async def __aexit__(self, *a):
+                return False
+
+        return Ctx()
+
+    async def close(self):
+        return None
+
+
+class _TxConnection:
+    async def fetch(self, *a):
+        return ["row"]
+
+    async def execute(self, *a):
+        return "OK"
+
+    def transaction(self):
+        class Tx:
+            async def __aenter__(self):
+                return self
+
+            async def __aexit__(self, *a):
+                return False
+
+        return Tx()
+
+
+def _pool_with(inner):
+    """A DatabasePool wired to `inner`, with refresh_token() counted, not real."""
+    class Pool(DatabasePool):
+        refreshes = 0
+
+        async def get_pool(self):
+            self._unconfigured = False
+            if self._pool is None:
+                self._pool = inner
+            return self._pool
+
+        async def refresh_token(self):
+            type(self).refreshes += 1
+
+    Pool.refreshes = 0
+    return Pool()
+
+
+class TestTransactionTreatsAuthFailuresAsOutages(unittest.TestCase):
+    """transaction() caught only _CONNECTION_ERRORS, so an expired token escaped raw.
+
+    `InvalidPasswordError` from `acquire()` propagated as a 500 that bypassed the
+    DatabaseUnavailable handler, with `is_degraded` still False — so /api/health
+    stayed green. The account `make_default` switch runs through this path, so a
+    routine token rotation could 500 it invisibly.
+    """
+
+    def test_persistent_auth_failure_becomes_database_unavailable(self):
+        pool = _pool_with(_AuthFailingPool(heals=False))
+
+        async def use():
+            async with pool.transaction() as conn:
+                return conn
+
+        with self.assertRaises(DatabaseUnavailable):
+            run(use())
+
+    def test_is_degraded_is_set_so_health_reports_it(self):
+        pool = _pool_with(_AuthFailingPool(heals=False))
+
+        async def use():
+            async with pool.transaction() as conn:
+                return conn
+
+        try:
+            run(use())
+        except DatabaseUnavailable:
+            pass
+        self.assertTrue(pool.is_degraded)
+        self.assertFalse(pool.is_demo_mode)
+
+    def test_a_transient_auth_failure_still_retries_and_succeeds(self):
+        """The contract must MATCH fetch/execute: refresh once, retry, then 503.
+
+        Converting on the first auth error would make transaction() give up faster
+        than the other helpers and turn a routine token expiry into a user-visible
+        503. This is the test that would catch that over-correction.
+        """
+        inner = _AuthFailingPool(heals=True)
+        pool = _pool_with(inner)
+
+        async def use():
+            async with pool.transaction() as conn:
+                return conn
+
+        self.assertIsInstance(run(use()), _TxConnection)
+        self.assertEqual(type(pool).refreshes, 1, "should refresh exactly once")
+        self.assertFalse(pool.is_degraded, "a healed expiry is not an outage")
+
+    def test_auth_failure_inside_the_body_surfaces_as_unavailable(self):
+        """Not retried — replaying a partially-applied body would be unsafe."""
+        pool = _pool_with(_AuthFailingPool(heals=True))
+
+        async def use():
+            async with pool.transaction():
+                raise _auth_error()
+
+        with self.assertRaises(DatabaseUnavailable):
+            run(use())
+
+    def test_connection_errors_on_the_transaction_path_still_convert(self):
+        """Round-3 behaviour must not regress while adding the auth branch."""
+        pool = _pool_with(_AuthFailingPool(heals=False, exc=OSError("reset")))
+
+        async def use():
+            async with pool.transaction() as conn:
+                return conn
+
+        with self.assertRaises(DatabaseUnavailable):
+            run(use())
+
+    def test_make_default_returns_503_during_a_token_rotation(self):
+        """End to end on the route that actually uses transaction()."""
+        import warnings
+
+        warnings.filterwarnings("ignore")
+        from fastapi.testclient import TestClient
+        import app as appmod
+        from server.routes import accounts as routes
+
+        pool = _pool_with(_AuthFailingPool(heals=False))
+
+        async def fetchrow(sql, *args):
+            if "FROM accounts" in sql:
+                return Row(id=3, is_default=False, name="E", slug="e",
+                           utility_type=None, is_active=True)
+            return None
+
+        pool.fetchrow = fetchrow
+        acct.invalidate_default()
+        self.addCleanup(acct.invalidate_default)
+        with mock.patch.object(routes, "db", pool), \
+             mock.patch.object(acct, "db", pool), \
+             mock.patch("server.common.db", pool), \
+             mock.patch.dict(os.environ, {"GRID_ATLAS_ADMINS": "ops@u.com"},
+                             clear=True):
+            response = TestClient(appmod.app, raise_server_exceptions=False).patch(
+                "/api/accounts/3", json={"make_default": True},
+                headers={"X-Forwarded-Email": "ops@u.com"})
+        self.assertEqual(response.status_code, 503,
+                         "a token rotation must not 500 the default-account switch")
+
+
+class TestPersistentAuthFailureOnFetchAndExecute(unittest.TestCase):
+    """The same gap existed on the RETRY leg of fetch()/execute().
+
+    Their retry caught only `_CONNECTION_ERRORS`, so when the refresh did not help,
+    the SECOND auth error escaped raw as a 500. Found while fixing transaction() —
+    the three paths should share one contract.
+    """
+
+    def test_fetch_converts_a_persistent_auth_failure(self):
+        pool = _pool_with(_AuthFailingPool(heals=False))
+        with self.assertRaises(DatabaseUnavailable):
+            run(pool.fetch("SELECT 1"))
+
+    def test_execute_converts_a_persistent_auth_failure(self):
+        pool = _pool_with(_AuthFailingPool(heals=False))
+        with self.assertRaises(DatabaseUnavailable):
+            run(pool.execute("INSERT INTO x VALUES (1)"))
+
+    def test_transient_auth_failures_still_heal_on_both(self):
+        for label, call in (("fetch", lambda p: p.fetch("SELECT 1")),
+                            ("execute", lambda p: p.execute("INSERT"))):
+            with self.subTest(helper=label):
+                pool = _pool_with(_AuthFailingPool(heals=True))
+                self.assertIsNotNone(run(call(pool)))
+                self.assertFalse(pool.is_degraded)
+
+
+class TestRefreshTokenCloseFailuresDoNotEscape(unittest.TestCase):
+    """`refresh_token()` awaited `pool.close()` bare, outside any handler.
+
+    asyncpg's `Pool.close()` really can raise. An OSError from closing an
+    already-dead socket therefore propagated RAW, with the OLD pool still installed
+    and `is_degraded` False — a 500 rather than a 503, and a later call reusing a pool
+    that cannot work while health reported green.
+    """
+
+    CLOSE_FAILURES = {
+        "oserror": OSError("socket already dead"),
+        "postgres_connection": __import__("asyncpg").PostgresConnectionError("lost"),
+        "interface": __import__("asyncpg").InterfaceError("closed"),
+        "timeout": __import__("asyncio").TimeoutError(),
+    }
+
+    def _pool_whose_close_raises(self, exc):
+        class Broken:
+            async def close(self):
+                raise exc
+
+        pool = DatabasePool()
+        pool._pool = Broken()
+        pool._unconfigured = False
+        return pool
+
+    def test_close_failure_surfaces_as_database_unavailable(self):
+        for label, exc in self.CLOSE_FAILURES.items():
+            with self.subTest(failure=label):
+                pool = self._pool_whose_close_raises(exc)
+                with mock.patch.dict(os.environ, CONFIGURED, clear=True), \
+                     mock.patch("server.db.get_oauth_token", return_value="tok"), \
+                     mock.patch("asyncpg.create_pool",
+                                side_effect=OSError("still down")):
+                    with self.assertRaises(DatabaseUnavailable):
+                        run(pool.refresh_token())
+
+    def test_no_stale_pool_is_left_installed(self):
+        """The dangerous part: a dead pool reused later while reporting healthy."""
+        for label, exc in self.CLOSE_FAILURES.items():
+            with self.subTest(failure=label):
+                pool = self._pool_whose_close_raises(exc)
+                with mock.patch.dict(os.environ, CONFIGURED, clear=True), \
+                     mock.patch("server.db.get_oauth_token", return_value="tok"), \
+                     mock.patch("asyncpg.create_pool",
+                                side_effect=OSError("still down")):
+                    try:
+                        run(pool.refresh_token())
+                    except DatabaseUnavailable:
+                        pass
+                self.assertIsNone(
+                    pool._pool,
+                    "the old pool must be discarded even when close() fails")
+                self.assertTrue(pool.is_degraded)
+
+    def test_a_failing_close_does_not_mask_a_successful_rebuild(self):
+        """close() is teardown of a discarded object — it must not fail the refresh.
+
+        If the replacement pool opens, the refresh SUCCEEDED regardless of what the
+        old pool's close() did, and the app must not be marked degraded.
+        """
+        class Broken:
+            async def close(self):
+                raise OSError("dead")
+
+        class Fresh:
+            pass
+
+        pool = DatabasePool()
+        pool._pool = Broken()
+        pool._unconfigured = False
+
+        async def ok(*a, **k):
+            return Fresh()
+
+        with mock.patch.dict(os.environ, CONFIGURED, clear=True), \
+             mock.patch("server.db.get_oauth_token", return_value="tok"), \
+             mock.patch("asyncpg.create_pool", ok):
+            run(pool.refresh_token())
+
+        self.assertIsInstance(pool._pool, Fresh)
+        self.assertFalse(pool.is_degraded)
+        self.assertIsNone(pool.last_error)
+
+    def test_app_shutdown_close_never_raises(self):
+        """A failing close must not break a clean exit."""
+        class Broken:
+            async def close(self):
+                raise OSError("dead")
+
+        pool = DatabasePool()
+        pool._pool = Broken()
+        run(pool.close())          # must not raise
+        self.assertIsNone(pool._pool)
+
+
 class TestAccountsEndpointDoesNotMisdiagnoseAnOutage(unittest.TestCase):
     """`/api/accounts` must not tell an operator to run an applied migration.
 

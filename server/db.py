@@ -158,17 +158,51 @@ class DatabasePool:
         return self._pool
 
     async def refresh_token(self) -> None:
-        """Recreate the pool with a fresh OAuth token."""
+        """Recreate the pool with a fresh OAuth token.
+
+        WHY close() IS BEST-EFFORT
+        -------------------------
+        `Pool.close()` really can raise — asyncpg propagates errors from it — and the
+        old code awaited it bare, OUTSIDE any handler. An OSError from closing a
+        already-dead socket therefore escaped raw, with the OLD pool still installed
+        and `is_degraded` False: a 500 instead of a 503, and a later call happily
+        reusing a pool that cannot work while /api/health reported healthy.
+
+        The insight is that a failing close is not the problem to report — we are
+        discarding this pool either way, and the reason we got here is that the
+        database is already misbehaving. So the close failure is logged and swallowed,
+        and `self._pool` is cleared REGARDLESS, so a broken pool is never left behind.
+        What propagates is the state of the REPLACEMENT attempt: `get_pool()` records
+        the real cause and `_require_available()` turns it into DatabaseUnavailable.
+        """
         async with self._lock:
-            if self._pool is not None:
-                await self._pool.close()
-                self._pool = None
+            pool, self._pool = self._pool, None
+        if pool is not None:
+            try:
+                await pool.close()
+            except Exception as exc:  # noqa: BLE001
+                # Deliberately broad: this is teardown of an object we are discarding.
+                # Any failure here must not mask the outage we are trying to recover
+                # from, and must not stop the replacement attempt below.
+                logger.warning(
+                    "closing the old Lakebase pool failed (%s: %s) — discarding it "
+                    "anyway", type(exc).__name__, exc)
+        # Rebuild. If this fails, get_pool() has recorded the cause and is_degraded is
+        # true, so raise rather than returning as though the refresh had worked —
+        # otherwise the caller retries against a pool that does not exist.
         await self.get_pool()
+        self._require_available()
 
     async def close(self) -> None:
-        if self._pool is not None:
-            await self._pool.close()
-            self._pool = None
+        """Shut the pool down at app exit. Best-effort, and always clears the ref."""
+        pool, self._pool = self._pool, None
+        if pool is not None:
+            try:
+                await pool.close()
+            except Exception as exc:  # noqa: BLE001
+                # Shutdown path: a failing close must not prevent a clean exit.
+                logger.warning("closing the Lakebase pool failed (%s: %s)",
+                               type(exc).__name__, exc)
 
     def _require_available(self) -> None:
         """Raise if Lakebase is configured but unreachable.
@@ -247,7 +281,10 @@ class DatabasePool:
             try:
                 async with pool.acquire() as conn:
                     return await conn.fetch(sql, *args)
-            except _CONNECTION_ERRORS as exc:
+            except (_AUTH_ERRORS + _CONNECTION_ERRORS) as exc:
+                # A PERSISTENT auth failure is an outage, not a routine expiry: the
+                # refresh above already gave it a fresh token. Without _AUTH_ERRORS
+                # here the second failure escaped raw as a 500.
                 raise self._connection_failed(exc) from exc
         except _CONNECTION_ERRORS as exc:
             raise self._connection_failed(exc) from exc
@@ -270,18 +307,69 @@ class DatabasePool:
         multi-statement invariant (clear the old default, then set the new one) can
         be interrupted between statements and leave the table with no default at
         all — every unscoped request then resolves to nothing.
+
+        AUTH FAILURES GET THE SAME RETRY AS fetch()/execute()
+        ----------------------------------------------------
+        This used to catch only `_CONNECTION_ERRORS`, so an expired or rotated OAuth
+        token — `InvalidPasswordError` from `acquire()` — propagated raw: a 500 that
+        bypassed the DatabaseUnavailable handler with `is_degraded` still False. The
+        account `make_default` switch runs through here, so a token rotation could
+        500 that operation while /api/health stayed green.
+
+        The retry-once-then-503 shape is deliberately identical to fetch()/execute():
+        one token refresh, one retry, and only a PERSISTENT auth failure becomes
+        DatabaseUnavailable. Converting on the first auth error would make
+        transaction() give up faster than the other two and turn a routine token
+        expiry into a user-visible 503.
+
+        The retry can only cover ACQUIRING the connection, not the caller's body —
+        once `yield` has handed a connection over, the caller's statements may have
+        partially run and replaying them is not safe. An auth error raised by the
+        body therefore surfaces as DatabaseUnavailable without a retry, which is the
+        honest outcome: the transaction rolled back and nothing was applied.
         """
         pool = await self.get_pool()
         if pool is None:
             self._require_available()
             yield None
             return
+
+        # Acquire with the same refresh-and-retry the other helpers use. Kept separate
+        # from the caller's body below so a retry never re-runs their statements.
         try:
-            async with pool.acquire() as conn:
-                async with conn.transaction():
-                    yield conn
+            conn_ctx = pool.acquire()
+            conn = await conn_ctx.__aenter__()
+        except _AUTH_ERRORS:
+            await self.refresh_token()
+            pool = await self.get_pool()
+            if pool is None:
+                self._require_available()
+                yield None
+                return
+            try:
+                conn_ctx = pool.acquire()
+                conn = await conn_ctx.__aenter__()
+            except (_AUTH_ERRORS + _CONNECTION_ERRORS) as exc:
+                # The refresh did not help, so this is a real outage rather than a
+                # routine expiry.
+                raise self._connection_failed(exc) from exc
         except _CONNECTION_ERRORS as exc:
             raise self._connection_failed(exc) from exc
+
+        try:
+            async with conn.transaction():
+                yield conn
+        except (_AUTH_ERRORS + _CONNECTION_ERRORS) as exc:
+            raise self._connection_failed(exc) from exc
+        finally:
+            # Release the connection whatever happened. A failure here is teardown of
+            # a connection we are done with, so it must not replace the caller's
+            # exception or leak out of a successful transaction.
+            try:
+                await conn_ctx.__aexit__(None, None, None)
+            except Exception as exc:  # noqa: BLE001
+                logger.warning("releasing the Lakebase connection failed (%s: %s)",
+                               type(exc).__name__, exc)
 
     async def execute(self, sql: str, *args):
         _charge_budget()
@@ -301,7 +389,9 @@ class DatabasePool:
             try:
                 async with pool.acquire() as conn:
                     return await conn.execute(sql, *args)
-            except _CONNECTION_ERRORS as exc:
+            except (_AUTH_ERRORS + _CONNECTION_ERRORS) as exc:
+                # As in fetch(): the token was just refreshed, so a second auth
+                # failure is a real outage rather than an expiry.
                 raise self._connection_failed(exc) from exc
         except _CONNECTION_ERRORS as exc:
             # Especially important for a write: without this the caller sees a 500 and
