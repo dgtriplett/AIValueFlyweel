@@ -2,7 +2,7 @@ import inspect
 import unittest
 from pathlib import Path
 
-import tests.stubs  # noqa: F401
+import stubs  # noqa: F401
 
 
 ROOT = Path(__file__).resolve().parents[1]
