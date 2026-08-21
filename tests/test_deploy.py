@@ -16,6 +16,8 @@ import unittest
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 APP_YAML = os.path.join(ROOT, "app.yaml")
 BUNDLE_YAML = os.path.join(ROOT, "databricks.yml")
+RUNTIME_REQUIREMENTS = os.path.join(ROOT, "requirements.txt")
+DEPLOY_REQUIREMENTS = os.path.join(ROOT, "requirements-deploy.txt")
 
 
 def _load_deploy():
@@ -28,6 +30,29 @@ def _load_deploy():
 
 
 deploy = _load_deploy()
+
+
+class TestDeployToolDependencies(unittest.TestCase):
+    def test_psycopg2_is_pinned_only_for_operator_scripts(self):
+        with open(DEPLOY_REQUIREMENTS) as fh:
+            deploy_requirements = fh.read()
+        with open(RUNTIME_REQUIREMENTS) as fh:
+            runtime_requirements = fh.read()
+
+        self.assertRegex(deploy_requirements, r"(?m)^psycopg2-binary==\d+\.\d+\.\d+$")
+        self.assertNotIn("psycopg2", runtime_requirements.lower())
+
+    def test_quickstarts_install_operator_dependencies_before_deploy(self):
+        install_command = "python3 -m pip install -r requirements-deploy.txt"
+        deploy_command = "python3 scripts/deploy.py"
+
+        for filename in ("README.md", "INSTALL.md"):
+            with self.subTest(filename=filename):
+                with open(os.path.join(ROOT, filename)) as fh:
+                    documentation = fh.read()
+                self.assertIn(install_command, documentation)
+                self.assertLess(documentation.index(install_command),
+                                documentation.index(deploy_command))
 
 
 def _env_value(text: str, name: str) -> str | None:

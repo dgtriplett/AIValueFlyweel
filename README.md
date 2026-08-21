@@ -219,7 +219,8 @@ wrong:
 ├── app.py                      # FastAPI entry: /api routers, SPA, console
 ├── app.yaml                    # App runtime config (ships with no environment baked in)
 ├── databricks.yml              # Asset Bundle — every value is a variable
-├── requirements.txt
+├── requirements.txt            # Databricks App runtime dependencies
+├── requirements-deploy.txt     # Local deploy/migrate/seed dependencies
 ├── server/
 │   ├── config.py               # Dual-mode auth + settings
 │   ├── db.py                   # asyncpg pool + OAuth refresh + budget charging
@@ -264,6 +265,7 @@ wrong:
 
 ```bash
 git clone <this-repo> && cd grid-atlas
+python3 -m pip install -r requirements-deploy.txt
 python3 scripts/deploy.py
 ```
 
