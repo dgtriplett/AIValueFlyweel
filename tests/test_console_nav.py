@@ -558,6 +558,33 @@ class TestSpaSourceIsTheSourceOfTruth(unittest.TestCase):
         self.assertIn("Escape", self.header,
                       "Escape must dismiss an open menu")
 
+    def test_selecting_any_view_dismisses_an_open_menu(self):
+        """Changing the view must never leave a menu hanging open over it.
+
+        The click-outside handler is scoped to the nav element, so it deliberately
+        does NOT fire for the nav's own DIRECT buttons — the single-item group and
+        the entry-point tab. Those call sites have to dismiss explicitly, and two
+        of them originally did not: opening a menu and then clicking 'Value' or
+        'Get started' switched the view with the old menu still floating over it.
+
+        Asserted as an invariant over EVERY setTab call rather than against those
+        two sites, so the next direct button added to the nav cannot reintroduce
+        it — which is exactly how these two arrived.
+        """
+        setters = [match.start() for match in re.finditer(r"\bsetTab\(", self.header)]
+        # The prop declaration and the destructured param are not call sites.
+        calls = [at for at in setters
+                 if not re.match(r"setTab\(\s*(id|next)?\s*:",
+                                 self.header[at:at + 40])]
+        self.assertGreaterEqual(len(calls), 3,
+                                "expected the grouped item plus the two direct "
+                                "buttons to select a view")
+        for at in calls:
+            preceding = self.header[max(0, at - 120):at]
+            self.assertIn("setOpenMenu(null)", preceding,
+                          "a setTab call does not first dismiss the open menu: "
+                          f"...{self.header[max(0, at - 90):at + 30]!r}")
+
     def test_the_drawer_proposal_link_uses_the_id_prop(self):
         """It must read the ID, not the edit-form draft.
 

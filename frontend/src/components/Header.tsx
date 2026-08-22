@@ -194,10 +194,23 @@ function NavGroup({
   // A group holding one view is a menu with nothing to choose. It stays declared
   // as a group — the grouping is the IA, and a second view may join it — but it
   // renders as a direct button so reaching it never costs an extra click.
+  //
+  // It still dismisses an open menu, like a grouped item does. The click-outside
+  // handler is scoped to the nav element, so it deliberately does NOT fire for a
+  // button that lives inside the nav — without this, picking a direct button
+  // would change the view and leave another group's menu hanging open over it.
   const only = ids.length === 1 ? TABS.find((candidate) => candidate.id === ids[0]) : undefined
   if (only) {
     return (
-      <TabButton tab={only} label={label} active={active} onSelect={() => setTab(only.id)} />
+      <TabButton
+        tab={only}
+        label={label}
+        active={active}
+        onSelect={() => {
+          setOpenMenu(null)
+          setTab(only.id)
+        }}
+      />
     )
   }
 
@@ -348,7 +361,14 @@ export function Header({
           ))}
 
           {entry ? (
-            <TabButton tab={entry} active={tab === entry.id} onSelect={() => setTab(entry.id)} />
+            <TabButton
+              tab={entry}
+              active={tab === entry.id}
+              onSelect={() => {
+                setOpenMenu(null)
+                setTab(entry.id)
+              }}
+            />
           ) : null}
 
           {CONSOLE_LINKS.map((link) => (
