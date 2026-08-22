@@ -114,19 +114,19 @@ export const TABS: Tab[] = [
     id: 'coverage',
     label: 'Coverage',
     icon: <BarChart3 className="w-4 h-4" />,
-    hint: 'Where knowledge is complete, thin or missing',
+    hint: 'Where the portfolio is covered, exposed or blocked',
   },
   {
     id: 'whatif',
     label: 'What-if Analysis',
     icon: <GitBranch className="w-4 h-4" />,
-    hint: 'How outcomes change when assumptions move',
+    hint: 'How portfolio outcomes change when assumptions move',
   },
   {
     id: 'trend',
     label: 'Trend Analysis',
     icon: <LineChart className="w-4 h-4" />,
-    hint: 'How coverage and value are changing over time',
+    hint: 'How portfolio value and readiness change over time',
   },
   {
     id: 'glossary',
@@ -144,7 +144,7 @@ export const TABS: Tab[] = [
     id: 'executive',
     label: 'Executive Brief',
     icon: <FileText className="w-4 h-4" />,
-    hint: 'The decisions and signals leaders need at a glance',
+    hint: 'The planning decisions and funding story leaders need',
   },
   {
     id: 'knowledge',
@@ -174,7 +174,7 @@ export const TABS: Tab[] = [
     id: 'research',
     label: 'Research',
     icon: <Search className="w-4 h-4" />,
-    hint: 'Find evidence and turn it into usable knowledge',
+    hint: 'The evidence behind value drivers and assumptions',
   },
   {
     id: 'accounts',
@@ -217,24 +217,15 @@ export const TABS: Tab[] = [
  * which left OnboardingView reachable only by editing state by hand.
  */
 const NAV_GROUPS: { label: string; ids: TabId[] }[] = [
-  { label: 'Portfolio', ids: ['portfolio', 'flywheel', 'registry', 'dashboards'] },
-  { label: 'Plan & Fund', ids: ['roadmap', 'funding'] },
-  { label: 'Value', ids: ['value'] },
+  {
+    label: 'Portfolio',
+    ids: ['portfolio', 'flywheel', 'registry', 'dashboards', 'coverage', 'whatif', 'trend'],
+  },
+  { label: 'Plan & Fund', ids: ['roadmap', 'funding', 'executive'] },
+  { label: 'Value', ids: ['value', 'research'] },
   {
     label: 'Knowledge',
-    ids: [
-      'coverage',
-      'whatif',
-      'trend',
-      'glossary',
-      'artifacts',
-      'executive',
-      'knowledge',
-      'sourcemapping',
-      'taxonomy',
-      'rules',
-      'research',
-    ],
+    ids: ['knowledge', 'glossary', 'taxonomy', 'sourcemapping', 'rules', 'artifacts'],
   },
   { label: 'Settings', ids: ['accounts', 'admin', 'branding'] },
 ]
