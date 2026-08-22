@@ -25,6 +25,7 @@
 // never PASS" rule. It is not counted as coverage where it did not run.
 
 import assert from 'node:assert/strict'
+import { readFileSync } from 'node:fs'
 
 import { http } from '../src/api'
 import { ACCOUNT_HEADER, ACCOUNT_STORAGE_KEY, accountHeaders, accountId } from '../src/lib/account'
@@ -40,6 +41,7 @@ import {
   reasonOf,
 } from '../src/lib/confirm'
 import { NO_RETRY, isRetriable, retryPolicy } from '../src/lib/retry'
+import { downloadOnboardingTemplate } from '../src/views/OnboardingView'
 import type { ConfirmCardData } from '../src/types'
 
 // ---------------------------------------------------------------------------
@@ -144,6 +146,72 @@ tests['a throwing localStorage does not take down the request'] = async () => {
   const { adapter, seen } = capturingAdapter()
   await http.get('/health', { adapter })
   assert.equal(seen[0].headers[ACCOUNT_HEADER], undefined)
+}
+
+tests['onboarding export sends the selected account header and server filename'] = async () => {
+  installStorage('acct-export')
+  let request: { input?: string | URL | Request; init?: RequestInit } = {}
+  let clicked = 0
+  let removed = 0
+  let appended = 0
+  let revoked: string | null = null
+  const anchor = {
+    href: '',
+    download: '',
+    style: { display: '' },
+    click() {
+      clicked += 1
+    },
+    remove() {
+      removed += 1
+    },
+  }
+
+  ;(globalThis as Record<string, unknown>).fetch = async (
+    input: string | URL | Request,
+    init?: RequestInit,
+  ) => {
+    request = { input, init }
+    return new Response(new Blob(['workbook']), {
+      status: 200,
+      headers: {
+        'content-disposition': 'attachment; filename="tenant-b-onboarding.xlsx"',
+      },
+    })
+  }
+  ;(globalThis as Record<string, unknown>).document = {
+    createElement(tag: string) {
+      assert.equal(tag, 'a')
+      return anchor
+    },
+    body: {
+      appendChild(element: unknown) {
+        assert.equal(element, anchor)
+        appended += 1
+      },
+    },
+  }
+  URL.createObjectURL = () => 'blob:onboarding-template'
+  URL.revokeObjectURL = (url: string) => {
+    revoked = url
+  }
+
+  await downloadOnboardingTemplate()
+
+  assert.equal(request.input, '/api/onboarding/export.xlsx')
+  assert.equal((request.init?.headers as Record<string, string>)[ACCOUNT_HEADER], 'acct-export')
+  assert.equal(anchor.download, 'tenant-b-onboarding.xlsx')
+  assert.equal(anchor.href, 'blob:onboarding-template')
+  assert.equal(anchor.style.display, 'none')
+  assert.equal(appended, 1)
+  assert.equal(clicked, 1)
+  assert.equal(removed, 1)
+  assert.equal(revoked, 'blob:onboarding-template')
+}
+
+tests['frontend source has no bare anchor downloads from /api'] = () => {
+  const source = readFileSync('src/views/OnboardingView.tsx', 'utf8')
+  assert.doesNotMatch(source, /<a\b[^>]*\bhref=["']\/api\//i)
 }
 
 // ---------------------------------------------------------------------------

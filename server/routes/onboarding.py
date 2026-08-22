@@ -8,7 +8,7 @@ import io
 from fastapi import APIRouter, HTTPException, Request, UploadFile, File
 from fastapi.responses import StreamingResponse
 
-from .. import accounts
+from .. import accounts, portfolio
 from ..common import current_user, write_audit
 from ..db import db
 
@@ -16,6 +16,11 @@ router = APIRouter(prefix="/onboarding", tags=["onboarding"])
 
 _STATUSES = ("not_started", "scoping", "in_progress", "live", "value_realized")
 _INGEST = ("not_started", "landed", "curated", "governed")
+
+
+async def _use_case_visibility(alias: str = "uc") -> tuple[str, list]:
+    condition, params = await portfolio.portfolio_condition(alias, param_index=1)
+    return f"({alias}.origin = 'catalog' OR {condition})", params
 
 
 @router.get("/export.xlsx")
@@ -50,6 +55,8 @@ async def export_template():
         ws.add_data_validation(dv)
         dv.add(f"{column}2:{column}{ws.max_row}")
 
+    account_id = await accounts.current()
+
     # Instructions sheet
     ws0 = wb.active
     ws0.title = "Instructions"
@@ -70,7 +77,19 @@ async def export_template():
     ws1 = wb.create_sheet("Data Sources")
     ws1.append(["id", "source_category", "module", "vendor", "ingestion_status"])
     style_header(ws1, 5)
-    assets = await db.fetch("SELECT id, source_category, module, vendor, ingestion_status FROM data_assets ORDER BY source_category, id")
+    if account_id is not None:
+        assets = await db.fetch("""
+            SELECT da.id, da.source_category, da.module, da.vendor,
+                   COALESCE(s.ingestion_status, 'not_started') AS ingestion_status
+            FROM data_assets da
+            LEFT JOIN asset_status_by_account s
+                   ON s.data_asset_id = da.id AND s.account_id = $1
+            ORDER BY da.source_category, da.id
+        """, account_id)
+    else:
+        assets = await db.fetch(
+            "SELECT id, source_category, module, vendor, ingestion_status "
+            "FROM data_assets ORDER BY source_category, id")
     for a in assets:
         ws1.append([a["id"], a["source_category"], a["module"], a["vendor"] or "", a["ingestion_status"]])
     dv = DataValidation(type="list", formula1='"not_started,landed,curated,governed"', allow_blank=False)
@@ -85,10 +104,20 @@ async def export_template():
     ws2 = wb.create_sheet("Use Cases")
     ws2.append(["id", "title", "domain", "phase", "status", "owner_lob", "priority", "value_base_mm", "notes"])
     style_header(ws2, 9)
-    ucs = await db.fetch("""
-        SELECT uc.id, uc.title, l.name AS domain, uc.phase, uc.status, uc.priority_score,
-               (uc.hypothesized_value_json->>'mid_mm')::numeric AS value_mm
-        FROM use_cases uc LEFT JOIN lobs l ON l.id = uc.lob_id ORDER BY uc.id""")
+    if account_id is not None:
+        use_case_visibility, use_case_params = await _use_case_visibility("uc")
+        ucs = await db.fetch(f"""
+            SELECT uc.id, uc.title, l.name AS domain, uc.phase, uc.status, uc.priority_score,
+                   (uc.hypothesized_value_json->>'mid_mm')::numeric AS value_mm
+            FROM use_cases uc LEFT JOIN lobs l ON l.id = uc.lob_id
+            WHERE {use_case_visibility}
+            ORDER BY uc.id
+        """, *use_case_params)
+    else:
+        ucs = await db.fetch("""
+            SELECT uc.id, uc.title, l.name AS domain, uc.phase, uc.status, uc.priority_score,
+                   (uc.hypothesized_value_json->>'mid_mm')::numeric AS value_mm
+            FROM use_cases uc LEFT JOIN lobs l ON l.id = uc.lob_id ORDER BY uc.id""")
     for u in ucs:
         ws2.append([u["id"], u["title"], u["domain"], u["phase"], u["status"], u["domain"],
                     float(u["priority_score"]) if u["priority_score"] else "", float(u["value_mm"]) if u["value_mm"] else "", ""])
@@ -104,7 +133,6 @@ async def export_template():
     ws3 = wb.create_sheet("Assumptions")
     ws3.append(["key", "label", "unit", "value"])
     style_header(ws3, 4)
-    account_id = await accounts.current()
     if account_id is not None:
         assumptions = await db.fetch("""
             SELECT DISTINCT ON (key) key, label, unit, value, category
@@ -190,7 +218,16 @@ async def _compute_import(parsed):
             changes["data_sources"].append({"id": aid, "label": f"{a['source_category']} · {a['module']}",
                                             "field": "ingestion_status", "from": a["ingestion_status"], "to": st})
 
-    cur_ucs = {u["id"]: u for u in await db.fetch("SELECT id, title, status, priority_score FROM use_cases")}
+    if account_id is not None:
+        use_case_visibility, use_case_params = await _use_case_visibility("uc")
+        cur_ucs = {u["id"]: u for u in await db.fetch(f"""
+            SELECT uc.id, uc.title, uc.status, uc.priority_score
+            FROM use_cases uc
+            WHERE {use_case_visibility}
+        """, *use_case_params)}
+    else:
+        cur_ucs = {u["id"]: u for u in await db.fetch(
+            "SELECT id, title, status, priority_score FROM use_cases")}
     for r in parsed["use_cases"]:
         try:
             uid = int(r["id"])
