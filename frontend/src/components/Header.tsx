@@ -3,14 +3,26 @@
 import { useEffect, useRef, useState } from 'react'
 import {
   Activity,
+  Archive,
   BarChart3,
+  BookOpen,
   CalendarRange,
   Database,
+  FileText,
+  GitBranch,
   HandCoins,
   Layers,
+  LineChart,
+  Network,
+  Palette,
   Radar,
   Rocket,
+  Search,
+  Settings,
+  Shield,
   SlidersVertical,
+  Tags,
+  Users,
 } from 'lucide-react'
 import type { ReactNode } from 'react'
 
@@ -22,6 +34,20 @@ export type TabId =
   | 'roadmap'
   | 'funding'
   | 'value'
+  | 'coverage'
+  | 'whatif'
+  | 'trend'
+  | 'glossary'
+  | 'artifacts'
+  | 'executive'
+  | 'knowledge'
+  | 'sourcemapping'
+  | 'taxonomy'
+  | 'rules'
+  | 'research'
+  | 'accounts'
+  | 'admin'
+  | 'branding'
   | 'onboarding'
 
 export interface Tab {
@@ -85,6 +111,90 @@ export const TABS: Tab[] = [
     hint: 'The drivers every number on screen is computed from',
   },
   {
+    id: 'coverage',
+    label: 'Coverage',
+    icon: <BarChart3 className="w-4 h-4" />,
+    hint: 'Where the portfolio is covered, exposed or blocked',
+  },
+  {
+    id: 'whatif',
+    label: 'What-if Analysis',
+    icon: <GitBranch className="w-4 h-4" />,
+    hint: 'How portfolio outcomes change when assumptions move',
+  },
+  {
+    id: 'trend',
+    label: 'Trend Analysis',
+    icon: <LineChart className="w-4 h-4" />,
+    hint: 'How portfolio value and readiness change over time',
+  },
+  {
+    id: 'glossary',
+    label: 'Glossary',
+    icon: <BookOpen className="w-4 h-4" />,
+    hint: 'The shared language behind the portfolio',
+  },
+  {
+    id: 'artifacts',
+    label: 'Artifacts',
+    icon: <Archive className="w-4 h-4" />,
+    hint: 'The documents and evidence attached to the work',
+  },
+  {
+    id: 'executive',
+    label: 'Executive Brief',
+    icon: <FileText className="w-4 h-4" />,
+    hint: 'The planning decisions and funding story leaders need',
+  },
+  {
+    id: 'knowledge',
+    label: 'Knowledge Base',
+    icon: <Database className="w-4 h-4" />,
+    hint: 'The standards, studies and runbooks behind the work',
+  },
+  {
+    id: 'sourcemapping',
+    label: 'Source Mapping',
+    icon: <Network className="w-4 h-4" />,
+    hint: 'How source material connects to the model',
+  },
+  {
+    id: 'taxonomy',
+    label: 'Taxonomy',
+    icon: <Tags className="w-4 h-4" />,
+    hint: 'The categories that keep knowledge consistent',
+  },
+  {
+    id: 'rules',
+    label: 'Rules',
+    icon: <Shield className="w-4 h-4" />,
+    hint: 'The policies that govern how knowledge is curated',
+  },
+  {
+    id: 'research',
+    label: 'Research',
+    icon: <Search className="w-4 h-4" />,
+    hint: 'The evidence behind value drivers and assumptions',
+  },
+  {
+    id: 'accounts',
+    label: 'Accounts',
+    icon: <Users className="w-4 h-4" />,
+    hint: 'Manage the organizations connected to this workspace',
+  },
+  {
+    id: 'admin',
+    label: 'Administration',
+    icon: <Settings className="w-4 h-4" />,
+    hint: 'Control workspace access and operational settings',
+  },
+  {
+    id: 'branding',
+    label: 'Branding',
+    icon: <Palette className="w-4 h-4" />,
+    hint: 'Shape the workspace identity customers see',
+  },
+  {
     id: 'onboarding',
     label: 'Get started',
     icon: <Rocket className="w-4 h-4" />,
@@ -97,9 +207,9 @@ export const TABS: Tab[] = [
  *
  * The flat list read as eight unrelated destinations, two of which
  * ("Portfolio", "Use Case Catalog") were one list at two scopes. The top level
- * is now three jobs — see the portfolio, plan and fund it, check what the
- * numbers rest on — so the choice at the top is about what you are trying to do,
- * not which screen holds it.
+ * is now a short set of jobs — see the portfolio, plan and fund it, check what
+ * the numbers rest on, work with knowledge, or configure the workspace — so the
+ * choice at the top is about what you are trying to do, not which screen holds it.
  *
  * `onboarding` is deliberately NOT in a group: it is an entry-point surface,
  * rendered as its own top-level button so a customer with an empty instance can
@@ -107,9 +217,17 @@ export const TABS: Tab[] = [
  * which left OnboardingView reachable only by editing state by hand.
  */
 const NAV_GROUPS: { label: string; ids: TabId[] }[] = [
-  { label: 'Portfolio', ids: ['portfolio', 'flywheel', 'registry', 'dashboards'] },
-  { label: 'Plan & Fund', ids: ['roadmap', 'funding'] },
-  { label: 'Value', ids: ['value'] },
+  {
+    label: 'Portfolio',
+    ids: ['portfolio', 'flywheel', 'registry', 'dashboards', 'coverage', 'whatif', 'trend'],
+  },
+  { label: 'Plan & Fund', ids: ['roadmap', 'funding', 'executive'] },
+  { label: 'Value', ids: ['value', 'research'] },
+  {
+    label: 'Knowledge',
+    ids: ['knowledge', 'glossary', 'taxonomy', 'sourcemapping', 'rules', 'artifacts'],
+  },
+  { label: 'Settings', ids: ['accounts', 'admin', 'branding'] },
 ]
 
 /** The entry-point surface: outside the groups, always one click away. */

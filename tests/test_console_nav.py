@@ -419,7 +419,7 @@ class TestSpaSourceIsTheSourceOfTruth(unittest.TestCase):
     # rather than each re-deriving it from a slightly different regex.
 
     def declared_tab_ids(self) -> set:
-        return set(re.findall(r"id: '([a-z]+)'", self.header))
+        return set(re.findall(r"id: '([a-zA-Z_][a-zA-Z0-9_]*)'", self.header))
 
     def nav_group_ids(self) -> dict:
         """{group label: {tab ids in it}}, parsed from the `ids:` arrays only.
@@ -436,7 +436,7 @@ class TestSpaSourceIsTheSourceOfTruth(unittest.TestCase):
         groups = {}
         for label, ids in re.findall(r"label: '([^']+)',\s*ids: \[([^\]]*)\]",
                                      block.group(1)):
-            groups[label] = set(re.findall(r"'([a-z]+)'", ids))
+            groups[label] = set(re.findall(r"'([a-zA-Z_][a-zA-Z0-9_]*)'", ids))
         assert groups, "NAV_GROUPS parsed as empty — the format changed"
         return groups
 
@@ -450,7 +450,11 @@ class TestSpaSourceIsTheSourceOfTruth(unittest.TestCase):
         self.assertIn("export const TABS", self.header,
                       "the tab list must be exported data, not markup")
         for tab_id in ("portfolio", "registry", "flywheel", "dashboards",
-                       "roadmap", "funding", "value", "onboarding"):
+                       "roadmap", "funding", "value", "coverage", "whatif",
+                       "trend", "glossary", "artifacts", "executive",
+                       "knowledge", "sourcemapping", "taxonomy", "rules",
+                       "research", "accounts", "admin", "branding",
+                       "onboarding"):
             self.assertIn(f"id: '{tab_id}'", self.header,
                           f"the {tab_id} tab is not in TABS")
         self.assertNotIn("id: 'catalog'", self.header,
@@ -486,12 +490,21 @@ class TestSpaSourceIsTheSourceOfTruth(unittest.TestCase):
         properties are asserted rather than left to drift back.
         """
         groups = self.nav_group_ids()
-        self.assertLessEqual(len(groups), 4,
-                             f"{len(groups)} nav groups is not a grouping — the "
-                             "top level is drifting back to a flat tab row")
-        for expected in ("Portfolio", "Plan & Fund", "Value"):
-            self.assertIn(expected, groups,
-                          f"the {expected!r} nav group is gone")
+        expected_groups = {
+            "Portfolio": {
+                "portfolio", "flywheel", "registry", "dashboards", "coverage",
+                "whatif", "trend",
+            },
+            "Plan & Fund": {"roadmap", "funding", "executive"},
+            "Value": {"value", "research"},
+            "Knowledge": {
+                "knowledge", "glossary", "taxonomy", "sourcemapping", "rules",
+                "artifacts",
+            },
+            "Settings": {"accounts", "admin", "branding"},
+        }
+        self.assertEqual(groups, expected_groups,
+                         "the grouped nav no longer matches the Tier 3 shell")
 
     def test_every_grouped_tab_is_reachable(self):
         """A tab in TABS but in no group, and not top-level, is dead code.
@@ -503,7 +516,9 @@ class TestSpaSourceIsTheSourceOfTruth(unittest.TestCase):
         """
         grouped = set().union(*self.nav_group_ids().values())
         # The entry-point surface is a standalone top-level button, not in a menu.
-        entry = re.search(r"const ENTRY_TAB: TabId = '([a-z]+)'", self.header)
+        entry = re.search(
+            r"const ENTRY_TAB: TabId = '([a-zA-Z_][a-zA-Z0-9_]*)'", self.header
+        )
         self.assertIsNotNone(entry, "no ENTRY_TAB declared")
         unreachable = self.declared_tab_ids() - grouped - {entry.group(1)}
         self.assertEqual(unreachable, set(),
@@ -518,7 +533,7 @@ class TestSpaSourceIsTheSourceOfTruth(unittest.TestCase):
         union = re.search(r"export type TabId =(.*?)\n\n", self.header, re.S)
         self.assertIsNotNone(union, "could not parse the TabId union")
         declared = self.declared_tab_ids()
-        for member in re.findall(r"'([a-z]+)'", union.group(1)):
+        for member in re.findall(r"'([a-zA-Z_][a-zA-Z0-9_]*)'", union.group(1)):
             self.assertIn(member, declared,
                           f"TabId {member!r} has no entry in TABS, so no nav "
                           "item can reach the view it names")
