@@ -17,6 +17,7 @@ import { GeniePanel } from './components/GeniePanel'
 import { Header } from './components/Header'
 import type { TabId } from './components/Header'
 import { NewUseCaseModal } from './components/NewUseCaseModal'
+import { slugFromLocation } from './lib/kbroute'
 import type { UseCaseView } from './components/ScopeSwitch'
 import { StatCard } from './components/StatCard'
 import { ToastProvider } from './components/Toasts'
@@ -44,6 +45,10 @@ const GlossaryView = lazy(() => import('./views/GlossaryView'))
 const ArtifactsView = lazy(() => import('./views/ArtifactsView'))
 const ExecutiveView = lazy(() => import('./views/ExecutiveView'))
 
+// Tier 3 Phase 4 — the knowledge base. Lazy for the same reason, and it is the
+// largest of these: three modes plus the markdown parser and renderer.
+const KnowledgeView = lazy(() => import('./views/KnowledgeView'))
+
 function ComingSoon({ label }: { label: string }) {
   return (
     <section className="rounded-xl border border-navy-700 bg-navy-800 px-6 py-10 text-center">
@@ -54,7 +59,16 @@ function ComingSoon({ label }: { label: string }) {
 }
 
 function AppShell() {
-  const [tab, setTab] = useState<TabId>('portfolio')
+  // 'portfolio' unless the app was cold-loaded on a KB article deep link.
+  //
+  // This is the ONE place navigation reads the URL, and it is the other half of the
+  // narrow exception `lib/kbroute.ts` documents: `app.py`'s SPA catch-all serves
+  // index.html for `/kb/<slug>`, so without this a pasted article link would boot
+  // the app on the portfolio tab and silently drop what was asked for. Read once in
+  // the initializer, never subscribed to here — `KnowledgeView` owns `popstate`.
+  const [tab, setTab] = useState<TabId>(() =>
+    slugFromLocation() ? 'knowledge' : 'portfolio',
+  )
   // Which use-case scope the merged destination shows. Owned here, not in the
   // view, so flipping to the flywheel and back does not silently reset you to
   // the portfolio when you were reading the catalog.
@@ -131,7 +145,7 @@ function AppShell() {
       case 'executive':
         return <ExecutiveView />
       case 'knowledge':
-        return <ComingSoon label="Knowledge Base" />
+        return <KnowledgeView />
       case 'sourcemapping':
         return <ComingSoon label="Source Mapping" />
       case 'taxonomy':

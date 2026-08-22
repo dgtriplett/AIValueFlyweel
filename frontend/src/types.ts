@@ -794,3 +794,134 @@ export interface ExecutivePack {
   }
   next_actions?: string[]
 }
+
+// ---------------------------------------------------------------------------
+// Tier 3 Phase 4 — knowledge base
+//
+// Shapes mirror `server/routes/knowledge.py`. Nearly everything is optional
+// because the list and the read endpoints return DIFFERENT projections of the
+// same row: `build_search_sql` selects a fixed column set plus `rank`/`excerpt`
+// only when searching, while `GET /articles/{slug}` returns `a.*` plus four
+// resolved collections. One type per row with optional members beats two types
+// that drift, since the list feeds straight into the article view's cache.
+// ---------------------------------------------------------------------------
+
+/** A folder in the KB tree. `path` is the addressable form; filtering is by subtree. */
+export interface KbFolder {
+  id: number
+  name: string
+  parent_id?: number | null
+  path: string
+  sort_order?: number | null
+  article_count?: number | null
+}
+
+export interface KbTreeResponse {
+  folders: KbFolder[]
+  unfiled_count: number
+  totals: { articles?: number; published?: number; generated?: number }
+}
+
+/** What an article is attached to. `label` is server-resolved and may be null
+ *  when the entity is out of scope — render the id rather than an empty cell. */
+export interface KbLink {
+  id: number
+  entity_type: string
+  entity_id: number
+  relation: string
+  label?: string | null
+  created_by?: string | null
+  created_at?: string | null
+}
+
+export interface KbAttachment {
+  id: number
+  filename: string
+  mime_type?: string | null
+  size_bytes?: number | null
+  storage?: string | null
+  checksum?: string | null
+  uploaded_by?: string | null
+  uploaded_at?: string | null
+}
+
+export interface KbVersion {
+  version: number
+  title?: string | null
+  change_note?: string | null
+  edited_by?: string | null
+  edited_at?: string | null
+}
+
+/**
+ * A resolved `[[wiki link]]`.
+ *
+ * `exists` is the whole point: the renderer cannot know which slugs resolve —
+ * only the server does — so a reference that points at nothing is marked here
+ * rather than rendered as a live link to an error page.
+ */
+export interface KbReference {
+  slug: string
+  title?: string | null
+  exists: boolean
+}
+
+export interface KbArticle {
+  id: number
+  title: string
+  slug: string
+  summary?: string | null
+  body_md?: string | null
+  tags?: string[] | null
+  status: string
+  version?: number | null
+  folder_id?: number | null
+  folder_name?: string | null
+  folder_path?: string | null
+  /** Set when an agent wrote it. Drives the "review before sharing" banner. */
+  generated_by?: string | null
+  created_by?: string | null
+  updated_by?: string | null
+  created_at?: string | null
+  updated_at?: string | null
+  /** Counts, on list rows only. */
+  attachment_count?: number | null
+  link_count?: number | null
+  /** Search-only: relevance rank and the `<<match>>`-marked body excerpt. */
+  rank?: number | null
+  excerpt?: string | null
+  /** Present on `GET /articles/{slug}` only. */
+  links?: KbLink[]
+  attachments?: KbAttachment[]
+  versions?: KbVersion[]
+  references?: KbReference[]
+}
+
+export interface KbArticleListResponse {
+  items: KbArticle[]
+  count: number
+  limit: number
+  offset: number
+}
+
+/** `POST /articles` and `PUT /articles/{slug}` both return a thin row, not the
+ *  full article — the caller refetches by slug rather than trusting this. */
+export interface KbArticleWriteResponse {
+  id: number
+  title: string
+  slug: string
+  status: string
+  version: number
+  content_changed?: boolean
+  created_at?: string | null
+  updated_at?: string | null
+}
+
+/** Upload response. `already_existed` is a same-checksum re-upload, which the
+ *  server answers with the existing row instead of storing a second copy. */
+export interface KbAttachmentUploadResponse extends Partial<KbAttachment> {
+  id: number
+  filename: string
+  already_existed?: boolean
+  note?: string | null
+}

@@ -33,6 +33,12 @@ import type {
   HealthResponse,
   HypothesizedValue,
   JointCase,
+  KbArticle,
+  KbArticleListResponse,
+  KbArticleWriteResponse,
+  KbAttachmentUploadResponse,
+  KbLink,
+  KbTreeResponse,
   LiveStatusResponse,
   LiveSyncResponse,
   Lob,
@@ -393,6 +399,160 @@ export const api = {
    */
   applyConfirm: (token: string) =>
     http.post<ConfirmApplyResponse>(`/confirm/${token}`).then((r) => r.data),
+
+  // -------------------------------------------------------------------------
+  // Tier 3 Phase 4 — the knowledge base.
+  //
+  // Every write here is `limiter("write")` server-side and NONE is confirm-gated,
+  // which `server/routes/knowledge.py:24-36` argues for at length: editing an
+  // article you are looking at is a person typing into a document, not an agent
+  // exercising judgement, and gating it would teach people to click through
+  // confirmations where the gate actually matters. Versioning is what protects the
+  // content instead — every edit snapshots the previous body.
+  //
+  // Slugs are interpolated through `encodeURIComponent`. `server/knowledge.py`
+  // restricts a generated slug to `[a-z0-9-]`, but a slug also arrives from a
+  // pasted deep link and from a `[[wiki link]]`, so it is untrusted input on the
+  // way in even though it is well-formed on the way out.
+  // -------------------------------------------------------------------------
+
+  kbTree: () => http.get<KbTreeResponse>('/kb/tree').then((r) => r.data),
+
+  /**
+   * List / search / filter articles.
+   *
+   * `q` runs `websearch_to_tsquery` server-side and adds `rank` + a
+   * `<<match>>`-marked `excerpt` to each row. A malformed expression comes back
+   * 422 with words meant to be read ("Try plain words, or quote a phrase") rather
+   * than a 500 — so the caller shows the server's message, not a generic failure.
+   *
+   * `folder_path` filters by SUBTREE, not by exact folder: asking for
+   * `/standards` returns everything filed beneath it (`build_search_sql`).
+   */
+  kbArticles: (params: {
+    q?: string | null
+    folder_path?: string | null
+    tag?: string | null
+    status?: string | null
+    limit?: number
+  } = {}) => {
+    const query = new URLSearchParams({ limit: String(params.limit ?? 50) })
+    if (params.q) query.set('q', params.q)
+    if (params.folder_path) query.set('folder_path', params.folder_path)
+    if (params.tag) query.set('tag', params.tag)
+    if (params.status) query.set('status', params.status)
+    return http.get<KbArticleListResponse>(`/kb/articles?${query}`).then((r) => r.data)
+  },
+
+  /** One article with its links, attachments, versions and resolved wiki links. */
+  kbArticle: (slug: string) =>
+    http.get<KbArticle>(`/kb/articles/${encodeURIComponent(slug)}`).then((r) => r.data),
+
+  /** Returns a thin row — the server assigns the slug, so the caller reads it back. */
+  createKbArticle: (body: {
+    title: string
+    body_md?: string
+    summary?: string | null
+    folder_id?: number | null
+    tags?: string[]
+    status?: string
+  }) => http.post<KbArticleWriteResponse>('/kb/articles', body).then((r) => r.data),
+
+  /**
+   * Edit an article. Only a title/body/summary change makes a new version —
+   * re-filing or re-tagging deliberately does not, so the history stays skimmable.
+   */
+  updateKbArticle: (
+    slug: string,
+    body: {
+      title?: string
+      body_md?: string
+      summary?: string | null
+      folder_id?: number | null
+      tags?: string[]
+      status?: string
+      change_note?: string | null
+    },
+  ) =>
+    http
+      .put<KbArticleWriteResponse>(`/kb/articles/${encodeURIComponent(slug)}`, body)
+      .then((r) => r.data),
+
+  /**
+   * Archive an article, or `hard` to delete it permanently.
+   *
+   * Archiving is the default for the reason the route gives: an article is
+   * somebody's written work, and the usual intent is "get this out of my way", not
+   * "destroy it". Archived articles drop out of search but keep links and history.
+   */
+  deleteKbArticle: (slug: string, hard = false) =>
+    http
+      .delete<{ archived?: boolean; deleted?: boolean; slug: string }>(
+        `/kb/articles/${encodeURIComponent(slug)}?hard=${hard}`,
+      )
+      .then((r) => r.data),
+
+  /**
+   * Roll back to an earlier version.
+   *
+   * The rollback is itself a new version — the current text is snapshotted before
+   * being replaced — so restoring is undoable. That is what lets the UI offer this
+   * without a confirm token behind it.
+   */
+  restoreKbVersion: (slug: string, version: number) =>
+    http
+      .post<KbArticleWriteResponse>(
+        `/kb/articles/${encodeURIComponent(slug)}/restore/${version}`,
+      )
+      .then((r) => r.data),
+
+  /** Attach an article to a portfolio entity, which is what makes it show up
+   *  when someone opens that use case rather than only inside the KB. */
+  createKbLink: (slug: string, body: { entity_type: string; entity_id: number; relation: string }) =>
+    http
+      .post<KbLink>(`/kb/articles/${encodeURIComponent(slug)}/links`, body)
+      .then((r) => r.data),
+
+  deleteKbLink: (linkId: number) =>
+    http.delete<{ deleted: boolean }>(`/kb/links/${linkId}`).then((r) => r.data),
+
+  /**
+   * Upload an attachment (<=25MB, `server/knowledge.py:115`).
+   *
+   * Like the onboarding import, no `Content-Type` is set: axios derives the
+   * multipart boundary from the `FormData`, and setting one by hand omits the
+   * boundary so the server cannot parse the body. It still goes through `http`,
+   * so the account interceptor scopes it.
+   */
+  uploadKbAttachment: (slug: string, file: File) => {
+    const body = new FormData()
+    body.append('file', file)
+    return http
+      .post<KbAttachmentUploadResponse>(
+        `/kb/articles/${encodeURIComponent(slug)}/attachments`,
+        body,
+      )
+      .then((r) => r.data)
+  },
+
+  /**
+   * Fetch an attachment's bytes for saving to disk.
+   *
+   * `responseType: 'blob'` and routed through axios rather than an `<a href>` for
+   * the reason §4.1 exists: an anchor skips the interceptor, and a missing account
+   * header does not raise — the server falls back to the default account — so the
+   * user silently downloads another tenant's document. `saveBlob` then saves it
+   * WITHOUT previewing: the route serves these `Content-Disposition: attachment`
+   * with `nosniff` and `default-src 'none'` because the bytes are user-supplied,
+   * and rendering one inline would discard that decision.
+   */
+  kbAttachmentBlob: (attachmentId: number) =>
+    http
+      .get<Blob>(`/kb/attachments/${attachmentId}`, { responseType: 'blob' })
+      .then((r) => r.data),
+
+  deleteKbAttachment: (attachmentId: number) =>
+    http.delete<{ deleted: boolean }>(`/kb/attachments/${attachmentId}`).then((r) => r.data),
 }
 
 /** Value-model helper: the drawer and the wizard both read components this way. */

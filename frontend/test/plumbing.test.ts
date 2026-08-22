@@ -25,7 +25,7 @@
 // never PASS" rule. It is not counted as coverage where it did not run.
 
 import assert from 'node:assert/strict'
-import { readFileSync } from 'node:fs'
+import { readdirSync, readFileSync } from 'node:fs'
 
 import { http } from '../src/api'
 import { ACCOUNT_HEADER, ACCOUNT_STORAGE_KEY, accountHeaders, accountId } from '../src/lib/account'
@@ -41,6 +41,16 @@ import {
   reasonOf,
 } from '../src/lib/confirm'
 import { NO_RETRY, isRetriable, retryPolicy } from '../src/lib/retry'
+import { articlePath, slugFromLocation } from '../src/lib/kbroute'
+import {
+  parseInline,
+  parseMarkdown,
+  slugifyWikiTarget,
+  wikiSlugs,
+} from '../src/lib/markdown'
+import { MAX_ATTACHMENT_BYTES, rejectionOf } from '../src/components/FileDrop'
+import { parseTags } from '../src/views/ArticleEditor'
+import { splitExcerpt } from '../src/views/KnowledgeView'
 import { downloadOnboardingTemplate } from '../src/views/OnboardingView'
 import type { ConfirmCardData } from '../src/types'
 
@@ -95,6 +105,17 @@ function capturingAdapter(response: { status?: number; data?: unknown; headers?:
     return Promise.reject(error)
   }
   return { adapter, seen }
+}
+
+/**
+ * A `File` stand-in with a chosen name and size.
+ *
+ * `rejectionOf` reads only `.name` and `.size`, so this avoids allocating 26MB of
+ * real bytes to test the oversize rejection — and avoids depending on `File` being
+ * constructible, which varies across the node versions this file has to run under.
+ */
+function fakeFile(name: string, size: number): File {
+  return { name, size } as File
 }
 
 // ---------------------------------------------------------------------------
@@ -210,8 +231,45 @@ tests['onboarding export sends the selected account header and server filename']
 }
 
 tests['frontend source has no bare anchor downloads from /api'] = () => {
-  const source = readFileSync('src/views/OnboardingView.tsx', 'utf8')
-  assert.doesNotMatch(source, /<a\b[^>]*\bhref=["']\/api\//i)
+  // Widened from a single file to the WHOLE source tree in Tier 3 Phase 4.
+  //
+  // Checking only OnboardingView pinned the one place the rule had already been
+  // applied, which is the weakest form of this assertion: it could not fail for new
+  // code, and new code is where the mistake happens. The KB has four download and
+  // upload surfaces and the console's version of one of them was literally
+  // `<a href="/api/kb/attachments/${id}">` (`console.js:2386`), so a regression here
+  // is a copy-paste away.
+  //
+  // An `<a href="/api/…">` bypasses axios and therefore the account interceptor, and
+  // a missing account header does NOT raise — `server/accounts.py:19-22` falls back
+  // to the default account. So the failure is silent and the symptom is one customer
+  // downloading another's document.
+  const offenders: string[] = []
+  const walk = (directory: string) => {
+    for (const entry of readdirSync(directory, { withFileTypes: true })) {
+      const path = `${directory}/${entry.name}`
+      if (entry.isDirectory()) {
+        walk(path)
+      } else if (/\.tsx?$/.test(entry.name)) {
+        // Comments are stripped FIRST. Several of these files explain the rule by
+        // quoting the anti-pattern it forbids — `ArticleView` cites the console's own
+        // `<a href="/api/kb/attachments/${id}">` — and a check that cannot tell code
+        // from prose punishes writing the explanation down.
+        const code = readFileSync(path, 'utf8')
+          .replace(/\/\*[\s\S]*?\*\//g, '')
+          .replace(/(^|[^:])\/\/.*$/gm, '$1')
+        // Matches across newlines, because a multi-line JSX anchor is the common
+        // shape and a single-line pattern misses every formatted one. The optional
+        // `{` matters more than it looks: the interesting case is an interpolated
+        // href (`href={`/api/kb/attachments/${id}`}`), which is precisely what the
+        // console had and what a port would reach for. A pattern requiring a quote
+        // straight after `=` silently passes the one shape worth catching.
+        if (/<a\b[\s\S]*?\bhref=\{?\s*["'`]\/api\//i.test(code)) offenders.push(path)
+      }
+    }
+  }
+  walk('src')
+  assert.deepEqual(offenders, [], `anchor downloads bypass the account header: ${offenders}`)
 }
 
 // ---------------------------------------------------------------------------
@@ -442,6 +500,186 @@ tests['NO_RETRY is react-query’s no-retry value'] = () => {
   // (`mutation.js:83` resolves `retry ?? 0`); if this drifts, the doc comment in
   // lib/retry.ts becomes a lie.
   assert.equal(NO_RETRY.retry, 0)
+}
+
+// ---------------------------------------------------------------------------
+// 5. Tier 3 Phase 4 — the knowledge base
+// ---------------------------------------------------------------------------
+//
+// The markdown parser is the piece most worth pinning. It REPLACED the console's
+// `renderMarkdown`, whose safety rested on an ordering argument — escape the whole
+// source first, then re-introduce a fixed set of constructs — that a later edit
+// could quietly break. The replacement's claim is different and stronger: it never
+// produces HTML at all, so there is nothing to inject into. These assertions make
+// that claim checkable rather than a comment.
+//
+// The KB modules covered here are the pure ones: the parser, the slug agreement
+// with the server, the deep-link resolver and the attachment pre-checks. They need
+// no DOM, which is what lets them run under plain node the way this file does.
+
+tests['markdown never emits HTML — angle brackets stay literal text'] = () => {
+  const blocks = parseMarkdown('<img src=x onerror=alert(1)>')
+  assert.equal(blocks.length, 1)
+  assert.equal(blocks[0].kind, 'paragraph')
+  const spans = blocks[0].kind === 'paragraph' ? blocks[0].spans : []
+  assert.equal(spans.length, 1)
+  assert.equal(spans[0].kind, 'text')
+  assert.equal(spans[0].kind === 'text' ? spans[0].text : '', '<img src=x onerror=alert(1)>')
+}
+
+tests['a fenced block is not parsed for markdown, and needs no NUL sentinel'] = () => {
+  // The console lifted fences out behind `\0BLOCK0\0` placeholders. Those NUL bytes
+  // made `grep` treat console.js as binary and silently return NO matches for any KB
+  // symbol — the file read as having no knowledge-base code at all. Here a fence is
+  // just a block token, so the sentinel is gone.
+  const blocks = parseMarkdown('```python\n**not bold** and [[not a link]]\n```')
+  assert.equal(blocks.length, 1)
+  assert.equal(blocks[0].kind, 'code')
+  if (blocks[0].kind !== 'code') return
+  assert.equal(blocks[0].language, 'python')
+  assert.equal(blocks[0].text, '**not bold** and [[not a link]]')
+  assert.ok(!JSON.stringify(blocks).includes('\u0000'), 'parse output must contain no NUL')
+}
+
+tests['an unclosed fence takes the rest of the document as code'] = () => {
+  // Rather than falling back to prose, where every `*` and `#` in a half-written
+  // article would be silently reinterpreted as formatting.
+  const blocks = parseMarkdown('intro\n\n```\nstill code\n# not a heading')
+  assert.equal(blocks.length, 2)
+  assert.equal(blocks[1].kind, 'code')
+  assert.equal(blocks[1].kind === 'code' ? blocks[1].text : '', 'still code\n# not a heading')
+}
+
+tests['wiki-link slugs match the server slugify for the common case'] = () => {
+  // Both sides MUST agree, or an author's `[[Recloser Coordination]]` points at a
+  // slug the server never generated and the link is permanently dead.
+  assert.equal(slugifyWikiTarget('Recloser Coordination'), 'recloser-coordination')
+  assert.equal(slugifyWikiTarget('  Spaced  Out  '), 'spaced-out')
+  // Punctuation stripped, per the server's `_SLUG_STRIP = [^\w\s-]`.
+  assert.equal(slugifyWikiTarget('ANSI C37.230 (guide)'), 'ansi-c37230-guide')
+  // Accented Latin folds to ASCII, matching the server's NFKD-then-ignore.
+  assert.equal(slugifyWikiTarget('Réseau'), 'reseau')
+  // Capped at MAX_SLUG_LENGTH = 80.
+  assert.equal(slugifyWikiTarget('a'.repeat(120)).length, 80)
+}
+
+tests['a wiki target that slugifies to nothing is text, not a link'] = () => {
+  // An anchor to `/kb/` would look like a reference to a specific article.
+  const spans = parseInline('see [[!!!]] here')
+  assert.ok(
+    spans.every((span) => span.kind === 'text'),
+    'a slug-less target must not become a wiki link',
+  )
+}
+
+tests['a wiki link carries its pipe label but links to the target slug'] = () => {
+  const spans = parseInline('[[Recloser Coordination|the coordination rule]]')
+  assert.equal(spans.length, 1)
+  assert.equal(spans[0].kind, 'wiki')
+  if (spans[0].kind !== 'wiki') return
+  assert.equal(spans[0].target.slug, 'recloser-coordination')
+  assert.equal(spans[0].target.label, 'the coordination rule')
+}
+
+tests['an unterminated [[ is not a link'] = () => {
+  // Matches `extract_wiki_links` server-side, which requires the closing `]]` for a
+  // stated reason: an unterminated one used to swallow the rest of the paragraph and
+  // produce a phantom broken link the author could not see the cause of.
+  const spans = parseInline('a stray [[ bracket and more text')
+  assert.equal(spans.length, 1)
+  assert.equal(spans[0].kind, 'text')
+}
+
+tests['inline code wins over emphasis inside it'] = () => {
+  const spans = parseInline('`**not bold**`')
+  assert.equal(spans.length, 1)
+  assert.equal(spans[0].kind, 'code')
+  assert.equal(spans[0].kind === 'code' ? spans[0].text : '', '**not bold**')
+}
+
+tests['consecutive bullets are one list, not one list per line'] = () => {
+  const blocks = parseMarkdown('- first\n- second\n- third')
+  assert.equal(blocks.length, 1)
+  assert.equal(blocks[0].kind, 'list')
+  if (blocks[0].kind !== 'list') return
+  assert.equal(blocks[0].ordered, false)
+  assert.equal(blocks[0].items.length, 3)
+}
+
+tests['an ordered list is distinguished from a bulleted one'] = () => {
+  const blocks = parseMarkdown('1. first\n2. second')
+  assert.equal(blocks[0].kind, 'list')
+  assert.equal(blocks[0].kind === 'list' ? blocks[0].ordered : false, true)
+  assert.equal(blocks[0].kind === 'list' ? blocks[0].items.length : 0, 2)
+}
+
+tests['wikiSlugs collects references but ignores fenced code'] = () => {
+  // What the reader sees as a link is what should count as a reference; a slug inside
+  // a code sample is a code sample. Deduplicated, first-appearance order.
+  const slugs = wikiSlugs('see [[Alpha]] and [[Beta]]\n\n```\n[[Gamma]]\n```\n\n[[Alpha]] again')
+  assert.deepEqual(slugs, ['alpha', 'beta'])
+}
+
+tests['search excerpt markers become highlights, not markup'] = () => {
+  // `ts_headline` is configured with `StartSel=<<,StopSel=>>` server-side precisely
+  // so the markers survive escaping. The console re-introduced `<mark>` into an
+  // escaped HTML string; this splits and hands the pieces to React instead.
+  assert.deepEqual(splitExcerpt('the <<recloser>> setting'), [
+    { text: 'the ', match: false },
+    { text: 'recloser', match: true },
+    { text: ' setting', match: false },
+  ])
+}
+
+tests['a literal << in a body cannot become markup via the excerpt path'] = () => {
+  // Only a complete `<<…>>` is a highlight; every piece is a React child either way.
+  assert.deepEqual(splitExcerpt('a << b'), [{ text: 'a << b', match: false }])
+}
+
+tests['KB deep links resolve a slug from the path, and only from /kb/'] = () => {
+  assert.equal(slugFromLocation('/kb/recloser-coordination'), 'recloser-coordination')
+  // Trailing slashes are tolerated: chat clients and link shorteners add them.
+  assert.equal(slugFromLocation('/kb/recloser-coordination/'), 'recloser-coordination')
+  assert.equal(slugFromLocation('/kb/spaced%20slug'), 'spaced slug')
+  // The exception is NARROW. Nothing else in the app is addressable, so every other
+  // path must resolve to null rather than being treated as a route.
+  assert.equal(slugFromLocation('/'), null)
+  assert.equal(slugFromLocation('/kb'), null)
+  assert.equal(slugFromLocation('/kb/'), null)
+  assert.equal(slugFromLocation('/portfolio'), null)
+  assert.equal(slugFromLocation('/knowledge/thing'), null)
+}
+
+tests['a malformed percent-escape in a deep link is not a crash'] = () => {
+  // `decodeURIComponent('%zz')` throws. A broken pasted link must land on the KB
+  // index, not stop the app from mounting.
+  assert.equal(slugFromLocation('/kb/%zz'), null)
+}
+
+tests['articlePath round-trips a slug that needs encoding'] = () => {
+  assert.equal(articlePath('recloser-coordination'), '/kb/recloser-coordination')
+  assert.equal(slugFromLocation(articlePath('a b')), 'a b')
+}
+
+tests['attachment rejection matches the server cap and type list'] = () => {
+  // A courtesy check, NOT a gate — `server/knowledge.py` sniffs magic bytes because a
+  // filename and a browser Content-Type are both attacker-controlled. But the cap and
+  // the extension list are known here, so the obvious mistakes do not cost a round
+  // trip and a 422.
+  assert.equal(MAX_ATTACHMENT_BYTES, 25 * 1024 * 1024)
+  assert.equal(rejectionOf(fakeFile('study.pdf', 1024)), null)
+  assert.equal(rejectionOf(fakeFile('sheet.xlsx', 5 * 1024 * 1024)), null)
+  assert.match(rejectionOf(fakeFile('empty.pdf', 0)) ?? '', /empty/)
+  const tooBig = rejectionOf(fakeFile('huge.pdf', 26 * 1024 * 1024)) ?? ''
+  assert.match(tooBig, /26\.0 MB/)
+  // Repeats the server's advice rather than just refusing.
+  assert.match(tooBig, /Link to it in the article body/)
+  assert.match(rejectionOf(fakeFile('script.exe', 10)) ?? '', /not an accepted file type/)
+}
+
+tests['article tags are split and trimmed, blanks dropped'] = () => {
+  assert.deepEqual(parseTags(' protection , ansi c37 ,, '), ['protection', 'ansi c37'])
+  assert.deepEqual(parseTags(''), [])
 }
 
 // ---------------------------------------------------------------------------
