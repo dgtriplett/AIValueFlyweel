@@ -67,9 +67,14 @@ export function UseCaseDrawer({
   } = useQuery({ queryKey: ['uc-detail', ucId], queryFn: () => api.useCaseDetail(ucId) })
   const assumptionsQuery = useQuery({ queryKey: ['assumptions'], queryFn: api.assumptions })
   const assetsQuery = useQuery({ queryKey: ['data-assets'], queryFn: api.dataAssets })
+  const useCasesQuery = useQuery({
+    queryKey: ['use-cases', 'all'],
+    queryFn: () => api.useCases('all'),
+  })
 
   const [editing, setEditing] = useState(false)
   const [addModuleId, setAddModuleId] = useState<number | ''>('')
+  const [addEnabledId, setAddEnabledId] = useState<number | ''>('')
   const [draft, setDraft] = useState<Draft | null>(null)
   const [comment, setComment] = useState('')
   const [realizedMode, setRealizedMode] = useState<'calculated' | 'override'>('calculated')
@@ -165,6 +170,29 @@ export function UseCaseDrawer({
   const removeRequired = useMutation({
     mutationFn: (assetId: number) => api.deleteRequires(ucId, assetId, true),
     onSuccess: invalidateRequires,
+  })
+
+  const invalidateEnables = () => {
+    invalidateDetail()
+    queryClient.invalidateQueries({ queryKey: ['enables'] })
+    queryClient.invalidateQueries({ queryKey: ['blast'] })
+  }
+
+  const addEnabled = useMutation({
+    mutationFn: (toUseCaseId: number) =>
+      api.createEnables({
+        from_use_case_id: ucId,
+        to_use_case_id: toUseCaseId,
+      }),
+    onSuccess: () => {
+      setAddEnabledId('')
+      invalidateEnables()
+    },
+  })
+
+  const removeEnabled = useMutation({
+    mutationFn: (toUseCaseId: number) => api.deleteEnables(ucId, toUseCaseId),
+    onSuccess: invalidateEnables,
   })
 
   const saveRealized = useMutation({
@@ -698,20 +726,69 @@ export function UseCaseDrawer({
                   Enables (fast-follows)
                 </h3>
                 {(detail.enables ?? []).map((linked) => (
-                  <button
+                  <div
                     key={linked.id}
-                    className="w-full text-left flex items-center gap-2 text-sm text-navy-300 hover:text-lava-300 py-1"
-                    onClick={() => onOpenUseCase(linked.id)}
+                    className="flex items-center gap-2 text-sm py-1"
                   >
-                    <ArrowRight className="w-4 h-4 text-lava shrink-0" />
-                    <span className="flex-1">{linked.title}</span>
-                    {linked.detected_by_agent ? (
-                      <Bot className="w-3.5 h-3.5 text-lava-300" />
+                    <button
+                      className="min-w-0 flex-1 text-left flex items-center gap-2 text-navy-300 hover:text-lava-300"
+                      onClick={() => onOpenUseCase(linked.id)}
+                    >
+                      <ArrowRight className="w-4 h-4 text-lava shrink-0" />
+                      <span className="flex-1 truncate">{linked.title}</span>
+                      {linked.detected_by_agent ? (
+                        <Bot className="w-3.5 h-3.5 text-lava-300 shrink-0" />
+                      ) : null}
+                    </button>
+                    {editing ? (
+                      <button
+                        aria-label={`Remove enabled use case ${linked.title}`}
+                        title="Remove this enabled use case"
+                        className="text-navy-500 hover:text-lava disabled:opacity-40"
+                        disabled={removeEnabled.isPending}
+                        onClick={() => removeEnabled.mutate(linked.id)}
+                      >
+                        <X className="w-3.5 h-3.5" />
+                      </button>
                     ) : null}
-                  </button>
+                  </div>
                 ))}
                 {(detail.enables ?? []).length === 0 ? (
                   <div className="text-xs text-navy-500">None.</div>
+                ) : null}
+                {editing ? (
+                  <div className="mt-2 flex items-center gap-2">
+                    <select
+                      id="uc-add-enabled-use-case"
+                      name="uc-add-enabled-use-case"
+                      aria-label="Add an enabled use case"
+                      className="input-field text-sm flex-1 min-w-0"
+                      value={addEnabledId}
+                      onChange={(event) =>
+                        setAddEnabledId(event.target.value ? Number(event.target.value) : '')
+                      }
+                    >
+                      <option value="">Add an enabled use case…</option>
+                      {(useCasesQuery.data ?? [])
+                        .filter(
+                          (useCase) =>
+                            useCase.id !== ucId &&
+                            !(detail.enables ?? []).some((enabled) => enabled.id === useCase.id),
+                        )
+                        .map((useCase) => (
+                          <option key={useCase.id} value={useCase.id}>
+                            {useCase.title}
+                          </option>
+                        ))}
+                    </select>
+                    <button
+                      className="btn-secondary text-xs whitespace-nowrap disabled:opacity-40"
+                      disabled={addEnabledId === '' || addEnabled.isPending}
+                      onClick={() => addEnabledId !== '' && addEnabled.mutate(addEnabledId)}
+                    >
+                      Add use case
+                    </button>
+                  </div>
                 ) : null}
               </div>
               <div>
