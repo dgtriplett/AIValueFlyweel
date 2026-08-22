@@ -19,6 +19,9 @@ import {
 } from 'lucide-react'
 
 import { api } from '../api'
+import { useApiErrorToast } from '../components/Toasts'
+import { accountHeaders } from '../lib/account'
+import { describeError } from '../lib/errors'
 import type { OnboardingImportResponse } from '../types'
 
 /**
@@ -71,6 +74,62 @@ const STEPS = [
   'See what each delivery unlocks on the Value Flywheel, then build your dependency-respecting roadmap and track realized value.',
 ]
 
+const ONBOARDING_TEMPLATE_URL = '/api/onboarding/export.xlsx'
+const DEFAULT_TEMPLATE_FILENAME = 'onboarding-template.xlsx'
+
+function templateFilename(contentDisposition: string | null): string {
+  if (!contentDisposition) return DEFAULT_TEMPLATE_FILENAME
+
+  const encoded = contentDisposition.match(/filename\*=UTF-8''([^;]+)/i)?.[1]
+  if (encoded) {
+    try {
+      return decodeURIComponent(encoded.trim())
+    } catch {
+      return encoded.trim()
+    }
+  }
+
+  return contentDisposition.match(/filename="?([^";]+)"?/i)?.[1]?.trim() || DEFAULT_TEMPLATE_FILENAME
+}
+
+export async function downloadOnboardingTemplate(): Promise<void> {
+  let response: Response
+  try {
+    response = await fetch(ONBOARDING_TEMPLATE_URL, { headers: accountHeaders() })
+  } catch (cause) {
+    throw describeError({ cause })
+  }
+
+  if (!response.ok) {
+    let body: unknown
+    try {
+      body = response.headers.get('content-type')?.includes('application/json')
+        ? await response.json()
+        : await response.text()
+    } catch {
+      body = null
+    }
+    throw describeError({
+      status: response.status,
+      body,
+      header: (name) => response.headers.get(name),
+    })
+  }
+
+  const objectUrl = URL.createObjectURL(await response.blob())
+  const anchor = document.createElement('a')
+  anchor.href = objectUrl
+  anchor.download = templateFilename(response.headers.get('content-disposition'))
+  anchor.style.display = 'none'
+  document.body.appendChild(anchor)
+  try {
+    anchor.click()
+  } finally {
+    anchor.remove()
+    URL.revokeObjectURL(objectUrl)
+  }
+}
+
 function GettingStarted() {
   return (
     <div className="card border-l-4 border-l-lava">
@@ -95,10 +154,23 @@ function GettingStarted() {
 
 function ExcelCard() {
   const queryClient = useQueryClient()
+  const toastError = useApiErrorToast()
   const fileInput = useRef<HTMLInputElement>(null)
   const [result, setResult] = useState<ImportResult | null>(null)
   const [pending, setPending] = useState<File | null>(null)
   const [busy, setBusy] = useState(false)
+  const [downloading, setDownloading] = useState(false)
+
+  const downloadTemplate = async () => {
+    setDownloading(true)
+    try {
+      await downloadOnboardingTemplate()
+    } catch (error) {
+      toastError(error, 'Could not download the onboarding template.')
+    } finally {
+      setDownloading(false)
+    }
+  }
 
   // Routed through the shared axios instance rather than a raw `fetch`, so the
   // account interceptor scopes it like every other request — a multipart upload
@@ -148,9 +220,14 @@ function ExcelCard() {
       </p>
 
       <div className="flex gap-2">
-        <a className="btn-secondary text-sm" href="/api/onboarding/export.xlsx">
+        <button
+          className="btn-secondary text-sm"
+          disabled={downloading}
+          aria-busy={downloading}
+          onClick={() => void downloadTemplate()}
+        >
           <Download className="w-4 h-4" /> Download template
-        </a>
+        </button>
         <button
           className="btn-primary text-sm"
           disabled={busy}
