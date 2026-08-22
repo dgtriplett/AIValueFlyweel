@@ -11,6 +11,7 @@ import logging
 from fastapi import APIRouter, Depends, HTTPException, Request
 from pydantic import BaseModel, Field
 
+from .. import accounts as acct
 from ..common import current_user, write_audit
 from ..db import db
 from ..limits import limiter
@@ -133,6 +134,8 @@ async def provision_space(body: ProvisionIn, request: Request):
 
     Rate-limited as 'sweep': it reads information_schema through the warehouse.
     """
+    acct.require_admin(request, "Provisioning a Genie space")
+
     from ..config import DATABRICKS_WAREHOUSE_ID
     from ..genie_provision import GenieProvisionError, provision
 
