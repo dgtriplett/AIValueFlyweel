@@ -112,6 +112,54 @@ class EmptyDatabaseExport(unittest.TestCase):
             self.assertEqual(["E2"], ranges, f"{sheet} lost its status dropdown")
 
 
+class AccountScopedDataSourceExport(unittest.TestCase):
+    """Data Sources export must use the selected account's status position."""
+
+    ASSET = dict(id=1, source_category="SCADA", module="m", vendor="v")
+
+    def _export(self, db, account_id):
+        with mock.patch.object(onboarding, "db", db), \
+             mock.patch.object(onboarding.accounts, "current",
+                               mock.AsyncMock(return_value=account_id)):
+            return load_workbook_bytes(run(collect_body(onboarding.export_template())))
+
+    def test_selected_account_status_overrides_default_fallback(self):
+        class AccountAwareDB(FakeDB):
+            async def fetch(self, sql, *args):
+                self.queries.append(sql)
+                if "FROM data_assets da" in sql:
+                    self.assert_account(args)
+                    return [Row(**AccountScopedDataSourceExport.ASSET,
+                                ingestion_status="governed")]
+                return []
+
+            @staticmethod
+            def assert_account(args):
+                if args != (22,):
+                    raise AssertionError(f"expected selected account 22, got {args}")
+
+        db = AccountAwareDB(has_pool=True)
+        wb = self._export(db, account_id=22)
+
+        self.assertEqual("governed", wb["Data Sources"]["E2"].value)
+        scoped_query = next(q for q in db.queries if "FROM data_assets da" in q)
+        self.assertIn("LEFT JOIN asset_status_by_account", scoped_query)
+        self.assertIn("s.account_id = $1", scoped_query)
+        self.assertIn("COALESCE(s.ingestion_status, 'not_started')", scoped_query)
+
+    def test_none_account_uses_raw_default_fallback(self):
+        db = FakeDB(has_pool=True).on(
+            "FROM data_assets ORDER BY",
+            [Row(**self.ASSET, ingestion_status="landed")])
+
+        wb = self._export(db, account_id=None)
+
+        self.assertEqual("landed", wb["Data Sources"]["E2"].value)
+        asset_query = next(q for q in db.queries if "FROM data_assets" in q)
+        self.assertNotIn("asset_status_by_account", asset_query)
+        self.assertIn("ingestion_status FROM data_assets", asset_query)
+
+
 class MalformedImpactNodeId(unittest.TestCase):
     """A bad node id is the client's mistake: 422, never 500.
 

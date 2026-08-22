@@ -50,6 +50,8 @@ async def export_template():
         ws.add_data_validation(dv)
         dv.add(f"{column}2:{column}{ws.max_row}")
 
+    account_id = await accounts.current()
+
     # Instructions sheet
     ws0 = wb.active
     ws0.title = "Instructions"
@@ -70,7 +72,19 @@ async def export_template():
     ws1 = wb.create_sheet("Data Sources")
     ws1.append(["id", "source_category", "module", "vendor", "ingestion_status"])
     style_header(ws1, 5)
-    assets = await db.fetch("SELECT id, source_category, module, vendor, ingestion_status FROM data_assets ORDER BY source_category, id")
+    if account_id is not None:
+        assets = await db.fetch("""
+            SELECT da.id, da.source_category, da.module, da.vendor,
+                   COALESCE(s.ingestion_status, 'not_started') AS ingestion_status
+            FROM data_assets da
+            LEFT JOIN asset_status_by_account s
+                   ON s.data_asset_id = da.id AND s.account_id = $1
+            ORDER BY da.source_category, da.id
+        """, account_id)
+    else:
+        assets = await db.fetch(
+            "SELECT id, source_category, module, vendor, ingestion_status "
+            "FROM data_assets ORDER BY source_category, id")
     for a in assets:
         ws1.append([a["id"], a["source_category"], a["module"], a["vendor"] or "", a["ingestion_status"]])
     dv = DataValidation(type="list", formula1='"not_started,landed,curated,governed"', allow_blank=False)
@@ -104,7 +118,6 @@ async def export_template():
     ws3 = wb.create_sheet("Assumptions")
     ws3.append(["key", "label", "unit", "value"])
     style_header(ws3, 4)
-    account_id = await accounts.current()
     if account_id is not None:
         assumptions = await db.fetch("""
             SELECT DISTINCT ON (key) key, label, unit, value, category
