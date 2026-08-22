@@ -80,6 +80,14 @@ def entry_bundle() -> tuple[str, str]:
 REQUIRED = [
     ("gaGroupedNav",
      "the header nav is not the grouped one — the eight flat tabs are back"),
+    ('label:"Plan & Fund"',
+     "the job-based nav groups are gone; the top level is back to naming screens "
+     "instead of what the customer is trying to do"),
+    ("gaScopeSwitch",
+     "the portfolio/catalog scope switch is missing — the merged use-case "
+     "destination can only show one of its two scopes"),
+    ("Your portfolio",
+     "the scope switch lost the portfolio scope's label"),
     ("/console/#kb",
      "nothing links to the knowledge base, so the feature is invisible from the "
      "app's front door"),
@@ -143,9 +151,11 @@ SOURCE_REQUIRED = {
         "Required prerequisites:",
         "whitespace-nowrap",
     ],
+    # Every reconstructed view stays wired into the app. `CatalogView` is mounted
+    # by PortfolioView rather than here: the catalog is the same use-case list at
+    # `?scope=catalog`, so it is a scope of one destination, not a destination.
     "App.tsx": [
         "<PortfolioView",
-        "<CatalogView",
         "<RegistryView",
         "<FlywheelTab",
         "<DashboardsView",
@@ -153,6 +163,11 @@ SOURCE_REQUIRED = {
         "<JointFundingView",
         "<AssumptionsView",
         "<OnboardingView",
+    ],
+    "views/PortfolioView.tsx": [
+        "<CatalogView",
+        "<ScopeSwitch",
+        "scope === 'catalog'",
     ],
 }
 

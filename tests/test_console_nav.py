@@ -415,14 +415,48 @@ class TestSpaSourceIsTheSourceOfTruth(unittest.TestCase):
         cls.components = {path.name: path.read_text()
                           for path in sorted((src / "components").glob("*.tsx"))}
 
+    # Helpers, so the three structural tests below agree on what they are reading
+    # rather than each re-deriving it from a slightly different regex.
+
+    def declared_tab_ids(self) -> set:
+        return set(re.findall(r"id: '([a-z]+)'", self.header))
+
+    def nav_group_ids(self) -> dict:
+        """{group label: {tab ids in it}}, parsed from the `ids:` arrays only.
+
+        Reading the ids arrays rather than every quoted string in the block means
+        a group LABEL can never be mistaken for a tab id. The previous version
+        relied on labels happening to be capitalised — it carried a skip list for
+        the then-current labels ("Analyze", "Plan") that the lowercase-only regex
+        could never have matched anyway, so a lowercase label would have been
+        silently asserted as a tab id.
+        """
+        block = re.search(r"const NAV_GROUPS[^=]*=\s*\[(.*?)\n\]", self.header, re.S)
+        assert block, "could not parse NAV_GROUPS"
+        groups = {}
+        for label, ids in re.findall(r"label: '([^']+)',\s*ids: \[([^\]]*)\]",
+                                     block.group(1)):
+            groups[label] = set(re.findall(r"'([a-z]+)'", ids))
+        assert groups, "NAV_GROUPS parsed as empty — the format changed"
+        return groups
+
     def test_the_tab_list_is_declared_once(self):
-        """One TABS array is the single source of what the nav can reach."""
+        """One TABS array is the single source of what the nav can reach.
+
+        `catalog` is deliberately absent: it is the same use-case list at
+        `?scope=catalog`, so it is a scope switch inside the portfolio
+        destination, not a tab. See components/ScopeSwitch.tsx.
+        """
         self.assertIn("export const TABS", self.header,
                       "the tab list must be exported data, not markup")
-        for tab_id in ("portfolio", "catalog", "registry", "flywheel",
-                       "dashboards", "roadmap", "funding", "value"):
+        for tab_id in ("portfolio", "registry", "flywheel", "dashboards",
+                       "roadmap", "funding", "value", "onboarding"):
             self.assertIn(f"id: '{tab_id}'", self.header,
                           f"the {tab_id} tab is not in TABS")
+        self.assertNotIn("id: 'catalog'", self.header,
+                         "the catalog is a scope of the portfolio destination, "
+                         "not a top-level tab — re-adding it restores the "
+                         "duplication the merge removed")
 
     def test_groups_resolve_tabs_by_id_instead_of_restating_them(self):
         """The replacement for the old `Dg.find(x=>x.id===` assertion.
@@ -435,27 +469,81 @@ class TestSpaSourceIsTheSourceOfTruth(unittest.TestCase):
                       "nav groups must look tabs up in TABS, not restate them")
         self.assertRegex(self.header, r"NAV_GROUPS[^=]*=\s*\[",
                          "the groups must be declared as data")
-        # The group members must be ids that exist, not free-standing labels.
-        groups = re.search(r"const NAV_GROUPS[^=]*=\s*\[(.*?)\n\]",
-                           self.header, re.S)
-        self.assertIsNotNone(groups, "could not parse NAV_GROUPS")
-        declared = set(re.findall(r"id: '([a-z]+)'", self.header))
-        for member in re.findall(r"'([a-z]+)'", groups.group(1)):
-            if member in ("Analyze", "Plan"):
-                continue
-            self.assertIn(member, declared,
-                          f"nav group references {member!r}, which is not a tab id")
+        declared = self.declared_tab_ids()
+        for label, ids in self.nav_group_ids().items():
+            self.assertNotEqual(ids, set(), f"nav group {label!r} holds no tabs")
+            for member in ids:
+                self.assertIn(member, declared,
+                              f"nav group {label!r} references {member!r}, "
+                              "which is not a tab id")
+
+    def test_the_groups_are_named_for_the_job_not_the_screen(self):
+        """The top level asks what you are DOING, and stays short.
+
+        A flat row of eight destinations — two of which were one list at two
+        scopes — made the app read as eight unrelated screens. The value of the
+        grouping is that the top-level choice is small and job-shaped, so both
+        properties are asserted rather than left to drift back.
+        """
+        groups = self.nav_group_ids()
+        self.assertLessEqual(len(groups), 4,
+                             f"{len(groups)} nav groups is not a grouping — the "
+                             "top level is drifting back to a flat tab row")
+        for expected in ("Portfolio", "Plan & Fund", "Value"):
+            self.assertIn(expected, groups,
+                          f"the {expected!r} nav group is gone")
 
     def test_every_grouped_tab_is_reachable(self):
-        """A tab in TABS but in no group, and not top-level, is dead code."""
-        groups = re.search(r"const NAV_GROUPS[^=]*=\s*\[(.*?)\n\]",
-                           self.header, re.S).group(1)
-        grouped = set(re.findall(r"'([a-z]+)'", groups))
-        declared = set(re.findall(r"id: '([a-z]+)'", self.header))
-        # Portfolio is rendered as a standalone top-level button, not in a menu.
-        unreachable = declared - grouped - {"portfolio"}
+        """A tab in TABS but in no group, and not top-level, is dead code.
+
+        This is the test that would have caught `onboarding`: it was in TabId and
+        rendered by App.tsx but in neither TABS nor a group, so OnboardingView
+        could not be reached from the UI at all. It is now a tab, exempt below
+        because it renders as its own top-level entry-point button.
+        """
+        grouped = set().union(*self.nav_group_ids().values())
+        # The entry-point surface is a standalone top-level button, not in a menu.
+        entry = re.search(r"const ENTRY_TAB: TabId = '([a-z]+)'", self.header)
+        self.assertIsNotNone(entry, "no ENTRY_TAB declared")
+        unreachable = self.declared_tab_ids() - grouped - {entry.group(1)}
         self.assertEqual(unreachable, set(),
                          f"tabs unreachable from the nav: {sorted(unreachable)}")
+
+    def test_every_tab_id_is_a_tab(self):
+        """The converse: a TabId the nav never offers is a view nobody can open.
+
+        `onboarding` was exactly this — a valid TabId, rendered by App.tsx, in no
+        TABS entry and no group.
+        """
+        union = re.search(r"export type TabId =(.*?)\n\n", self.header, re.S)
+        self.assertIsNotNone(union, "could not parse the TabId union")
+        declared = self.declared_tab_ids()
+        for member in re.findall(r"'([a-z]+)'", union.group(1)):
+            self.assertIn(member, declared,
+                          f"TabId {member!r} has no entry in TABS, so no nav "
+                          "item can reach the view it names")
+
+    def test_the_catalog_is_a_scope_of_the_portfolio_not_a_second_view(self):
+        """Portfolio and Catalog read the SAME endpoint, differing only by `?scope=`.
+
+        They were two top-level tabs, which made a data filter look like a
+        destination and split "what should we build" across two places. The merge
+        is only real if the catalog is still REACHABLE from the merged view — a
+        collapse that drops a scope is deletion, not consolidation.
+        """
+        portfolio = self.views["PortfolioView.tsx"]
+        self.assertIn("<ScopeSwitch", portfolio,
+                      "the merged use-case view offers no scope switch")
+        self.assertIn("<CatalogView", portfolio,
+                      "the catalog scope is not rendered, so the catalog became "
+                      "unreachable rather than merged")
+        app = (ROOT / "frontend" / "src" / "App.tsx").read_text()
+        self.assertNotIn("tab === 'catalog'", app,
+                         "the catalog is still switched on as its own tab")
+        # Both scopes filter through the shared FilterContext, which is the reason
+        # a narrowing survives the flip between them.
+        self.assertIn("matchesUseCase", self.views["CatalogView.tsx"])
+        self.assertIn("matchesUseCase", portfolio)
 
     def test_the_console_links_are_present(self):
         for href in ("/console/#kb", "/console/#proposals", "/console/"):
