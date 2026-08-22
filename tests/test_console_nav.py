@@ -491,13 +491,15 @@ class TestSpaSourceIsTheSourceOfTruth(unittest.TestCase):
         """
         groups = self.nav_group_ids()
         expected_groups = {
-            "Portfolio": {"portfolio", "flywheel", "registry", "dashboards"},
-            "Plan & Fund": {"roadmap", "funding"},
-            "Value": {"value"},
+            "Portfolio": {
+                "portfolio", "flywheel", "registry", "dashboards", "coverage",
+                "whatif", "trend",
+            },
+            "Plan & Fund": {"roadmap", "funding", "executive"},
+            "Value": {"value", "research"},
             "Knowledge": {
-                "coverage", "whatif", "trend", "glossary", "artifacts",
-                "executive", "knowledge", "sourcemapping", "taxonomy",
-                "rules", "research",
+                "knowledge", "glossary", "taxonomy", "sourcemapping", "rules",
+                "artifacts",
             },
             "Settings": {"accounts", "admin", "branding"},
         }
