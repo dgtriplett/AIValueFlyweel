@@ -160,6 +160,92 @@ class AccountScopedDataSourceExport(unittest.TestCase):
         self.assertIn("ingestion_status FROM data_assets", asset_query)
 
 
+class AccountScopedUseCaseWorkbook(unittest.TestCase):
+    """Catalog rows are shared; custom use cases stay inside their portfolio."""
+
+    CATALOG = Row(id=1, title="Shared Catalog", domain="Operations", phase=1,
+                  status="not_started", priority_score=1, value_mm=1.0)
+    ACCOUNT_A = Row(id=2, title="Project Nightingale (Tenant A confidential)",
+                    domain="Operations", phase=1, status="scoping",
+                    priority_score=2, value_mm=2.0)
+    ACCOUNT_B = Row(id=3, title="Tenant B Custom", domain="Operations", phase=1,
+                    status="in_progress", priority_score=3, value_mm=3.0)
+    ALL_ROWS = [CATALOG, ACCOUNT_A, ACCOUNT_B]
+
+    class VisibilityDB(FakeDB):
+        def __init__(self):
+            super().__init__(has_pool=True)
+            self.calls = []
+
+        async def fetch(self, sql, *args):
+            self.queries.append(sql)
+            self.calls.append((sql, args))
+            if "FROM use_cases" not in sql:
+                return []
+            scoped = ("origin = 'catalog'" in sql
+                      and "account_portfolio_use_cases" in sql
+                      and args == (22,))
+            if scoped:
+                return [AccountScopedUseCaseWorkbook.CATALOG,
+                        AccountScopedUseCaseWorkbook.ACCOUNT_B]
+            return AccountScopedUseCaseWorkbook.ALL_ROWS
+
+    @staticmethod
+    def _parsed_use_cases():
+        return {
+            "data_sources": [],
+            "use_cases": [
+                {"id": row["id"], "status": row["status"], "priority": None,
+                 "value_base_mm": None, "notes": None}
+                for row in AccountScopedUseCaseWorkbook.ALL_ROWS
+            ],
+            "assumptions": [],
+        }
+
+    def _run_for_account(self, account_id):
+        db = self.VisibilityDB()
+        with mock.patch.object(onboarding, "db", db), \
+             mock.patch.object(onboarding.accounts, "current",
+                               mock.AsyncMock(return_value=account_id)):
+            wb = load_workbook_bytes(run(collect_body(onboarding.export_template())))
+            changes, errors = run(onboarding._compute_import(self._parsed_use_cases()))
+        return db, wb, changes, errors
+
+    def test_account_sees_catalog_and_own_custom_in_export_and_import(self):
+        db, wb, changes, errors = self._run_for_account(22)
+
+        titles = [row[1].value for row in wb["Use Cases"].iter_rows(min_row=2)]
+        self.assertEqual(["Shared Catalog", "Tenant B Custom"], titles)
+        self.assertNotIn("Project Nightingale (Tenant A confidential)", titles)
+        self.assertEqual([], changes["use_cases"])
+        self.assertEqual(["Use case id 2 not found"], errors)
+
+        use_case_calls = [(sql, args) for sql, args in db.calls
+                          if "FROM use_cases" in sql]
+        self.assertEqual(2, len(use_case_calls), "expected export + import queries")
+        for sql, args in use_case_calls:
+            self.assertIn("origin = 'catalog'", sql)
+            self.assertIn("account_portfolio_use_cases", sql)
+            self.assertIn("ap.account_id = $1", sql)
+            self.assertEqual((22,), args)
+
+    def test_none_account_keeps_export_and_import_unscoped(self):
+        db, wb, changes, errors = self._run_for_account(None)
+
+        titles = [row[1].value for row in wb["Use Cases"].iter_rows(min_row=2)]
+        self.assertEqual([row["title"] for row in self.ALL_ROWS], titles)
+        self.assertEqual([], changes["use_cases"])
+        self.assertEqual([], errors)
+
+        use_case_calls = [(sql, args) for sql, args in db.calls
+                          if "FROM use_cases" in sql]
+        self.assertEqual(2, len(use_case_calls), "expected export + import queries")
+        for sql, args in use_case_calls:
+            self.assertNotIn("account_portfolio_use_cases", sql)
+            self.assertNotIn("origin = 'catalog'", sql)
+            self.assertEqual((), args)
+
+
 class MalformedImpactNodeId(unittest.TestCase):
     """A bad node id is the client's mistake: 422, never 500.
 
