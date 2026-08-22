@@ -272,6 +272,16 @@ tests['frontend source has no bare anchor downloads from /api'] = () => {
   assert.deepEqual(offenders, [], `anchor downloads bypass the account header: ${offenders}`)
 }
 
+tests['what-if source enforces and explains server selection caps'] = () => {
+  const source = readFileSync('src/views/WhatIfView.tsx', 'utf8')
+  assert.match(source, /const MAX_PROJECTION_SOURCES = 12/)
+  assert.match(source, /const MAX_COMPARISON_OPTIONS = 6/)
+  assert.match(source, /selected\.size < 2 \|\| comparisonLimitExceeded/)
+  assert.match(source, /disabled=\{projectionLimitReached && !selected\.has/)
+  assert.match(source, /Project up to \$\{MAX_PROJECTION_SOURCES\} sources/)
+  assert.match(source, /Comparison is unavailable with \$\{selected\.size\} sources selected/)
+}
+
 // ---------------------------------------------------------------------------
 // 2. 429 becomes an ApiError carrying Retry-After
 // ---------------------------------------------------------------------------
