@@ -34,6 +34,10 @@ import { StatStrip } from '../components/StatStrip'
 import { useApiErrorToast } from '../components/Toasts'
 import type { WhatIfComparison, WhatIfProjection, WhatIfUseCase } from '../types'
 
+const MAX_PROJECTION_SOURCES = 12
+const MAX_COMPARISON_OPTIONS = 6
+const MAX_COMPARISON_SOURCES = MAX_COMPARISON_OPTIONS - 1
+
 /** `$1.25M` from raw dollars. The candidate costs come off the API unscaled,
  *  while every *value* field is already in $M — mixing them up by one factor of
  *  a million is the one arithmetic error this screen cannot survive. */
@@ -77,12 +81,15 @@ export default function WhatIfView() {
 
   const rows = candidates.data?.candidates ?? []
   const busy = simulate.isPending || compare.isPending
+  const projectionLimitReached = selected.size >= MAX_PROJECTION_SOURCES
+  const comparisonLimitReached = selected.size === MAX_COMPARISON_SOURCES
+  const comparisonLimitExceeded = selected.size > MAX_COMPARISON_SOURCES
 
   const toggle = (id: number) =>
     setSelected((current) => {
       const next = new Set(current)
       if (next.has(id)) next.delete(id)
-      else next.add(id)
+      else if (next.size < MAX_PROJECTION_SOURCES) next.add(id)
       return next
     })
 
@@ -137,10 +144,12 @@ export default function WhatIfView() {
               // Two is the floor the server enforces (`CompareIn.options`
               // min_length=2) and the floor the question needs — comparing one
               // option against nothing is just a projection.
-              disabled={busy || selected.size < 2}
+              disabled={busy || selected.size < 2 || comparisonLimitExceeded}
               title={
                 selected.size < 2
                   ? 'Select at least two sources. Each is compared on its own, then all together.'
+                  : comparisonLimitExceeded
+                    ? `Comparison supports at most ${MAX_COMPARISON_SOURCES} selected sources.`
                   : undefined
               }
               onClick={() => compare.mutate([...selected])}
@@ -160,6 +169,27 @@ export default function WhatIfView() {
             <span className="text-xs text-navy-500">
               {selected.size ? `${selected.size} selected` : 'Nothing selected'}
             </span>
+          </div>
+          <div className="space-y-1 text-xs max-w-[70ch]" id="whatif-selection-limits">
+            <p className="text-navy-500">
+              {`Project up to ${MAX_PROJECTION_SOURCES} sources. Compare up to ${MAX_COMPARISON_SOURCES} selected sources (${MAX_COMPARISON_OPTIONS} options including the combined set).`}
+            </p>
+            {projectionLimitReached ? (
+              <p className="text-amber-300" role="status">
+                {`Projection limit reached: remove a source before selecting another. The server accepts at most ${MAX_PROJECTION_SOURCES} sources per simulation.`}
+              </p>
+            ) : null}
+            {comparisonLimitReached ? (
+              <p className="text-amber-300" role="status">
+                Comparison limit reached. You can still select more sources for one projection, but
+                comparison is limited to five individual options plus their combined set.
+              </p>
+            ) : null}
+            {comparisonLimitExceeded ? (
+              <p className="text-amber-300" role="status">
+                {`Comparison is unavailable with ${selected.size} sources selected. Remove ${selected.size - MAX_COMPARISON_SOURCES} to compare, or run one projection with the current selection.`}
+              </p>
+            ) : null}
           </div>
 
           <div className="card p-0 overflow-x-auto">
@@ -187,9 +217,11 @@ export default function WhatIfView() {
                         id={`whatif-${candidate.data_asset_id}`}
                         name={`whatif-${candidate.data_asset_id}`}
                         aria-label={`Include ${candidate.module} in the projection`}
+                        aria-describedby="whatif-selection-limits"
                         checked={selected.has(candidate.data_asset_id)}
+                        disabled={projectionLimitReached && !selected.has(candidate.data_asset_id)}
                         onChange={() => toggle(candidate.data_asset_id)}
-                        className="cursor-pointer"
+                        className="cursor-pointer disabled:cursor-not-allowed disabled:opacity-50"
                       />
                     </td>
                     <td className="px-3 py-2.5">
