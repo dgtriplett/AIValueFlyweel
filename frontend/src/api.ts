@@ -6,12 +6,16 @@
 // served from the same origin as FastAPI; the vite dev server proxies it.
 
 import axios from 'axios'
+import { ACCOUNT_HEADER, accountId } from './lib/account'
+import { describeError } from './lib/errors'
 import type {
   Assumption,
   BlastRadiusResponse,
   BlastNode,
   CatalogRecommendResponse,
   Comment,
+  ConfirmApplyResponse,
+  ConfirmCardData,
   DashboardData,
   DataAsset,
   DetectDependenciesResponse,
@@ -31,12 +35,70 @@ import type {
   RoadmapResponse,
   SourceRecommendResponse,
   NetworkResponse,
+  OnboardingImportResponse,
   UnlocksResponse,
   UseCase,
   UseCaseDetail,
 } from './types'
 
 export const http = axios.create({ baseURL: '/api' })
+
+// The selected account travels on EVERY request, injected once here.
+//
+// Deliberately an interceptor and not a per-call-site header, for the reason the
+// console records at `console.js:61-70`: scoping each fetch remembers to apply
+// "fails silently and shows one customer another's numbers". A forgotten header
+// does not raise — the server quietly falls back to the default account
+// (`server/accounts.py:19-22`) — so the failure surfaces as one tenant reading
+// another's numbers, which is the worst way to find out.
+//
+// Anything reaching the API outside axios must add the header itself; the two
+// raw-`fetch` writes use `accountHeaders()` from `lib/account`, and §4.1 of
+// TIER3_MIGRATION_PLAN.md tracks the remaining anchor-href downloads.
+http.interceptors.request.use((config) => {
+  const id = accountId()
+  if (id) config.headers.set(ACCOUNT_HEADER, id)
+  return config
+})
+
+// One place translates a failed response into an `ApiError`.
+//
+// Without this, `error.response.data.detail` chains grow at each call site and
+// disagree about which shapes to check — and the messages that matter most get
+// dropped. `server/limits.py:169-195` returns 429 with `Retry-After` and a
+// deliberately actionable message ("wait 12s and try again"); `GeniePanel` used
+// to discard it and tell the user the assistant was broken.
+//
+// Rejecting with an `ApiError` rather than the `AxiosError` means callers narrow
+// with `isApiError` and never touch axios' error shape. React Query treats any
+// rejection as a failure exactly as before, so this changes what an error SAYS,
+// not when one happens.
+http.interceptors.response.use(undefined, (error: unknown) => {
+  if (axios.isCancel(error)) return Promise.reject(error)
+  if (axios.isAxiosError(error)) {
+    return Promise.reject(
+      describeError({
+        status: error.response?.status ?? null,
+        body: error.response?.data,
+        // `AxiosHeaders` is case-insensitive on `get`, and a plain-object
+        // fallback covers a mocked adapter in tests.
+        header: (name) => {
+          const headers = error.response?.headers
+          if (!headers) return null
+          if (typeof headers.get === 'function') {
+            const value = headers.get(name)
+            return typeof value === 'string' ? value : null
+          }
+          const record = headers as unknown as Record<string, unknown>
+          const hit = record[name] ?? record[name.toLowerCase()]
+          return typeof hit === 'string' ? hit : null
+        },
+        cause: error,
+      }),
+    )
+  }
+  return Promise.reject(error)
+})
 
 /** The scopes the catalog/portfolio switcher offers. `all` is the full universe. */
 export type UseCaseScope = 'portfolio' | 'catalog' | 'all'
@@ -94,6 +156,12 @@ export const api = {
 
   updateDataAsset: (id: number, body: Partial<DataAsset>) =>
     http.put<DataAsset>(`/data-assets/${id}`, body).then((r) => r.data),
+
+  /** Marks the row user-edited server-side, so a resync will not overwrite it. */
+  setIngestionStatus: (id: number, ingestion_status: string) =>
+    http
+      .patch<DataAsset>(`/data-assets/${id}/status`, { ingestion_status })
+      .then((r) => r.data),
 
   deleteDataAsset: (id: number) =>
     http.delete<{ deleted: boolean }>(`/data-assets/${id}`).then((r) => r.data),
@@ -210,10 +278,42 @@ export const api = {
       .put<FundingRequest>(`/joint-funding/request/${id}`, { status, sponsor })
       .then((r) => r.data),
 
+  /**
+   * Preview or apply an onboarding workbook.
+   *
+   * The one multipart upload in the app. It goes through `http` like everything
+   * else so the account interceptor scopes it; axios derives the multipart
+   * boundary from the `FormData` itself, so no `Content-Type` is set here —
+   * setting one by hand omits the boundary and the server cannot parse the body.
+   *
+   * Generic in the response so a caller can narrow the diff rows it renders
+   * (`OnboardingView` adds the row ids it keys on) without widening the shared
+   * type for everyone.
+   */
+  importOnboarding: <T = OnboardingImportResponse>(body: FormData, apply: boolean) =>
+    http.post<T>(`/onboarding/import?apply=${apply}`, body).then((r) => r.data),
+
   genieAsk: (question: string, conversation_id?: string | null) =>
     http
       .post<GenieAskResponse>('/genie/ask', { question, conversation_id })
       .then((r) => r.data),
+
+  /**
+   * Re-read a pending confirm card without consuming it.
+   * 404 when the token was never issued; a real token that is expired or already
+   * applied comes back with `expired` / `consumed_at` set, which is what lets
+   * `<ConfirmCard>` explain the state instead of just failing to apply.
+   */
+  readConfirm: (token: string) =>
+    http.get<ConfirmCardData>(`/confirm/${token}`).then((r) => r.data),
+
+  /**
+   * Consume a token and perform its write. Single-use.
+   * 409 covers already-applied and expired alike (`routes/generate.py:437-441`);
+   * the server's `detail` distinguishes them in words meant to be shown.
+   */
+  applyConfirm: (token: string) =>
+    http.post<ConfirmApplyResponse>(`/confirm/${token}`).then((r) => r.data),
 }
 
 /** Value-model helper: the drawer and the wizard both read components this way. */

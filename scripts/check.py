@@ -102,6 +102,33 @@ def check_app_imports() -> Result:
     return Result(name, "PASS")
 
 
+def check_frontend_tests() -> Result:
+    """The SPA's plumbing unit tests (account header, 429 -> ApiError, ConfirmCard).
+
+    Delegates to scripts/check_frontend_tests.py, which prints a `SKIP:` line and
+    exits 0 when the toolchain it needs is absent — CI pins node 20 and installs no
+    npm packages, so it cannot run these. That is reported as SKIP rather than PASS
+    here for the same reason as every other gate: a green summary must never stand
+    in for a check that never executed. See that script's docstring for why adding
+    `npm ci` to CI to run 24 assertions is the wrong trade.
+    """
+    name = "frontend plumbing tests"
+    script = ROOT / "scripts" / "check_frontend_tests.py"
+    if not script.exists():
+        return Result(name, "SKIP", "check_frontend_tests.py missing")
+    print(f"\n=== {name}\n    $ python3 {script.relative_to(ROOT)}", flush=True)
+    completed = subprocess.run([sys.executable, str(script)],
+                               cwd=ROOT, capture_output=True, text=True)
+    output = (completed.stdout + completed.stderr).strip()
+    if output:
+        print("\n".join(f"    {line}" for line in output.split("\n")[-40:]))
+    if completed.returncode != 0:
+        return Result(name, "FAIL", f"exit {completed.returncode}")
+    if output.startswith("SKIP:"):
+        return Result(name, "SKIP", output[len("SKIP:"):].strip())
+    return Result(name, "PASS")
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__,
                                      formatter_class=argparse.RawDescriptionHelpFormatter)
@@ -146,6 +173,7 @@ def main() -> int:
         results.append(run("SPA bundle carries the source's behaviour",
                            [sys.executable, str(ROOT / "scripts"
                                                 / "check_spa_bundle.py")]))
+        results.append(check_frontend_tests())
 
     print("\n" + "=" * 62)
     for result in results:

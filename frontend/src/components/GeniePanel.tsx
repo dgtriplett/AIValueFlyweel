@@ -8,12 +8,17 @@ import { useRef, useState } from 'react'
 import { Bot, Send, Sparkles, X } from 'lucide-react'
 
 import { api } from '../api'
+import { isLimited, messageOf, retryHint } from '../lib/errors'
+import { useApiErrorToast } from './Toasts'
 
 interface Message {
   role: 'assistant' | 'user'
   text: string
   sql?: string | null
 }
+
+/** Used only when the failure carried no message at all — an offline request. */
+const FALLBACK = 'Sorry — the assistant is unavailable right now.'
 
 const SEED: Message = {
   role: 'assistant',
@@ -26,6 +31,7 @@ export function GeniePanel() {
   const [question, setQuestion] = useState('')
   const [loading, setLoading] = useState(false)
   const conversationId = useRef<string | undefined>(undefined)
+  const toastError = useApiErrorToast()
 
   const send = async () => {
     const trimmed = question.trim()
@@ -40,11 +46,23 @@ export function GeniePanel() {
         ...current,
         { role: 'assistant', text: response.answer, sql: response.sql },
       ])
-    } catch {
+    } catch (error) {
+      // Say what actually happened. This used to be an unconditional "the
+      // assistant is unavailable", which told a rate-limited user the feature was
+      // broken (TIER3_MIGRATION_PLAN.md §4.4). The `chat` limit is 6 burst / 20 per
+      // minute (`server/limits.py:131`) and its 429 body is written to be shown
+      // verbatim, so discarding it threw away the one sentence that said what to do.
+      //
+      // Two surfaces on purpose: the reason goes in the transcript, next to the
+      // question it failed to answer, and a toast covers the case where the panel
+      // was closed while the request was in flight.
+      const reason = messageOf(error, FALLBACK)
+      const hint = isLimited(error) ? retryHint(error) : null
       setMessages((current) => [
         ...current,
-        { role: 'assistant', text: 'Sorry — the assistant is unavailable right now.' },
+        { role: 'assistant', text: hint ? `${reason} Try again ${hint}.` : reason },
       ])
+      toastError(error, FALLBACK)
     } finally {
       setLoading(false)
     }
