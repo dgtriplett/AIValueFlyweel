@@ -19,6 +19,7 @@ import type { TabId } from './components/Header'
 import { NewUseCaseModal } from './components/NewUseCaseModal'
 import type { UseCaseView } from './components/ScopeSwitch'
 import { StatCard } from './components/StatCard'
+import { ToastProvider } from './components/Toasts'
 import { UseCaseDrawer } from './components/UseCaseDrawer'
 import { PortfolioView } from './views/PortfolioView'
 import { RegistryView } from './views/RegistryView'
@@ -171,8 +172,14 @@ function AppShell() {
 
 export default function App() {
   return (
-    <FilterProvider>
-      <AppShell />
-    </FilterProvider>
+    // ToastProvider is OUTSIDE FilterProvider, so a failure can be reported even
+    // if it happened while filter state was being torn down, and so the fixed
+    // viewport it renders is a sibling of the shell rather than inside <main>'s
+    // stacking context — a toast that loses a z-index fight is a toast nobody sees.
+    <ToastProvider>
+      <FilterProvider>
+        <AppShell />
+      </FilterProvider>
+    </ToastProvider>
   )
 }

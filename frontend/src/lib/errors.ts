@@ -171,3 +171,29 @@ export function retryHint(error: ApiError): string | null {
   if (seconds < 60) return `in ${Math.max(1, seconds)}s`
   return `in ${Math.ceil(seconds / 60)}m`
 }
+
+/**
+ * The sentence to show for any caught failure, preferring the server's own words.
+ *
+ * `ApiError.message` is already FastAPI's `detail` when there was one, and the
+ * limit messages are written to be shown verbatim. The `fallback` therefore only
+ * covers a failure that carried no body — an offline request, or a thrown
+ * non-`Error`. Lives here rather than at a call site because every surface that
+ * catches needs exactly this and they must not each invent their own phrasing.
+ */
+export function messageOf(error: unknown, fallback = 'Something went wrong.'): string {
+  if (isApiError(error)) return error.message || fallback
+  if (error instanceof Error && error.message) return error.message
+  return fallback
+}
+
+/**
+ * Is a rate limit the reason this failed?
+ *
+ * Narrows to `ApiError` so a caller can pass the result straight to `retryHint`.
+ * The distinction callers need it for: a limit means "wait, then this will work",
+ * every other error means "this did not work", and those deserve different words.
+ */
+export function isLimited(error: unknown): error is ApiError {
+  return isApiError(error) && error.isRateLimited
+}
