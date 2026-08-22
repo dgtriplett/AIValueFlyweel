@@ -463,6 +463,36 @@ export interface DemoStatus {
   error?: string
 }
 
+/**
+ * A pending write, held server-side behind a single-use expiring token.
+ *
+ * Issued by `server/confirm.py:79-113` and re-readable via `GET /confirm/{token}`
+ * without consuming it. `before`/`after` are display-only — the executor reads a
+ * `payload` the client never sees, so a rendering change cannot alter what gets
+ * written.
+ */
+export interface ConfirmCardData {
+  token: string
+  intent: string
+  /** ISO-8601. The token stops being usable at this instant. */
+  expires_at?: string | null
+  summary?: string | null
+  before?: Record<string, unknown>
+  after?: Record<string, unknown>
+  /** Set on a peeked token that has already been used (`GET /confirm/{token}`). */
+  consumed_at?: string | null
+  /** Server-computed `expires_at <= now()`, so the client need not trust its clock. */
+  expired?: boolean
+}
+
+/** The result of consuming a token. Executors merge their own keys in. */
+export interface ConfirmApplyResponse {
+  ok: boolean
+  intent: string
+  elapsed_ms?: number
+  [key: string]: unknown
+}
+
 export interface OnboardingImportResponse {
   apply: boolean
   applied?: number

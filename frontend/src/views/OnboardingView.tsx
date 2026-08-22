@@ -100,20 +100,20 @@ function ExcelCard() {
   const [pending, setPending] = useState<File | null>(null)
   const [busy, setBusy] = useState(false)
 
-  // A raw fetch and not an `api.*` method: this is the one multipart upload in the
-  // app, and axios' JSON defaults would have to be undone for it anyway. Applying
-  // rewrites sources, use cases and assumptions at once, so every cache that reads
-  // any of them — including the two derived totals — has to go.
+  // Routed through the shared axios instance rather than a raw `fetch`, so the
+  // account interceptor scopes it like every other request — a multipart upload
+  // that lands in the DEFAULT account while the rest of the app reads the
+  // selected one is the exact failure §4.1 of the migration plan warns about.
+  // axios sets the multipart boundary itself when handed a FormData, so there
+  // are no JSON defaults to undo. Applying rewrites sources, use cases and
+  // assumptions at once, so every cache that reads any of them — including the
+  // two derived totals — has to go.
   const send = async (file: File, apply: boolean) => {
     setBusy(true)
     try {
       const body = new FormData()
       body.append('file', file)
-      const response = await fetch(`/api/onboarding/import?apply=${apply}`, {
-        method: 'POST',
-        body,
-      })
-      const preview = (await response.json()) as ImportPreview
+      const preview = await api.importOnboarding<ImportPreview>(body, apply)
       if (apply) {
         queryClient.invalidateQueries({ queryKey: ['data-assets'] })
         queryClient.invalidateQueries({ queryKey: ['use-cases'] })

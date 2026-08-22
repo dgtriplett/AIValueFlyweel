@@ -46,19 +46,15 @@ export function RegistryView({
     onSuccess: () => queryClient.invalidateQueries({ queryKey: ['data-assets'] }),
   })
 
-  // PATCH /data-assets/{id}/status is deliberately a raw fetch and not an `api.*`
-  // method: it is the one write that marks the row as user-edited server-side, and
-  // it predates the axios wrapper. Landing a module can flip a use case's
-  // readiness and redraw the blast radius, so all three caches go.
+  // Was a raw `fetch` that predated the axios wrapper, which meant this write —
+  // the one that marks a row user-edited server-side — carried no account header,
+  // so it could land against a different tenant than the rows on screen. It is an
+  // `api.*` method now, scoped by the shared interceptor like every other call.
+  // Landing a module can flip a use case's readiness and redraw the blast radius,
+  // so all three caches go.
   const setIngestion = useMutation({
-    mutationFn: async ({ id, status }: { id: number; status: IngestionStatus }) => {
-      const response = await fetch(`/api/data-assets/${id}/status`, {
-        method: 'PATCH',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ ingestion_status: status }),
-      })
-      return (await response.json()) as DataAsset
-    },
+    mutationFn: ({ id, status }: { id: number; status: IngestionStatus }) =>
+      api.setIngestionStatus(id, status),
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ['data-assets'] })
       queryClient.invalidateQueries({ queryKey: ['use-cases'] })
