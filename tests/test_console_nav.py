@@ -450,7 +450,11 @@ class TestSpaSourceIsTheSourceOfTruth(unittest.TestCase):
         self.assertIn("export const TABS", self.header,
                       "the tab list must be exported data, not markup")
         for tab_id in ("portfolio", "registry", "flywheel", "dashboards",
-                       "roadmap", "funding", "value", "onboarding"):
+                       "roadmap", "funding", "value", "coverage", "whatif",
+                       "trend", "glossary", "artifacts", "executive",
+                       "knowledge", "sourcemapping", "taxonomy", "rules",
+                       "research", "accounts", "admin", "branding",
+                       "onboarding"):
             self.assertIn(f"id: '{tab_id}'", self.header,
                           f"the {tab_id} tab is not in TABS")
         self.assertNotIn("id: 'catalog'", self.header,
@@ -486,12 +490,19 @@ class TestSpaSourceIsTheSourceOfTruth(unittest.TestCase):
         properties are asserted rather than left to drift back.
         """
         groups = self.nav_group_ids()
-        self.assertLessEqual(len(groups), 4,
-                             f"{len(groups)} nav groups is not a grouping — the "
-                             "top level is drifting back to a flat tab row")
-        for expected in ("Portfolio", "Plan & Fund", "Value"):
-            self.assertIn(expected, groups,
-                          f"the {expected!r} nav group is gone")
+        expected_groups = {
+            "Portfolio": {"portfolio", "flywheel", "registry", "dashboards"},
+            "Plan & Fund": {"roadmap", "funding"},
+            "Value": {"value"},
+            "Knowledge": {
+                "coverage", "whatif", "trend", "glossary", "artifacts",
+                "executive", "knowledge", "sourcemapping", "taxonomy",
+                "rules", "research",
+            },
+            "Settings": {"accounts", "admin", "branding"},
+        }
+        self.assertEqual(groups, expected_groups,
+                         "the grouped nav no longer matches the Tier 3 shell")
 
     def test_every_grouped_tab_is_reachable(self):
         """A tab in TABS but in no group, and not top-level, is dead code.

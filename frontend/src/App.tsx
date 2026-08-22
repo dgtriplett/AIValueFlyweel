@@ -33,6 +33,15 @@ const JointFundingView = lazy(() => import('./views/JointFundingView'))
 const AssumptionsView = lazy(() => import('./views/AssumptionsView'))
 const OnboardingView = lazy(() => import('./views/OnboardingView'))
 
+function ComingSoon({ label }: { label: string }) {
+  return (
+    <section className="rounded-xl border border-navy-700 bg-navy-800 px-6 py-10 text-center">
+      <h2 className="text-lg font-semibold text-white">{label}</h2>
+      <p className="mt-2 text-sm text-navy-400">This feature is being migrated into the app.</p>
+    </section>
+  )
+}
+
 function AppShell() {
   const [tab, setTab] = useState<TabId>('portfolio')
   // Which use-case scope the merged destination shows. Owned here, not in the
@@ -68,6 +77,70 @@ function AppShell() {
   const realizedValue = useCases.reduce((sum, uc) => sum + (uc.realized?.value ?? 0), 0)
   const shovelReady = useCases.filter((uc) => uc.readiness === 'shovel_ready').length
   const governed = assets.filter((asset) => asset.ingestion_status === 'governed').length
+
+  const renderActiveView = () => {
+    switch (tab) {
+      case 'onboarding':
+        return <OnboardingView />
+      case 'portfolio':
+        return (
+          <PortfolioView
+            useCases={useCases}
+            lobs={lobs}
+            onOpen={setDrawerUcId}
+            onNew={() => setCreating(true)}
+            scope={ucScope}
+            onScope={setUcScope}
+            loading={useCasesQuery.isLoading}
+            error={useCasesQuery.isError}
+          />
+        )
+      case 'registry':
+        return <RegistryView lobs={lobs} onOpenUseCase={setDrawerUcId} />
+      case 'flywheel':
+        return <FlywheelTab focusUcId={focusUcId} onOpen={setDrawerUcId} />
+      case 'dashboards':
+        return <DashboardsView />
+      case 'roadmap':
+        return <RoadmapView lobs={lobs} onOpen={setDrawerUcId} />
+      case 'funding':
+        return <JointFundingView lobs={lobs} />
+      case 'value':
+        return <AssumptionsView />
+      case 'coverage':
+        return <ComingSoon label="Coverage" />
+      case 'whatif':
+        return <ComingSoon label="What-if Analysis" />
+      case 'trend':
+        return <ComingSoon label="Trend Analysis" />
+      case 'glossary':
+        return <ComingSoon label="Glossary" />
+      case 'artifacts':
+        return <ComingSoon label="Artifacts" />
+      case 'executive':
+        return <ComingSoon label="Executive Brief" />
+      case 'knowledge':
+        return <ComingSoon label="Knowledge Base" />
+      case 'sourcemapping':
+        return <ComingSoon label="Source Mapping" />
+      case 'taxonomy':
+        return <ComingSoon label="Taxonomy" />
+      case 'rules':
+        return <ComingSoon label="Rules" />
+      case 'research':
+        return <ComingSoon label="Research" />
+      case 'accounts':
+        return <ComingSoon label="Accounts" />
+      case 'admin':
+        return <ComingSoon label="Administration" />
+      case 'branding':
+        return <ComingSoon label="Branding" />
+      default: {
+        const unhandledTab: never = tab
+        return unhandledTab
+      }
+    }
+  }
 
   return (
     <div className="min-h-screen">
@@ -115,27 +188,7 @@ function AppShell() {
         ) : null}
 
         <Suspense fallback={<div className="text-navy-400 py-8 text-center">Loading…</div>}>
-          {tab === 'onboarding' && <OnboardingView />}
-          {tab === 'portfolio' && (
-            <PortfolioView
-              useCases={useCases}
-              lobs={lobs}
-              onOpen={setDrawerUcId}
-              onNew={() => setCreating(true)}
-              scope={ucScope}
-              onScope={setUcScope}
-              loading={useCasesQuery.isLoading}
-              error={useCasesQuery.isError}
-            />
-          )}
-          {tab === 'registry' && <RegistryView lobs={lobs} onOpenUseCase={setDrawerUcId} />}
-          {tab === 'flywheel' && (
-            <FlywheelTab focusUcId={focusUcId} onOpen={setDrawerUcId} />
-          )}
-          {tab === 'dashboards' && <DashboardsView />}
-          {tab === 'roadmap' && <RoadmapView lobs={lobs} onOpen={setDrawerUcId} />}
-          {tab === 'funding' && <JointFundingView lobs={lobs} />}
-          {tab === 'value' && <AssumptionsView />}
+          {renderActiveView()}
         </Suspense>
 
         <footer className="text-center text-xs text-navy-600 pt-4 pb-8">
