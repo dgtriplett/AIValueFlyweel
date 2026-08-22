@@ -4,19 +4,18 @@ import { useEffect, useRef, useState } from 'react'
 import {
   Activity,
   BarChart3,
-  BookOpen,
   CalendarRange,
   Database,
   HandCoins,
   Layers,
   Radar,
+  Rocket,
   SlidersVertical,
 } from 'lucide-react'
 import type { ReactNode } from 'react'
 
 export type TabId =
   | 'portfolio'
-  | 'catalog'
   | 'registry'
   | 'flywheel'
   | 'dashboards'
@@ -29,36 +28,92 @@ export interface Tab {
   id: TabId
   label: string
   icon: ReactNode
+  /** Shown under the label inside a menu: what you come to this view to answer. */
+  hint?: string
 }
 
 /**
  * Every view the nav can reach. Kept as data, not markup, so the grouped nav
  * below resolves tabs by id — a reordered or extended TABS still renders, and
  * tab state stays the single source of truth for what is on screen.
+ *
+ * There is no separate `catalog` tab: the catalog is the same use-case list read
+ * at a different scope, so it is a switch inside `portfolio` rather than a
+ * destination of its own. See components/ScopeSwitch.tsx.
  */
 export const TABS: Tab[] = [
-  { id: 'portfolio', label: 'Portfolio', icon: <Layers className="w-4 h-4" /> },
-  { id: 'catalog', label: 'Use Case Catalog', icon: <BookOpen className="w-4 h-4" /> },
-  { id: 'registry', label: 'Data Assets', icon: <Database className="w-4 h-4" /> },
-  { id: 'flywheel', label: 'Value Flywheel', icon: <Radar className="w-4 h-4" /> },
-  { id: 'dashboards', label: 'Dashboards', icon: <BarChart3 className="w-4 h-4" /> },
-  { id: 'roadmap', label: 'Roadmap', icon: <CalendarRange className="w-4 h-4" /> },
-  { id: 'funding', label: 'Joint Funding', icon: <HandCoins className="w-4 h-4" /> },
-  { id: 'value', label: 'Value & Assumptions', icon: <SlidersVertical className="w-4 h-4" /> },
+  {
+    id: 'portfolio',
+    label: 'Use Cases',
+    icon: <Layers className="w-4 h-4" />,
+    hint: 'Your portfolio and the catalog to draw from',
+  },
+  {
+    id: 'flywheel',
+    label: 'Value Flywheel',
+    icon: <Radar className="w-4 h-4" />,
+    hint: 'What unlocks what, and the blast radius of each source',
+  },
+  {
+    id: 'registry',
+    label: 'Data Assets',
+    icon: <Database className="w-4 h-4" />,
+    hint: 'The sources behind the work, and their ingestion state',
+  },
+  {
+    id: 'dashboards',
+    label: 'Dashboards',
+    icon: <BarChart3 className="w-4 h-4" />,
+    hint: 'Value, readiness and coverage rolled up',
+  },
+  {
+    id: 'roadmap',
+    label: 'Roadmap',
+    icon: <CalendarRange className="w-4 h-4" />,
+    hint: 'Sequence the work by what is ready',
+  },
+  {
+    id: 'funding',
+    label: 'Joint Funding',
+    icon: <HandCoins className="w-4 h-4" />,
+    hint: 'Split investment against the value it buys',
+  },
+  {
+    id: 'value',
+    label: 'Value & Assumptions',
+    icon: <SlidersVertical className="w-4 h-4" />,
+    hint: 'The drivers every number on screen is computed from',
+  },
+  {
+    id: 'onboarding',
+    label: 'Get started',
+    icon: <Rocket className="w-4 h-4" />,
+    hint: 'Populate the model from Excel or your own workspace',
+  },
 ]
 
 /**
- * The nav groups, as workflow stages rather than a flat tab row.
+ * The nav groups, named for the JOB rather than for the screens inside them.
  *
- * Eight flat tabs made the app read as eight unrelated screens. Grouping them
- * into what you are DOING — looking at the numbers, or planning the work — keeps
- * the top level to three items with Portfolio, the landing view, always one
- * click away.
+ * The flat list read as eight unrelated destinations, two of which
+ * ("Portfolio", "Use Case Catalog") were one list at two scopes. The top level
+ * is now three jobs — see the portfolio, plan and fund it, check what the
+ * numbers rest on — so the choice at the top is about what you are trying to do,
+ * not which screen holds it.
+ *
+ * `onboarding` is deliberately NOT in a group: it is an entry-point surface,
+ * rendered as its own top-level button so a customer with an empty instance can
+ * find it without opening a menu. It was previously in neither TABS nor a group,
+ * which left OnboardingView reachable only by editing state by hand.
  */
 const NAV_GROUPS: { label: string; ids: TabId[] }[] = [
-  { label: 'Analyze', ids: ['dashboards', 'flywheel', 'value'] },
-  { label: 'Plan', ids: ['roadmap', 'funding', 'catalog', 'registry'] },
+  { label: 'Portfolio', ids: ['portfolio', 'flywheel', 'registry', 'dashboards'] },
+  { label: 'Plan & Fund', ids: ['roadmap', 'funding'] },
+  { label: 'Value', ids: ['value'] },
 ]
+
+/** The entry-point surface: outside the groups, always one click away. */
+const ENTRY_TAB: TabId = 'onboarding'
 
 /** The console is a separate dependency-free page; these are its entry points. */
 const CONSOLE_LINKS = [
@@ -97,19 +152,23 @@ function TabButton({
   tab,
   active,
   onSelect,
+  label,
 }: {
   tab: Tab
   active: boolean
   onSelect: () => void
+  /** Overrides the tab's own label, so a one-item group can name itself. */
+  label?: string
 }) {
   return (
     <button
       onClick={onSelect}
       className={`${NAV_ITEM} ${active ? 'text-white' : NAV_INACTIVE}`}
       style={active ? ACTIVE_STYLE : {}}
+      title={tab.hint}
     >
       {tab.icon}
-      {tab.label}
+      {label ?? tab.label}
     </button>
   )
 }
@@ -131,6 +190,29 @@ function NavGroup({
 }) {
   const open = openMenu === label
   const active = ids.indexOf(tab) >= 0
+
+  // A group holding one view is a menu with nothing to choose. It stays declared
+  // as a group — the grouping is the IA, and a second view may join it — but it
+  // renders as a direct button so reaching it never costs an extra click.
+  //
+  // It still dismisses an open menu, like a grouped item does. The click-outside
+  // handler is scoped to the nav element, so it deliberately does NOT fire for a
+  // button that lives inside the nav — without this, picking a direct button
+  // would change the view and leave another group's menu hanging open over it.
+  const only = ids.length === 1 ? TABS.find((candidate) => candidate.id === ids[0]) : undefined
+  if (only) {
+    return (
+      <TabButton
+        tab={only}
+        label={label}
+        active={active}
+        onSelect={() => {
+          setOpenMenu(null)
+          setTab(only.id)
+        }}
+      />
+    )
+  }
 
   return (
     <div className="relative">
@@ -154,9 +236,9 @@ function NavGroup({
           top: '100%',
           left: 0,
           zIndex: 200,
-          // Wide enough for "Value & Assumptions", the longest item, so no label
-          // wraps inside the panel.
-          minWidth: '212px',
+          // Wide enough for the longest hint line, so neither a label nor its
+          // one-line description wraps inside the panel.
+          minWidth: '318px',
           padding: '6px',
           background: '#1b3139',
           border: '1px solid #2d4550',
@@ -178,13 +260,20 @@ function NavGroup({
               }}
               className={
                 'w-full text-left px-3 py-2 rounded-md text-sm font-medium ' +
-                'flex items-center gap-2 whitespace-nowrap ' +
+                'flex items-start gap-2 whitespace-nowrap ' +
                 (selected ? 'text-white' : 'text-navy-300 hover:text-white hover:bg-navy-700')
               }
               style={selected ? { color: '#FF9E94' } : {}}
             >
-              {item.icon}
-              {item.label}
+              <span className="mt-0.5 shrink-0">{item.icon}</span>
+              <span>
+                {item.label}
+                {item.hint ? (
+                  <span className="block text-[11px] font-normal text-navy-500 mt-0.5">
+                    {item.hint}
+                  </span>
+                ) : null}
+              </span>
             </button>
           )
         })}
@@ -225,7 +314,7 @@ export function Header({
     }
   }, [openMenu])
 
-  const portfolio = TABS.find((candidate) => candidate.id === 'portfolio')
+  const entry = TABS.find((candidate) => candidate.id === ENTRY_TAB)
 
   return (
     <header className="border-b border-navy-600 bg-navy-800/90 backdrop-blur sticky top-0 z-30">
@@ -259,14 +348,6 @@ export function Header({
           data-gaGroupedNav="1"
           aria-label="Main"
         >
-          {portfolio ? (
-            <TabButton
-              tab={portfolio}
-              active={tab === portfolio.id}
-              onSelect={() => setTab(portfolio.id)}
-            />
-          ) : null}
-
           {NAV_GROUPS.map((group) => (
             <NavGroup
               key={group.label}
@@ -278,6 +359,17 @@ export function Header({
               setOpenMenu={setOpenMenu}
             />
           ))}
+
+          {entry ? (
+            <TabButton
+              tab={entry}
+              active={tab === entry.id}
+              onSelect={() => {
+                setOpenMenu(null)
+                setTab(entry.id)
+              }}
+            />
+          ) : null}
 
           {CONSOLE_LINKS.map((link) => (
             <a

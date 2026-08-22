@@ -1,4 +1,11 @@
-// The portfolio: the use cases this customer has actually committed to.
+// Use cases: the ones this customer has committed to, and the catalog to draw
+// from — one destination, two scopes.
+//
+// The catalog used to be a second top-level tab even though it reads the same
+// `/api/use-cases` endpoint and differs only by `?scope=`. That made a data
+// filter look like a destination. The scope switch lives here at the top; the
+// catalog panel is still its own lazy chunk (it pulls its own recommender query)
+// and is rendered instead of the portfolio body when that scope is picked.
 //
 // Table and Kanban are the same rows read two ways — the table is for triage
 // ("what is worth the most, what is blocked"), the board is for a standup. The
@@ -6,7 +13,7 @@
 // `loading` and `error` arrive as props; the two mutations that write a row live
 // here because only this view offers them.
 
-import { useMemo, useState } from 'react'
+import { Suspense, lazy, useMemo, useState } from 'react'
 import type { ReactNode } from 'react'
 import { useMutation, useQueryClient } from '@tanstack/react-query'
 import { ArrowDownUp, BookOpen, Plus, SquareKanban, Table, Trash2 } from 'lucide-react'
@@ -25,9 +32,15 @@ import {
 } from '../constants'
 import { ReadinessBadge } from '../components/Badges'
 import { RecommendPanel } from '../components/RecommendPanel'
+import { ScopeSwitch } from '../components/ScopeSwitch'
+import type { UseCaseView } from '../components/ScopeSwitch'
 import { SourceRecommendPanel } from '../components/SourceRecommendPanel'
 import { matchesUseCase, useFilters } from '../context/FilterContext'
 import type { Lob, Readiness, Status, UseCase } from '../types'
+
+// The catalog panel carries its own recommender query and table, and most
+// sessions never switch scope — so it stays a chunk that loads on demand.
+const CatalogView = lazy(() => import('./CatalogView'))
 
 /** Sort keys are read off the row, so they mirror field names where one exists. */
 type SortKey = 'title' | 'status' | 'readiness' | 'priority_score' | 'computed_value' | 'realized'
@@ -59,7 +72,8 @@ export function PortfolioView({
   lobs = [],
   onOpen,
   onNew,
-  onBrowseCatalog,
+  scope = 'portfolio',
+  onScope,
   loading = false,
   error = false,
 }: {
@@ -67,7 +81,9 @@ export function PortfolioView({
   lobs?: Lob[]
   onOpen?: (useCaseId: number) => void
   onNew?: () => void
-  onBrowseCatalog?: () => void
+  /** Which scope is on screen. Owned by the shell so it survives a tab round-trip. */
+  scope?: UseCaseView
+  onScope?: (scope: UseCaseView) => void
   loading?: boolean
   error?: boolean
 }) {
@@ -161,8 +177,25 @@ export function PortfolioView({
           match: (useCase: UseCase) => useCase.phase === phase,
         }))
 
+  const switcher = <ScopeSwitch scope={scope} setScope={(next) => onScope?.(next)} />
+
+  // The catalog is the same list at a different scope, so it renders under the
+  // same switch rather than as its own destination. Filters are shared state, so
+  // a narrowing set on one scope still holds when you flip to the other.
+  if (scope === 'catalog') {
+    return (
+      <div className="space-y-4">
+        {switcher}
+        <Suspense fallback={<div className="text-navy-400 py-8 text-center">Loading catalog…</div>}>
+          <CatalogView lobs={lobs} onOpen={onOpen} />
+        </Suspense>
+      </div>
+    )
+  }
+
   return (
     <div className="space-y-4">
+      {switcher}
       <RecommendPanel onOpen={onOpen} />
       <SourceRecommendPanel onOpenUseCase={onOpen} />
 
@@ -224,15 +257,14 @@ export function PortfolioView({
             <BookOpen className="w-8 h-8 text-navy-500 mx-auto mb-3" />
             <div className="text-white font-medium">Your portfolio is empty</div>
             <div className="text-navy-400 text-sm mt-1 max-w-md mx-auto">
-              Browse the <span className="text-lava-300">Use Case Catalog</span> to bring in
-              predefined ideas, or add your own with{' '}
-              <span className="text-lava-300">New use case</span>.
+              Switch to the <span className="text-lava-300">Catalog</span> to bring in predefined
+              ideas, or add your own with <span className="text-lava-300">New use case</span>.
             </div>
             <div className="flex items-center justify-center gap-2 mt-4">
-              {onBrowseCatalog && (
+              {onScope && (
                 <button
                   className="btn-primary text-sm flex items-center gap-1.5"
-                  onClick={onBrowseCatalog}
+                  onClick={() => onScope('catalog')}
                 >
                   <BookOpen className="w-4 h-4" /> Browse the catalog
                 </button>

@@ -17,6 +17,7 @@ import { GeniePanel } from './components/GeniePanel'
 import { Header } from './components/Header'
 import type { TabId } from './components/Header'
 import { NewUseCaseModal } from './components/NewUseCaseModal'
+import type { UseCaseView } from './components/ScopeSwitch'
 import { StatCard } from './components/StatCard'
 import { UseCaseDrawer } from './components/UseCaseDrawer'
 import { PortfolioView } from './views/PortfolioView'
@@ -24,7 +25,6 @@ import { RegistryView } from './views/RegistryView'
 
 // Each of these pulls in a heavy dependency the first screen does not need —
 // recharts, xyflow+dagre — so they load on demand rather than in the entry chunk.
-const CatalogView = lazy(() => import('./views/CatalogView'))
 const DashboardsView = lazy(() => import('./views/DashboardsView'))
 const FlywheelTab = lazy(() => import('./components/flywheel/FlywheelTab'))
 const RoadmapView = lazy(() => import('./views/RoadmapView'))
@@ -34,6 +34,10 @@ const OnboardingView = lazy(() => import('./views/OnboardingView'))
 
 function AppShell() {
   const [tab, setTab] = useState<TabId>('portfolio')
+  // Which use-case scope the merged destination shows. Owned here, not in the
+  // view, so flipping to the flywheel and back does not silently reset you to
+  // the portfolio when you were reading the catalog.
+  const [ucScope, setUcScope] = useState<UseCaseView>('portfolio')
   const [drawerUcId, setDrawerUcId] = useState<number | null>(null)
   const [focusUcId, setFocusUcId] = useState<number | null>(null)
   const [creating, setCreating] = useState(false)
@@ -105,7 +109,7 @@ function AppShell() {
           />
         </div>
 
-        {tab === 'portfolio' || tab === 'catalog' || tab === 'registry' ? (
+        {tab === 'portfolio' || tab === 'registry' ? (
           <FilterBar lobs={lobs} showIngestion={tab === 'registry'} />
         ) : null}
 
@@ -117,12 +121,12 @@ function AppShell() {
               lobs={lobs}
               onOpen={setDrawerUcId}
               onNew={() => setCreating(true)}
-              onBrowseCatalog={() => setTab('catalog')}
+              scope={ucScope}
+              onScope={setUcScope}
               loading={useCasesQuery.isLoading}
               error={useCasesQuery.isError}
             />
           )}
-          {tab === 'catalog' && <CatalogView lobs={lobs} onOpen={setDrawerUcId} />}
           {tab === 'registry' && <RegistryView lobs={lobs} onOpenUseCase={setDrawerUcId} />}
           {tab === 'flywheel' && (
             <FlywheelTab focusUcId={focusUcId} onOpen={setDrawerUcId} />
