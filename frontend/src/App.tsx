@@ -33,6 +33,17 @@ const JointFundingView = lazy(() => import('./views/JointFundingView'))
 const AssumptionsView = lazy(() => import('./views/AssumptionsView'))
 const OnboardingView = lazy(() => import('./views/OnboardingView'))
 
+// Tier 3 Phase 3 — the ported read-only console views. Lazy for the same reason
+// as the block above: `TrendView` pulls recharts, and the rest are wide tables
+// nobody loads on the first screen. Each becomes a chunk fetched on demand rather
+// than weight in the entry bundle every visitor pays for.
+const CoverageView = lazy(() => import('./views/CoverageView'))
+const WhatIfView = lazy(() => import('./views/WhatIfView'))
+const TrendView = lazy(() => import('./views/TrendView'))
+const GlossaryView = lazy(() => import('./views/GlossaryView'))
+const ArtifactsView = lazy(() => import('./views/ArtifactsView'))
+const ExecutiveView = lazy(() => import('./views/ExecutiveView'))
+
 function ComingSoon({ label }: { label: string }) {
   return (
     <section className="rounded-xl border border-navy-700 bg-navy-800 px-6 py-10 text-center">
@@ -108,17 +119,17 @@ function AppShell() {
       case 'value':
         return <AssumptionsView />
       case 'coverage':
-        return <ComingSoon label="Coverage" />
+        return <CoverageView />
       case 'whatif':
-        return <ComingSoon label="What-if Analysis" />
+        return <WhatIfView />
       case 'trend':
-        return <ComingSoon label="Trend Analysis" />
+        return <TrendView />
       case 'glossary':
-        return <ComingSoon label="Glossary" />
+        return <GlossaryView />
       case 'artifacts':
-        return <ComingSoon label="Artifacts" />
+        return <ArtifactsView />
       case 'executive':
-        return <ComingSoon label="Executive Brief" />
+        return <ExecutiveView />
       case 'knowledge':
         return <ComingSoon label="Knowledge Base" />
       case 'sourcemapping':

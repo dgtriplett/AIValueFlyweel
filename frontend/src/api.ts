@@ -9,6 +9,7 @@ import axios from 'axios'
 import { ACCOUNT_HEADER, accountId } from './lib/account'
 import { describeError } from './lib/errors'
 import type {
+  ArtifactsResponse,
   Assumption,
   BlastRadiusResponse,
   BlastNode,
@@ -16,13 +17,19 @@ import type {
   Comment,
   ConfirmApplyResponse,
   ConfirmCardData,
+  CoverageMatrixResponse,
+  CurrentSnapshotResponse,
   DashboardData,
   DataAsset,
   DetectDependenciesResponse,
+  Domain,
+  DomainGapsResponse,
   EnablesEdge,
   EstimateValueResponse,
+  ExecutivePack,
   FundingRequest,
   GenieAskResponse,
+  GlossaryResponse,
   HealthResponse,
   HypothesizedValue,
   JointCase,
@@ -33,12 +40,17 @@ import type {
   RecommendResponse,
   RequiresEdge,
   RoadmapResponse,
+  SnapshotsResponse,
   SourceRecommendResponse,
   NetworkResponse,
   OnboardingImportResponse,
+  UnattributedArtifactsResponse,
   UnlocksResponse,
   UseCase,
   UseCaseDetail,
+  WhatIfCandidatesResponse,
+  WhatIfComparison,
+  WhatIfProjection,
 } from './types'
 
 export const http = axios.create({ baseURL: '/api' })
@@ -296,6 +308,73 @@ export const api = {
   genieAsk: (question: string, conversation_id?: string | null) =>
     http
       .post<GenieAskResponse>('/genie/ask', { question, conversation_id })
+      .then((r) => r.data),
+
+  // -------------------------------------------------------------------------
+  // Tier 3 Phase 3 — the read-only console surfaces.
+  //
+  // Every one of these is a GET, and none is rate-limited server-side (the
+  // `limiter` dependencies in `snapshots.py` and `inventory.py` are on the POSTs
+  // and DELETEs this phase deliberately does not port). The two POSTs below are
+  // the exception that proves the rule: `/whatif/simulate` is a projection —
+  // `server/routes/whatif.py:26-31` states it writes nothing, has no confirm
+  // gate and no audit row — so it is a read modelled as a POST because its input
+  // is a list of ids too long for a query string.
+  // -------------------------------------------------------------------------
+
+  coverageMatrix: () =>
+    http.get<CoverageMatrixResponse>('/domains/coverage-matrix').then((r) => r.data),
+
+  domains: () => http.get<Domain[]>('/domains').then((r) => r.data),
+
+  domainGaps: (limit = 15) =>
+    http.get<DomainGapsResponse>(`/domains/gaps?limit=${limit}`).then((r) => r.data),
+
+  whatIfCandidates: (limit = 40) =>
+    http.get<WhatIfCandidatesResponse>(`/whatif/candidates?limit=${limit}`).then((r) => r.data),
+
+  /** Projection only. Writes nothing — see the note above. */
+  whatIfSimulate: (data_asset_ids: number[]) =>
+    http
+      .post<WhatIfProjection>('/whatif/simulate', { data_asset_ids })
+      .then((r) => r.data),
+
+  /** Each option is a set landed together, so "OMS alone" can lose to "OMS + AMI". */
+  whatIfCompare: (options: number[][]) =>
+    http.post<WhatIfComparison>('/whatif/simulate/compare', { options }).then((r) => r.data),
+
+  snapshots: (limit = 500) =>
+    http.get<SnapshotsResponse>(`/snapshots?limit=${limit}`).then((r) => r.data),
+
+  /** What a snapshot would say if taken now. Explicitly not stored. */
+  currentSnapshot: () =>
+    http.get<CurrentSnapshotResponse>('/snapshots/current').then((r) => r.data),
+
+  glossary: () => http.get<GlossaryResponse>('/flow/glossary').then((r) => r.data),
+
+  /** `inventory.py` declares no router prefix, so these live at `/api/artifacts`
+   *  rather than `/api/inventory/artifacts` — see TIER3_MIGRATION_PLAN.md §1. */
+  artifacts: (limit = 200) =>
+    http.get<ArtifactsResponse>(`/artifacts?limit=${limit}`).then((r) => r.data),
+
+  unattributedArtifacts: (limit = 30) =>
+    http
+      .get<UnattributedArtifactsResponse>(`/artifacts/unattributed?limit=${limit}`)
+      .then((r) => r.data),
+
+  executivePack: () => http.get<ExecutivePack>('/exports/executive-pack').then((r) => r.data),
+
+  /**
+   * The same pack as Markdown, for download.
+   *
+   * `responseType: 'blob'` because the response is `text/markdown` with
+   * `Content-Disposition: attachment`, not JSON. It goes through `http` rather
+   * than an anchor href so the account interceptor scopes it — an `<a download>`
+   * skips axios and therefore skips the header, which is §4.1's whole point.
+   */
+  executivePackMarkdown: () =>
+    http
+      .get<Blob>('/exports/executive-pack.md', { responseType: 'blob' })
       .then((r) => r.data),
 
   /**
