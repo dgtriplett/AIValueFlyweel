@@ -143,6 +143,12 @@ def main() -> int:
                        [sys.executable, "-m", "unittest", "discover",
                         "-s", "tests", "-p", "test_*.py"]))
 
+    # Pure source parsing, so CI can prove every nav destination renders without
+    # installing npm packages or relying on TypeScript being available there.
+    results.append(run("SPA TabIds have render cases",
+                       [sys.executable, str(ROOT / "scripts"
+                                            / "check_tab_render.py")]))
+
     results.append(check_app_imports())
 
     # Runs unconditionally: a committed credential is the one failure that is
