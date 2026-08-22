@@ -504,3 +504,293 @@ export interface OnboardingImportResponse {
   errors: string[]
   summary?: { data_sources: number; use_cases: number; assumptions: number }
 }
+
+// ---------------------------------------------------------------------------
+// Tier 3 Phase 3 — the read-only console surfaces.
+//
+// Coverage, What-if, Trend, Glossary, Artifacts and the Executive pack. Fields
+// are optional wherever the route can omit them, which is more of them than the
+// older types above: these endpoints degrade rather than fail when the discovery
+// tables are absent (`snapshots.py` returns `sources_*`/`domains_*` as null when
+// the pool is unavailable) and several return a bare `note` instead of rows.
+// ---------------------------------------------------------------------------
+
+/** A semantic data need. `GET /domains` — see components/DomainsTable.tsx. */
+export interface Domain {
+  id: number
+  name: string
+  label: string
+  category?: string | null
+  description?: string | null
+  serving_asset_count?: number
+  ready_asset_count?: number
+  required_by_count?: number
+  use_case_count?: number
+  satisfied?: boolean
+}
+
+/** One need × one line of business. `state` is the whole point of the matrix. */
+export interface CoverageCell {
+  lob_id: number
+  lob_name: string
+  /** `covered` needed+landed · `gap` needed, not landed · `available` landed,
+   *  nothing asks for it · `unused` not needed here. */
+  state: 'covered' | 'gap' | 'available' | 'unused'
+  use_case_count: number
+  required_count: number
+  value_mm: number
+}
+
+export interface CoverageRow {
+  domain: Pick<Domain, 'id' | 'name' | 'label' | 'category'>
+  satisfied: boolean
+  serving_asset_count: number
+  ready_asset_count: number
+  /** Unmet in EVERY LOB that requires it — an acquisition decision, not backlog. */
+  universal_gap: boolean
+  cells: CoverageCell[]
+}
+
+export interface CoverageMatrixResponse {
+  lobs: { id: number; name: string }[]
+  rows: CoverageRow[]
+  summary: {
+    domains?: number
+    universal_gaps?: number
+    covered?: number
+    gaps?: number
+    available_unused?: number
+    value_at_risk_mm?: number
+  }
+}
+
+export interface DomainGap {
+  domain: Pick<Domain, 'id' | 'name' | 'label' | 'category' | 'description'>
+  serving_asset_count: number
+  has_no_source: boolean
+  blocked_use_case_count: number
+  value_blocked_mm: number
+  rationale: string
+}
+
+export interface DomainGapsResponse {
+  gaps: DomainGap[]
+  total?: number
+  summary: { total_value_blocked_mm?: number; domains_with_no_source?: number }
+}
+
+/** An unlanded source, ranked by what landing it would unblock. */
+export interface WhatIfCandidate {
+  data_asset_id: number
+  source: string
+  module: string
+  vendor?: string | null
+  status?: string | null
+  effort?: string | null
+  cost_low: number
+  cost_high: number
+  use_cases_unblocked: number
+  value_unblocked_mm: number
+  /** `null` when the source is free or uncosted — division would be undefined. */
+  value_per_cost?: number | null
+}
+
+export interface WhatIfCandidatesResponse {
+  candidates: WhatIfCandidate[]
+  evaluated?: number
+  with_impact?: number
+  note?: string | null
+}
+
+/** A use case the projection moves. `still_pending` names what it waits on. */
+export interface WhatIfUseCase {
+  id: number
+  title: string
+  lob?: string | null
+  effort?: string | null
+  value_mm: number
+  still_pending?: string[]
+}
+
+export interface WhatIfProjection {
+  sources: {
+    id: number
+    source?: string | null
+    module: string
+    vendor?: string | null
+    current_status?: string | null
+    effort?: string | null
+  }[]
+  unlocked: WhatIfUseCase[]
+  unlocked_count: number
+  annual_value_mm: number
+  value_by_lob: Record<string, number>
+  /** Data gap closes, sequencing does not — reported apart so neither is oversold. */
+  data_complete_awaiting_prerequisites: WhatIfUseCase[]
+  awaiting_count: number
+  awaiting_value_mm: number
+  cost: {
+    sources_low?: number
+    sources_high?: number
+    delivery_mid?: number
+    total_mid?: number
+  }
+  payback_months?: number | null
+  baseline?: { shovel_ready?: number }
+  projected?: { shovel_ready?: number }
+  note?: string | null
+}
+
+export interface WhatIfComparison {
+  options: {
+    option: number
+    sources: string[]
+    unlocked_count: number
+    annual_value_mm: number
+    total_cost: number
+    payback_months?: number | null
+    value_per_cost?: number | null
+    top_unlocked?: string[]
+  }[]
+  note?: string | null
+}
+
+/** The metrics a snapshot records. Shared by a stored point and `/current`. */
+export interface SnapshotMetrics {
+  total_value_mm?: number | null
+  buildable_value_mm?: number | null
+  realized_value_mm?: number | null
+  shovel_ready?: number | null
+  nearly_ready?: number | null
+  awaiting_prereqs?: number | null
+  blocked?: number | null
+  /** Null rather than 0 when the discovery tables are unreadable. */
+  sources_total?: number | null
+  sources_ready?: number | null
+  domains_total?: number | null
+  domains_satisfied?: number | null
+  use_cases_total?: number | null
+  use_cases_live?: number | null
+}
+
+export interface Snapshot extends SnapshotMetrics {
+  id: number
+  /** ISO-8601. Every point is a real event, which is why `reason` exists. */
+  captured_at: string
+  reason?: string | null
+  detail?: string | null
+  captured_by?: string | null
+}
+
+export interface SnapshotsResponse {
+  snapshots: Snapshot[]
+  count?: number
+  first_captured_at?: string | null
+  latest_captured_at?: string | null
+  change_since_first?: SnapshotMetrics
+  latest?: Snapshot
+  /** Sent instead of rows when there is nothing captured yet. */
+  note?: string | null
+}
+
+export interface CurrentSnapshotResponse {
+  metrics: SnapshotMetrics
+  stored: boolean
+}
+
+/** A business term. `origin_kind` splits curated from need-derived. */
+export interface GlossaryTerm {
+  id?: number | null
+  term: string
+  definition?: string | null
+  domain_label?: string | null
+  lob_name?: string | null
+  synonyms?: string[]
+  source_systems?: string[]
+  owner?: string | null
+  origin?: string | null
+  origin_kind: 'curated' | 'derived'
+  category?: string | null
+  landed_sources?: number | null
+  use_case_count?: number | null
+}
+
+export interface GlossaryResponse {
+  terms: GlossaryTerm[]
+  summary: { total?: number; curated?: number; derived?: number }
+}
+
+/** Something already built on the platform, claimed by a use case or not. */
+export interface Artifact {
+  id: number
+  artifact_type: string
+  artifact_id: string
+  name: string
+  owner?: string | null
+  last_run?: string | null
+  run_count_30d?: number | null
+  status?: string | null
+  use_case_id?: number | null
+  use_case_title?: string | null
+  lob_name?: string | null
+  is_present?: boolean
+}
+
+export interface ArtifactsResponse {
+  artifacts: Artifact[]
+  summary: { total?: number; unattributed?: number; types?: number }
+  by_type?: { artifact_type: string; n: number; unattributed: number }[]
+}
+
+export interface UnattributedArtifactsResponse {
+  artifacts: Artifact[]
+  summary: { total?: number; active_unclaimed?: number; inactive_unclaimed?: number }
+  interpretation?: string | null
+}
+
+/** A use-case row in the executive pack. Flatter than `UseCase`: the pack is a
+ *  rendering, so the server has already resolved lob and value to scalars. */
+export interface ExecutivePackUseCase {
+  id: number
+  title: string
+  lob?: string | null
+  readiness?: string | null
+  confidence?: string | null
+  confidence_score?: number | null
+  value_mm?: number | null
+  pending_prereqs?: { id?: number; title: string }[]
+  pending_domains?: { id?: number; label?: string | null; name?: string | null }[]
+}
+
+export interface ExecutivePack {
+  /** ISO-8601. Shown because a pack pasted into a deck needs a date on it. */
+  generated_at?: string | null
+  company?: { company_name?: string | null } | null
+  metrics: {
+    use_cases_total?: number | null
+    shovel_ready?: number | null
+    blocked?: number | null
+    total_value_mm?: number | null
+    buildable_value_mm?: number | null
+    realized_value_mm?: number | null
+  }
+  top_buildable_use_cases?: ExecutivePackUseCase[]
+  top_blocked_or_awaiting_use_cases?: ExecutivePackUseCase[]
+  assumptions: {
+    total?: number
+    /** Customer-researched. The gap between this and `total` is the caveat. */
+    calibrated?: number
+    generic?: number
+  }
+  whatif?: {
+    candidates?: {
+      source?: string | null
+      module?: string | null
+      use_cases_unblocked?: number | null
+      value_unblocked_mm?: number | null
+      value_per_cost?: number | null
+    }[]
+    note?: string | null
+  }
+  next_actions?: string[]
+}
