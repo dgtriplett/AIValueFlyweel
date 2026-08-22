@@ -27,8 +27,9 @@ import sys
 from decimal import Decimal
 from pathlib import Path
 
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, HTTPException, Request
 
+from .. import accounts as acct
 from ..db import db
 
 # --- The single feature flag -----------------------------------------------
@@ -267,12 +268,14 @@ async def demo_status():
 
 
 @router.post("/load")
-async def demo_load():
+async def demo_load(request: Request):
+    acct.require_admin(request, "Loading demo data")
     _require_enabled()
     return await _run(clean=False)
 
 
 @router.post("/reset")
-async def demo_reset():
+async def demo_reset(request: Request):
+    acct.require_admin(request, "Resetting demo data")
     _require_enabled()
     return await _run(clean=True)
