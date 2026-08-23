@@ -51,7 +51,7 @@ import {
 import { MAX_ATTACHMENT_BYTES, rejectionOf } from '../src/components/FileDrop'
 import { parseTags } from '../src/views/ArticleEditor'
 import { splitExcerpt } from '../src/views/KnowledgeView'
-import { downloadOnboardingTemplate } from '../src/views/OnboardingView'
+import { downloadOnboardingTemplate, templateFilename } from '../src/views/OnboardingView'
 import type { ConfirmCardData } from '../src/types'
 
 // ---------------------------------------------------------------------------
@@ -170,36 +170,32 @@ tests['a throwing localStorage does not take down the request'] = async () => {
 }
 
 tests['onboarding export sends the selected account header and server filename'] = async () => {
+  // THE REGRESSION THIS EXISTS TO PREVENT
+  // ------------------------------------
+  // The export is scoped per account server-side (`onboarding.py` reads
+  // `accounts.current()`), and a request with no `X-Grid-Atlas-Account` does not
+  // fail — `server/accounts.py:19-22` falls back to the DEFAULT account. So a
+  // download that skips the header hands one customer another's whole portfolio
+  // with no error anywhere. This is the one download in the app where the leaked
+  // bytes are the entire model.
+  //
+  // Phase 9 moved this from a raw `fetch` + hand-added header onto
+  // `api.onboardingTemplate()`, so the header now comes from the axios interceptor
+  // and the save from the shared `saveBlob`. The assertion is therefore driven
+  // through `http.defaults.adapter` — the interceptor chain is intact and the
+  // header is read off the config axios actually built, which is what makes this a
+  // claim about the shipped code rather than about a reimplementation of it.
   installStorage('acct-export')
-  let request: { input?: string | URL | Request; init?: RequestInit } = {}
+  const { adapter, seen } = capturingAdapter({
+    data: new Blob(['workbook']),
+    headers: { 'content-disposition': 'attachment; filename="tenant-b-onboarding.xlsx"' },
+  })
+
   let clicked = 0
   let removed = 0
   let appended = 0
   let revoked: string | null = null
-  const anchor = {
-    href: '',
-    download: '',
-    style: { display: '' },
-    click() {
-      clicked += 1
-    },
-    remove() {
-      removed += 1
-    },
-  }
-
-  ;(globalThis as Record<string, unknown>).fetch = async (
-    input: string | URL | Request,
-    init?: RequestInit,
-  ) => {
-    request = { input, init }
-    return new Response(new Blob(['workbook']), {
-      status: 200,
-      headers: {
-        'content-disposition': 'attachment; filename="tenant-b-onboarding.xlsx"',
-      },
-    })
-  }
+  const anchor = { href: '', download: '', click: () => { clicked += 1 }, remove: () => { removed += 1 } }
   ;(globalThis as Record<string, unknown>).document = {
     createElement(tag: string) {
       assert.equal(tag, 'a')
@@ -217,17 +213,65 @@ tests['onboarding export sends the selected account header and server filename']
     revoked = url
   }
 
-  await downloadOnboardingTemplate()
+  const restore = http.defaults.adapter
+  http.defaults.adapter = adapter
+  try {
+    await downloadOnboardingTemplate()
+  } finally {
+    http.defaults.adapter = restore
+  }
 
-  assert.equal(request.input, '/api/onboarding/export.xlsx')
-  assert.equal((request.init?.headers as Record<string, string>)[ACCOUNT_HEADER], 'acct-export')
+  assert.equal(seen.length, 1)
+  assert.equal(seen[0].url, '/onboarding/export.xlsx')
+  assert.equal(seen[0].method, 'get')
+  assert.equal(seen[0].headers[ACCOUNT_HEADER], 'acct-export')
+  // The server names the file per account; inventing a client-side name would
+  // discard the one part of the response that says whose portfolio this is.
   assert.equal(anchor.download, 'tenant-b-onboarding.xlsx')
   assert.equal(anchor.href, 'blob:onboarding-template')
-  assert.equal(anchor.style.display, 'none')
+  // Appended before clicking and revoked after: a detached anchor's click is a
+  // no-op in Firefox, and an unrevoked object URL leaks the blob for the tab's life.
   assert.equal(appended, 1)
   assert.equal(clicked, 1)
   assert.equal(removed, 1)
   assert.equal(revoked, 'blob:onboarding-template')
+}
+
+tests['the export falls back to a filename only when the server sends none'] = () => {
+  assert.equal(
+    templateFilename('attachment; filename="grid-atlas-onboarding.xlsx"'),
+    'grid-atlas-onboarding.xlsx',
+  )
+  // RFC 5987 wins when present: it is the form that survives a non-ASCII company
+  // name, and the server may send both.
+  assert.equal(
+    templateFilename("attachment; filename=\"fallback.xlsx\"; filename*=UTF-8''Ever%C5%9Dource.xlsx"),
+    'Everŝource.xlsx',
+  )
+  // A malformed escape must not throw — the download is still worth completing.
+  assert.equal(templateFilename("attachment; filename*=UTF-8''%zz"), '%zz')
+  assert.equal(templateFilename(null), 'onboarding-template.xlsx')
+}
+
+tests['the onboarding wizard reaches the API only through the shared client'] = () => {
+  // The merged wizard added eleven endpoints, three of them uploads and two of them
+  // downloads, which is the largest single-view expansion of the API surface in the
+  // migration — and every one is account-scoped. A raw `fetch` here would carry no
+  // header (§4.1), so the rule is asserted structurally rather than left to review.
+  const source = readFileSync('src/views/OnboardingView.tsx', 'utf8')
+    .replace(/\/\*[\s\S]*?\*\//g, '')
+    .replace(/(^|[^:])\/\/.*$/gm, '$1')
+  assert.doesNotMatch(source, /\bfetch\s*\(/, 'the wizard must not call fetch directly')
+  assert.doesNotMatch(source, /accountHeaders\s*\(/, 'the interceptor carries the header now')
+  // Both downloads save through the shared helper rather than an anchor href.
+  assert.match(source, /saveBlob\(/)
+  // Step 5's cross-links are in-app nav, not `/console/#…` hash links.
+  assert.doesNotMatch(source, /\/console\/#/)
+  assert.match(source, /setTab\(step\.tab\)/)
+  // The CSV drop zones must raise the cap, or a valid 40MB extract is rejected
+  // client-side before the server ever sees it.
+  assert.match(source, /const MAX_INVENTORY_BYTES = 64 \* 1024 \* 1024/)
+  assert.match(source, /maxBytes=\{MAX_INVENTORY_BYTES\}/)
 }
 
 tests['frontend source has no bare anchor downloads from /api'] = () => {
@@ -685,6 +729,62 @@ tests['attachment rejection matches the server cap and type list'] = () => {
   // Repeats the server's advice rather than just refusing.
   assert.match(tooBig, /Link to it in the article body/)
   assert.match(rejectionOf(fakeFile('script.exe', 10)) ?? '', /not an accepted file type/)
+}
+
+tests['existing FileDrop callers keep the 25MB attachment default'] = () => {
+  // The props added in Phase 9 are OPTIONAL, and this is the half of that claim
+  // worth pinning: `ArticleView` passes neither, so an omitted `maxBytes` must
+  // still mean the attachment cap. A default that silently became "unbounded"
+  // would turn a courtesy check into a permissive one and only show up as a 413.
+  assert.equal(rejectionOf(fakeFile('study.pdf', 24 * 1024 * 1024)), null)
+  assert.match(rejectionOf(fakeFile('huge.pdf', 26 * 1024 * 1024)) ?? '', /the limit is 25 MB/)
+  assert.match(rejectionOf(fakeFile('extract.csv', 26 * 1024 * 1024)) ?? '', /the limit is 25 MB/)
+  // Same file, same call, empty options object — the caller that passes `{}` (a
+  // spread of no overrides) must not get different rules from the one that passes
+  // nothing at all.
+  assert.match(rejectionOf(fakeFile('huge.pdf', 26 * 1024 * 1024), {}) ?? '', /25 MB/)
+}
+
+tests['FileDrop honours a raised maxBytes and a narrowed extension list'] = () => {
+  // The discovery CSVs accept 64MB server-side (`server/routes/ingestion.py:53`)
+  // because a 200k-table estate extracts to ~40MB. Reusing the attachment cap here
+  // would reject a VALID file before the request — worse than the round trip the
+  // check exists to save, because the user has no way to tell a client refusal from
+  // a server one.
+  const inventory = { maxBytes: 64 * 1024 * 1024, extensions: ['.csv'] as const }
+  assert.equal(rejectionOf(fakeFile('all_tables.csv', 40 * 1024 * 1024), inventory), null)
+  // Still bounded — a raised cap is not an absent one.
+  const tooBig = rejectionOf(fakeFile('all_columns.csv', 65 * 1024 * 1024), inventory) ?? ''
+  assert.match(tooBig, /the limit is 64 MB/)
+  // The attachment advice is NOT repeated on a raised cap: telling someone with an
+  // oversized `all_columns.csv` to "link to it in the article body" is confident
+  // nonsense. The server's own advice there is to split the extract by workspace.
+  assert.doesNotMatch(tooBig, /article body/)
+  // A narrowed list rejects a type the attachment list accepts, and names what it
+  // does accept rather than just refusing.
+  const wrongType = rejectionOf(fakeFile('inventory.xlsx', 1024), inventory) ?? ''
+  assert.match(wrongType, /not an accepted file type/)
+  assert.match(wrongType, /Accepted: \.csv\./)
+  // The workbook path takes the other pair: default cap, two extensions.
+  const workbook = { extensions: ['.xlsx', '.csv'] as const }
+  assert.equal(rejectionOf(fakeFile('filled.xlsx', 1024), workbook), null)
+  assert.equal(rejectionOf(fakeFile('filled.csv', 1024), workbook), null)
+  assert.match(rejectionOf(fakeFile('notes.pdf', 1024), workbook) ?? '', /not an accepted file type/)
+  // Empty still beats every other rule, whatever the caps are — a zero-byte file is
+  // a mis-picked file, and reporting its size or type would bury that.
+  assert.match(rejectionOf(fakeFile('all_tables.csv', 0), inventory) ?? '', /is empty/)
+}
+
+tests['FileDrop passes its limits through to the input and the check'] = () => {
+  // The props have to reach BOTH the `accept` attribute and `rejectionOf`. Wiring
+  // only the first gives a picker that hides the file and a drop zone that accepts
+  // it; only the second gives the reverse. There is no DOM harness here, so this is
+  // asserted on the source — the same technique the what-if caps check uses.
+  const source = readFileSync('src/components/FileDrop.tsx', 'utf8')
+  assert.match(source, /maxBytes = MAX_ATTACHMENT_BYTES/)
+  assert.match(source, /extensions = ACCEPTED_EXTENSIONS/)
+  assert.match(source, /rejectionOf\(file, \{ maxBytes, extensions \}\)/)
+  assert.match(source, /accept=\{extensions\.join\(','\)\}/)
 }
 
 tests['article tags are split and trimmed, blanks dropped'] = () => {
