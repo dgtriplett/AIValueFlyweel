@@ -354,6 +354,7 @@ export interface FundingRequest {
   cost_share_json?: Record<string, number> | null
   brief_md?: string | null
   created_at?: string | null
+  delivery_cost?: number | null
 }
 
 export interface JointCase {
