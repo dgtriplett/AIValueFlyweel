@@ -444,6 +444,29 @@ export interface GenieAskResponse {
   conversation_id?: string | null
 }
 
+/**
+ * One turn of the `/api/chat` tool-calling assistant (`server/routes/chat.py`).
+ *
+ * Unlike Genie's read-only Q&A, this loop can PROPOSE a write: `confirm` carries a
+ * single-use `ConfirmCardData` token when the model called a write tool, which the
+ * server never applies itself. The SPA gates it through the shared `<ConfirmCard>`,
+ * so a chat-driven change lands in the same human-approval flow as any other.
+ *
+ * `note` is a non-error advisory — e.g. the loop hit `MAX_TOOL_ROUNDS` and returned
+ * a partial answer rather than failing. `tools_used` is what the model actually
+ * called this turn, for transparency in the transcript.
+ */
+export interface ChatResponse {
+  conversation_id: string
+  answer: string
+  tools_used?: { tool: string; args?: Record<string, unknown> }[]
+  /** Present only when the model proposed a write this turn. Never auto-applied. */
+  confirm?: ConfirmCardData | null
+  note?: string | null
+  model?: string
+  queries?: number
+}
+
 export interface LiveStatusResponse {
   system_tables?: boolean | Record<string, boolean>
 }

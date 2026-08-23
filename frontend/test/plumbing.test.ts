@@ -1121,6 +1121,87 @@ tests['Phase 6 views use shared safety plumbing and never the console proposal r
 }
 
 // ---------------------------------------------------------------------------
+// Phase 11 — the one assistant, on /api/chat with gated writes
+// ---------------------------------------------------------------------------
+
+tests['api.chat posts the message to /api/chat with the account header'] = async () => {
+  // The consolidation's whole point: the floating assistant now speaks the
+  // tool-calling `/api/chat` loop, not Genie's read-only `/api/genie/ask`. And
+  // like every write in the app it must carry the tenant header — a missing one
+  // silently falls back to the default account (`server/accounts.py:19-22`), which
+  // for a chat that can propose writes would confirm a change against the wrong
+  // tenant's estate.
+  installStorage('acct-chat')
+  const { adapter, seen } = capturingAdapter({
+    data: { conversation_id: 'conv_1', answer: 'Here is what I found.', confirm: null },
+  })
+  const response = await http
+    .post('/chat', { message: 'what is my portfolio value?' }, { adapter })
+    .then((r) => r.data)
+  assert.equal(seen.length, 1)
+  assert.equal(seen[0].url, '/chat')
+  assert.equal(seen[0].method, 'post')
+  assert.equal(seen[0].headers[ACCOUNT_HEADER], 'acct-chat')
+  assert.equal(response.answer, 'Here is what I found.')
+}
+
+tests['a chat turn that proposes a write comes back with a confirm token'] = async () => {
+  // `/api/chat` never applies a write itself: a write tool's proposal becomes a
+  // single-use confirm token in `response.confirm` (`server/routes/chat.py`). The
+  // assistant panel feeds that straight into the shared <ConfirmCard>, so a
+  // chat-proposed change lands in the same human-approval gate as any other and
+  // nothing auto-applies.
+  installStorage('acct-chat')
+  const proposed: ConfirmCardData = card({ intent: 'updateUseCaseStatus', summary: 'Set X to live' })
+  const { adapter } = capturingAdapter({
+    data: {
+      conversation_id: 'conv_2',
+      answer: 'I can make that change — confirm below.',
+      confirm: proposed,
+    },
+  })
+  const response = await http.post('/chat', { message: 'mark X as live' }, { adapter }).then((r) => r.data)
+  assert.ok(response.confirm, 'a proposed write must arrive as a confirm token')
+  assert.equal(response.confirm.intent, 'updateUseCaseStatus')
+  // A freshly-issued token, no consumed/expired markers, is exactly the `ready`
+  // phase <ConfirmCard> gates on — the write waits for approval, it is not applied.
+  assert.equal(phaseOf(response.confirm), 'ready')
+  assert.equal(canApprove(phaseOf(response.confirm)), true)
+}
+
+tests['the assistant panel calls /api/chat, gates writes, and marks the turn NO_RETRY'] = () => {
+  // Source-level guarantees for the one assistant. Driven off the source because
+  // this repo has no DOM harness (see the ConfirmCard note), and these are exactly
+  // the claims that a rewrite could quietly regress:
+  //   - it targets the consolidated `/api/chat`, via the account-scoped `api.chat`
+  //   - a proposed write is gated through <ConfirmCard>, never auto-applied
+  //   - the token-spending turn is NO_RETRY, so a 429 is not double-billed
+  //   - it goes through `api.*`, never a raw fetch or an anchor
+  const source = readFileSync('src/components/AssistantPanel.tsx', 'utf8')
+  assert.match(source, /api\.chat\(/, 'the panel must call the consolidated /api/chat via api.chat')
+  assert.doesNotMatch(source, /api\.genieAsk\(/, 'the consolidated assistant no longer calls Genie Q&A')
+  assert.match(source, /<ConfirmCard/, 'a chat-proposed write must be gated through the shared ConfirmCard')
+  assert.match(source, /NO_RETRY/, 'the token-spending chat turn must not auto-retry a 429')
+  assert.doesNotMatch(source, /\bfetch\s*\(/, 'all calls go through the account-scoped http client')
+  assert.doesNotMatch(source, /<a\s+[^>]*href=["']\/api/, 'no raw /api anchor bypassing the interceptor')
+  // And that api.chat itself hits the right endpoint and nothing re-points it.
+  const apiSource = readFileSync('src/api.ts', 'utf8')
+  assert.match(apiSource, /chat:\s*\(message: string[\s\S]*?post<ChatResponse>\('\/chat'/, 'api.chat must POST /chat')
+}
+
+tests['there is exactly one assistant panel — the Genie duplicate is gone'] = () => {
+  // Consolidation is a deletion as much as a rewrite: the old `GeniePanel.tsx` is
+  // removed so the app ships ONE assistant behind ONE floating FAB. A lingering
+  // second component is the failure this pins.
+  const components = readdirSync('src/components')
+  assert.ok(components.includes('AssistantPanel.tsx'), 'the consolidated AssistantPanel must exist')
+  assert.ok(!components.includes('GeniePanel.tsx'), 'the redundant GeniePanel must be removed')
+  const app = readFileSync('src/App.tsx', 'utf8')
+  assert.match(app, /<AssistantPanel\s*\/>/, 'App mounts the one AssistantPanel')
+  assert.doesNotMatch(app, /GeniePanel/, 'App no longer references the removed GeniePanel')
+}
+
+// ---------------------------------------------------------------------------
 // Runner
 // ---------------------------------------------------------------------------
 

@@ -13,7 +13,7 @@ import { fmtMoney } from './constants'
 import { FilterProvider } from './context/FilterContext'
 import { EulaGate } from './components/EulaGate'
 import { FilterBar } from './components/FilterBar'
-import { GeniePanel } from './components/GeniePanel'
+import { AssistantPanel } from './components/AssistantPanel'
 import { Header } from './components/Header'
 import type { TabId } from './components/Header'
 import { NewUseCaseModal } from './components/NewUseCaseModal'
@@ -270,7 +270,7 @@ function AppShell() {
         />
       ) : null}
 
-      <GeniePanel />
+      <AssistantPanel />
       <EulaGate />
     </div>
   )

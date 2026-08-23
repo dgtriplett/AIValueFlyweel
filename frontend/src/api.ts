@@ -17,6 +17,7 @@ import type {
   BootstrapResponse,
   CanonicalizeResponse,
   CatalogRecommendResponse,
+  ChatResponse,
   ClassificationRule,
   ClassifyResponse,
   Comment,
@@ -341,6 +342,25 @@ export const api = {
   genieAsk: (question: string, conversation_id?: string | null) =>
     http
       .post<GenieAskResponse>('/genie/ask', { question, conversation_id })
+      .then((r) => r.data),
+
+  // -------------------------------------------------------------------------
+  // Tier 3 Phase 11 — the one assistant.
+  //
+  // `/api/chat` is the tool-calling loop that supersedes `Ask Genie`
+  // (`/api/genie/ask`, kept server-side for a future SQL-mode toggle). It is
+  // `limiter("chat")` server-side — 6 burst / 20 per minute (`server/limits.py`)
+  // — and spends real tokens, so the caller marks the mutation `NO_RETRY`: an
+  // automatic second POST after a 429 spends the budget the `Retry-After` asked us
+  // to wait out, and re-runs a whole tool-calling turn for money.
+  //
+  // A write tool never writes here: the server turns its proposal into a
+  // single-use confirm token in `response.confirm`, which the SPA feeds straight
+  // into the shared `<ConfirmCard>` so no chat-proposed change auto-applies.
+  // -------------------------------------------------------------------------
+  chat: (message: string, conversation_id?: string | null) =>
+    http
+      .post<ChatResponse>('/chat', { message, conversation_id })
       .then((r) => r.data),
 
   // -------------------------------------------------------------------------
