@@ -61,6 +61,11 @@ const GenerateView = lazy(() => import('./views/GenerateView'))
 const ProposalsView = lazy(() => import('./views/ProposalsView'))
 const RoadmapImportView = lazy(() => import('./views/RoadmapImportView'))
 
+// Tier 3 Phase 7 — company research and assumption recalibration. Lazy for the
+// same reason as the rest: a wide review table with its own model calls, opened
+// deliberately at a new account rather than on the first screen.
+const ResearchView = lazy(() => import('./views/ResearchView'))
+
 function ComingSoon({ label }: { label: string }) {
   return (
     <section className="rounded-xl border border-navy-700 bg-navy-800 px-6 py-10 text-center">
@@ -176,7 +181,7 @@ function AppShell() {
       case 'roadmap_import':
         return <RoadmapImportView />
       case 'research':
-        return <ComingSoon label="Research" />
+        return <ResearchView />
       case 'accounts':
         return <ComingSoon label="Accounts" />
       case 'admin':

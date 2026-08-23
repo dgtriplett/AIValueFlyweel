@@ -58,6 +58,7 @@ import { draftToRule, testSummary } from '../src/views/RulesView'
 import { generationConfirmation } from '../src/views/GenerateView'
 import { proposalGenerationConfirmation } from '../src/views/ProposalsView'
 import { parseRoadmapPackage, roadmapImportConfirmation } from '../src/views/RoadmapImportView'
+import { ASSUMPTION_INVALIDATION_KEYS } from '../src/hooks/useAssumptionInvalidation'
 import type { ConfirmCardData } from '../src/types'
 
 // ---------------------------------------------------------------------------
@@ -1118,6 +1119,126 @@ tests['Phase 6 views use shared safety plumbing and never the console proposal r
     assert.match(apiSource, new RegExp(endpoint.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')))
   }
   assert.match(readFileSync('src/components/FileDrop.tsx', 'utf8'), /validate\?: \(file: File\)/)
+}
+
+// ---------------------------------------------------------------------------
+// 8. Tier 3 Phase 7 — research ↔ assumptions reconciliation
+// ---------------------------------------------------------------------------
+
+tests['a manual edit and a recalibration invalidate the SAME KPI query keys'] = () => {
+  // The bug this phase fixes: a research recalibration and a manual assumption edit
+  // used to invalidate DIFFERENT sets of keys, so a recalibration could leave the
+  // dashboard KPIs showing pre-calibration dollars. The fix is ONE definition both
+  // consume — `hooks/useAssumptionInvalidation.ts`. This pins that set to exactly
+  // the four keys `AssumptionsView` has always invalidated, so a change to it is a
+  // deliberate, reviewed edit rather than a silent divergence.
+  assert.deepEqual(
+    ASSUMPTION_INVALIDATION_KEYS.map((key) => [...key]),
+    [['assumptions'], ['portfolio-value'], ['use-cases'], ['blast']],
+  )
+}
+
+tests['both assumption-change paths invalidate THROUGH the shared hook, not inline'] = () => {
+  // Source-level because the hook is a React hook and this suite has no DOM/React
+  // harness (see the file header). The guarantee that matters is that NEITHER view
+  // hand-rolls its own `invalidateQueries` list for these keys — that is exactly
+  // how the console's copies drifted apart. Each must route through the one hook.
+  for (const file of ['AssumptionsView.tsx', 'ResearchView.tsx']) {
+    const source = readFileSync(`src/views/${file}`, 'utf8')
+    assert.match(
+      source,
+      /useAssumptionInvalidation/,
+      `${file} must invalidate through the shared hook`,
+    )
+    // No inline invalidation of the KPI keys the hook owns: if a view rebuilt the
+    // list itself, the two paths could diverge again. `use-cases` is the tell —
+    // it is the key a naive port forgets, and finding it in an inline
+    // `invalidateQueries` here means the single-source-of-truth was bypassed.
+    assert.doesNotMatch(
+      source,
+      /invalidateQueries\([^)]*\[\s*['"]use-cases['"]/,
+      `${file} must not invalidate 'use-cases' inline — route it through the hook`,
+    )
+  }
+}
+
+tests['Research is reachable in the Value nav group and has a render case'] = () => {
+  // Nav reachability: `research` must be declared as a TabId, listed in the Value
+  // group, and rendered by App.tsx — not left on the ComingSoon placeholder. The
+  // structural TabId↔render-case parity is `scripts/check_tab_render.py`; this
+  // pins the SEMANTIC placement the plan calls for (research lives under Value).
+  const header = readFileSync('src/components/Header.tsx', 'utf8')
+  assert.match(header, /\|\s*'research'/, "'research' must be a TabId")
+  assert.match(
+    header,
+    /label:\s*'Value',\s*ids:\s*\[[^\]]*'research'[^\]]*\]/,
+    "'research' must sit in the Value nav group",
+  )
+  const app = readFileSync('src/App.tsx', 'utf8')
+  assert.match(app, /case 'research':\s*\n\s*return <ResearchView \/>/,
+    'App.tsx must render ResearchView for the research tab')
+  // And the placeholder must be GONE for research — a lingering ComingSoon would
+  // still satisfy check_tab_render.py while shipping an empty tab.
+  assert.doesNotMatch(app, /case 'research':\s*\n\s*return <ComingSoon/)
+}
+
+tests['ResearchView uses shared safety plumbing and never a bare fetch or anchor'] = () => {
+  // The same guarantees Phase 6's views carry: the confirm gate for the write, and
+  // NO_RETRY on the token-spending calls so a 429 is not silently replayed against
+  // the research budget. The anchor/fetch bans are also enforced tree-wide above;
+  // asserting them here fails with THIS view named, which is faster to act on.
+  const source = readFileSync('src/views/ResearchView.tsx', 'utf8')
+  assert.match(source, /<ConfirmCard/)
+  assert.match(source, /NO_RETRY/)
+  assert.doesNotMatch(source, /\bfetch\s*\(/, 'no raw fetch — use the account-scoped api.*')
+  assert.doesNotMatch(
+    source.replace(/\/\*[\s\S]*?\*\//g, '').replace(/(^|[^:])\/\/.*$/gm, '$1'),
+    /<a\b[\s\S]*?\bhref=\{?\s*["'`]\/api\//i,
+    'no bare anchor download from /api — it bypasses the account interceptor',
+  )
+}
+
+tests['the research endpoints go through the account-scoped client'] = async () => {
+  // Every research call is a per-account write or read: `server/routes/research.py`
+  // reads `accounts.current()` on the profile, the proposals, and the apply. A
+  // request without `X-Grid-Atlas-Account` does NOT fail — it silently researches
+  // or recalibrates against the DEFAULT account — so the header must ride every one.
+  installStorage('acct-research')
+
+  const company = capturingAdapter({ data: { run_id: 1, company: {}, assumptions: [] } })
+  await http.post(
+    '/research/company',
+    { company_name: 'Eversource Energy', calibrate_assumptions: true, propose_lobs: true },
+    { adapter: company.adapter },
+  )
+  assert.equal(company.seen[0].headers[ACCOUNT_HEADER], 'acct-research')
+  assert.equal(company.seen[0].method, 'post')
+  assert.equal(company.seen[0].url, '/research/company')
+
+  const proposals = capturingAdapter({ data: { run_id: 1, assumptions: [], summary: {} } })
+  await http.get('/research/assumptions', { adapter: proposals.adapter })
+  assert.equal(proposals.seen[0].headers[ACCOUNT_HEADER], 'acct-research')
+
+  const apply = capturingAdapter({ data: { token: 't', intent: 'apply_research', assumptions: [] } })
+  await http.post('/research/apply', { run_id: 1, keys: ['x'] }, { adapter: apply.adapter })
+  assert.equal(apply.seen[0].headers[ACCOUNT_HEADER], 'acct-research')
+  assert.equal(apply.seen[0].url, '/research/apply')
+
+  const agent = capturingAdapter({ data: { assumption_refinements: [], app_enhancements: [] } })
+  await http.get('/agents/customer-enhancements', { adapter: agent.adapter })
+  assert.equal(agent.seen[0].headers[ACCOUNT_HEADER], 'acct-research')
+}
+
+tests['the research api surface hits the documented endpoints'] = () => {
+  const apiSource = readFileSync('src/api.ts', 'utf8')
+  for (const endpoint of [
+    '/research/company',
+    '/research/assumptions',
+    '/research/apply',
+    '/agents/customer-enhancements',
+  ]) {
+    assert.match(apiSource, new RegExp(endpoint.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')))
+  }
 }
 
 // ---------------------------------------------------------------------------
