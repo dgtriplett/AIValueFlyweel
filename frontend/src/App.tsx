@@ -66,14 +66,12 @@ const RoadmapImportView = lazy(() => import('./views/RoadmapImportView'))
 // deliberately at a new account rather than on the first screen.
 const ResearchView = lazy(() => import('./views/ResearchView'))
 
-function ComingSoon({ label }: { label: string }) {
-  return (
-    <section className="rounded-xl border border-navy-700 bg-navy-800 px-6 py-10 text-center">
-      <h2 className="text-lg font-semibold text-white">{label}</h2>
-      <p className="mt-2 text-sm text-navy-400">This feature is being migrated into the app.</p>
-    </section>
-  )
-}
+// Tier 3 Phase 8 — the Settings surfaces. Lazy for the same reason as the rest:
+// the account switcher, the branding editor and the admin console are operator
+// screens opened deliberately, not weight every visitor pays for in the entry chunk.
+const AccountsView = lazy(() => import('./views/AccountsView'))
+const AdminView = lazy(() => import('./views/AdminView'))
+const BrandingView = lazy(() => import('./views/BrandingView'))
 
 function AppShell() {
   // 'portfolio' unless the app was cold-loaded on a KB article deep link.
@@ -183,11 +181,11 @@ function AppShell() {
       case 'research':
         return <ResearchView />
       case 'accounts':
-        return <ComingSoon label="Accounts" />
+        return <AccountsView />
       case 'admin':
-        return <ComingSoon label="Administration" />
+        return <AdminView />
       case 'branding':
-        return <ComingSoon label="Branding" />
+        return <BrandingView />
       default: {
         const unhandledTab: never = tab
         return unhandledTab

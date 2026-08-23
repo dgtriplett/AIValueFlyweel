@@ -176,6 +176,12 @@ SOURCE_REQUIRED = {
         "<GenerateView",
         "<ProposalsView",
         "<RoadmapImportView",
+        # Tier 3 Phase 8 — the Settings surfaces. Each replaced a `<ComingSoon>`
+        # slot in the Settings nav group; a regression here is a white screen on a
+        # tab the nav offers.
+        "<AccountsView",
+        "<AdminView",
+        "<BrandingView",
     ],
     # These three WRITE, and the disciplines that make that safe are invisible in
     # the rendered output: a mutation that forgot `NO_RETRY` on a `generate`-limited
@@ -219,6 +225,28 @@ SOURCE_REQUIRED = {
         "<CatalogView",
         "<ScopeSwitch",
         "scope === 'catalog'",
+    ],
+    # Tier 3 Phase 8 — the Settings surfaces. The account SWITCH must CLEAR the
+    # cache (not invalidate), the destructive admin ops must be ConfirmCard +
+    # NO_RETRY, and the logo upload must go through the shared FileDrop. These
+    # disciplines are invisible in the rendered output, so they are pinned here.
+    "views/AccountsView.tsx": [
+        "api.accounts",
+        "queryClient.clear()",
+        "...NO_RETRY",
+    ],
+    "views/AdminView.tsx": [
+        "api.demoLoad",
+        "api.demoReset",
+        "api.genieProvision",
+        "<ConfirmCard",
+        "...NO_RETRY",
+    ],
+    "views/BrandingView.tsx": [
+        "api.updateBranding",
+        "api.uploadBrandingLogo",
+        "<FileDrop",
+        "...NO_RETRY",
     ],
 }
 
