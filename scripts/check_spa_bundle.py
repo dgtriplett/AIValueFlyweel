@@ -6,10 +6,10 @@
 WHAT REPLACED WHAT, AND WHY
 ---------------------------
 `frontend/src/` used to be absent, so the only way to change the SPA was to
-regex-patch the minified bundle. Four scripts did that (`patch_spa_nav.py`,
-`patch_spa_grouped_nav.py`, `patch_spa_proposal_button.py`,
-`patch_spa_customer_visibility.py`) plus `rebrand_bundle.py`, and CI gated three of
-them by running `--check` and asserting the patch was still applied.
+regex-patch the minified bundle. Four scripts did that (patch_spa_nav.py,
+patch_spa_grouped_nav.py, patch_spa_proposal_button.py,
+patch_spa_customer_visibility.py, now deleted) plus `rebrand_bundle.py`, and CI
+gated three of them by running `--check` and asserting the patch was still applied.
 
 The source now exists and the bundle is built from it, so those gates cannot work
 as written: they assert against MINIFIED IDENTIFIERS (`Dg.find(x=>x.id===`,
@@ -34,7 +34,7 @@ prove:
 
 WHY THIS IS A SCRIPT AND NOT ONLY A TEST
 ----------------------------------------
-Same reason as the patch scripts it replaces: the failure mode worth catching is a
+Same reason as the patch scripts it replaced: the failure mode worth catching is a
 bundle that was rebuilt from stale source, or not rebuilt at all, and the person
 who needs to know is whoever is about to commit. `scripts/check.py` calls this, so
 it runs on a laptop and in CI identically.

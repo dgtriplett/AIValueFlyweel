@@ -149,12 +149,9 @@ def main() -> int:
         #
         # This replaces the historical patch_spa_grouped_nav.py,
         # patch_spa_proposal_button.py, and patch_spa_customer_visibility.py
-        # `--check` gates. Those asserted
-        # minified identifiers (`Dg.find(x=>x.id===`) that a minifier reassigns on
-        # every build, so they could only ever pass for one historical bundle.
-        # The structural half of what they guarded moved to
-        # tests/test_console_nav.py::TestSpaSourceIsTheSourceOfTruth, which checks
-        # the source and is a stronger claim than a substring of minified output.
+        # `--check` gates (now deleted). Those asserted minified identifiers
+        # (`Dg.find(x=>x.id===`) that a minifier reassigns on every build, so they
+        # could only ever pass for one historical bundle.
         results.append(run("SPA bundle carries the source's behaviour",
                            [sys.executable, str(ROOT / "scripts"
                                                 / "check_spa_bundle.py")]))
