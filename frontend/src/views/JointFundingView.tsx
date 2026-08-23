@@ -176,6 +176,7 @@ function JointCaseDetail({
   const [costShare, setCostShare] = useState<Record<string, number>>({})
   const [sponsor, setSponsor] = useState('')
   const [briefOpen, setBriefOpen] = useState(false)
+  const [deliveryCost, setDeliveryCost] = useState<number | null>(null)
 
   const lobName = (lobId?: number | null) =>
     lobId != null ? (lobs.find((lob) => lob.id === lobId)?.name ?? '—') : '—'
@@ -184,7 +185,11 @@ function JointCaseDetail({
   // a refetch does not silently undo what someone typed in front of the room.
   useEffect(() => {
     if (opportunity.data?.cost_share) setCostShare(opportunity.data.cost_share)
-  }, [opportunity.data])
+    // Prefill delivery cost with the auto-calculated estimate (user can edit/clear)
+    if (opportunity.data?.delivery_cost_mid != null && deliveryCost === null) {
+      setDeliveryCost(opportunity.data.delivery_cost_mid)
+    }
+  }, [opportunity.data, deliveryCost])
 
   const brief = useMutation({ mutationFn: () => api.jointBrief(assetId) })
 
@@ -201,6 +206,7 @@ function JointCaseDetail({
         cost_share: costShare,
         brief_md: brief.data?.brief_md,
         status: 'proposed',
+        delivery_cost: deliveryCost ?? undefined,
       })
     },
     onSuccess: () => queryClient.invalidateQueries({ queryKey: ['funding-requests'] }),
@@ -370,6 +376,34 @@ function JointCaseDetail({
             >
               {fmtDollarsExact(totalPledged)}
             </span>
+          </div>
+          <div className="mt-3">
+            <label className="text-xs text-navy-500" htmlFor="jf-delivery-cost">
+              Labor / delivery cost
+            </label>
+            <p className="text-xs text-navy-500 mb-1">
+              Estimated cost to deliver the enabled use cases (prefilled with auto-estimate; you can
+              edit or clear)
+            </p>
+            <div className="flex items-center gap-1">
+              <span className="text-sm text-navy-500">$</span>
+              <input
+                id="jf-delivery-cost"
+                name="jf-delivery-cost"
+                type="number"
+                aria-label="Labor or delivery cost"
+                className="input-field"
+                placeholder={
+                  jointCase.delivery_cost_mid != null
+                    ? String(Math.round(jointCase.delivery_cost_mid))
+                    : 'enter labor cost'
+                }
+                value={deliveryCost ?? ''}
+                onChange={(event) =>
+                  setDeliveryCost(event.target.value ? Number(event.target.value) : null)
+                }
+              />
+            </div>
           </div>
           <div className="mt-3">
             <label className="text-xs text-navy-500" htmlFor="jf-sponsor">

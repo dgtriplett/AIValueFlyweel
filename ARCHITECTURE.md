@@ -125,6 +125,10 @@ written back to Lakebase, which stays the portfolio's system of record.
   global selection into the default account only, preserves non-default accounts'
   real work via roadmap/value/external-sync rows, and lets newly-created accounts
   start with a clean portfolio ready for roadmap import.
+- **Joint funding delivery cost** — `015_joint_funding_delivery_cost.sql`: adds
+  `funding_requests.delivery_cost` for user-entered labor/people cost, replacing
+  the auto-assumed estimate with an editable field. The auto-calculated
+  `delivery_cost_mid` now serves only as a prefilled suggestion.
 - **Migration ledger** — `schema_migrations`, created by `server/migrator.py`
   rather than by a numbered migration, since it must exist before the ledger can
   be consulted.
