@@ -49,6 +49,8 @@ import {
   wikiSlugs,
 } from '../src/lib/markdown'
 import { MAX_ATTACHMENT_BYTES, rejectionOf } from '../src/components/FileDrop'
+import { setAccountId } from '../src/views/AccountsView'
+import { logoRejection } from '../src/views/BrandingView'
 import { parseTags } from '../src/views/ArticleEditor'
 import { splitExcerpt } from '../src/views/KnowledgeView'
 import { downloadOnboardingTemplate, templateFilename } from '../src/views/OnboardingView'
@@ -1199,6 +1201,140 @@ tests['there is exactly one assistant panel — the Genie duplicate is gone'] = 
   const app = readFileSync('src/App.tsx', 'utf8')
   assert.match(app, /<AssistantPanel\s*\/>/, 'App mounts the one AssistantPanel')
   assert.doesNotMatch(app, /GeniePanel/, 'App no longer references the removed GeniePanel')
+}
+
+// ---------------------------------------------------------------------------
+// 8. Tier 3 Phase 8 — the Settings surfaces (Accounts, Admin, Branding)
+//
+// These are operator screens, and the two facts most worth pinning are the ones a
+// reimplementation would fake: every WRITE carries the account header (a missing
+// one mutates the DEFAULT account's data, §4.1), and the destructive admin
+// operations go through the shared ConfirmCard + NO_RETRY rather than reinventing a
+// confirm. The admin authz is SERVER-SIDE (`require_admin`), so nothing here asserts
+// a client-side gate — only that a 403 is surfaced, not swallowed into a broken page.
+// ---------------------------------------------------------------------------
+
+tests['Phase 8 settings views use shared plumbing and never a raw fetch or console link'] = () => {
+  for (const file of ['AccountsView.tsx', 'AdminView.tsx', 'BrandingView.tsx']) {
+    const source = readFileSync(`src/views/${file}`, 'utf8')
+      .replace(/\/\*[\s\S]*?\*\//g, '')
+      .replace(/(^|[^:])\/\/.*$/gm, '$1')
+    // The interceptor carries the account header; a raw fetch would bypass it.
+    assert.doesNotMatch(source, /\bfetch\s*\(/, `${file} must not call fetch directly`)
+    // No cross-links back into the old console router.
+    assert.doesNotMatch(source, /\/console\/#/, `${file} must not link into the console`)
+  }
+  // The two destructive admin operations are confirm-gated with the shared card and
+  // never auto-replayed.
+  const admin = readFileSync('src/views/AdminView.tsx', 'utf8')
+  assert.match(admin, /<ConfirmCard/)
+  assert.match(admin, /NO_RETRY/)
+  // The genie space id / space url are the ONE place the admin view renders an
+  // external anchor, and it must be a target=_blank workspace link, not a same-tab
+  // navigation that throws away the app.
+  assert.match(admin, /rel="noopener noreferrer"/)
+}
+
+tests['Phase 8 admin routes every server call through the api module'] = () => {
+  const apiSource = readFileSync('src/api.ts', 'utf8')
+  for (const endpoint of [
+    '/demo/status',
+    '/demo/load',
+    '/demo/reset',
+    '/genie/status',
+    '/genie/provision',
+    '/live/sync-genie',
+    '/generate/cleanup',
+    '/branding',
+    '/branding/logo',
+  ]) {
+    assert.match(apiSource, new RegExp(endpoint.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')))
+  }
+  // Every one of these is declared on `http` (the account-scoped client), not on a
+  // bare axios instance — the interceptor is what scopes them per account.
+  const adminMethods = ['demoStatus', 'demoLoad', 'demoReset', 'genieStatus', 'genieProvision']
+  for (const method of adminMethods) {
+    assert.match(apiSource, new RegExp(`${method}:[\\s\\S]{0,120}?http\\.`), `${method} must use http`)
+  }
+}
+
+tests['Phase 8 settings views are all wired into the App render switch'] = () => {
+  const app = readFileSync('src/App.tsx', 'utf8')
+  assert.match(app, /<AccountsView/)
+  assert.match(app, /<AdminView/)
+  assert.match(app, /<BrandingView/)
+  // Their ComingSoon placeholders are gone from the Settings cases.
+  assert.doesNotMatch(app, /case 'accounts':\s*return <ComingSoon/)
+  assert.doesNotMatch(app, /case 'admin':\s*return <ComingSoon/)
+  assert.doesNotMatch(app, /case 'branding':\s*return <ComingSoon/)
+}
+
+tests['switching accounts persists the id and the admin writes carry the account header'] =
+  async () => {
+    // The account SWITCH is the highest-risk item in the phase: it writes the same
+    // localStorage key the interceptor reads, so the very next request is scoped to
+    // the new account. `setAccountId` is the pure half of that; the view clears the
+    // react-query cache around it (asserted structurally below).
+    installStorage('acct-old')
+    assert.equal(setAccountId(99), true)
+    assert.equal(accountId(), '99')
+
+    // And the destructive admin writes are account-scoped: a missing header mutates
+    // the DEFAULT account's data, so this is asserted per verb.
+    installStorage('acct-admin')
+
+    const load = capturingAdapter({ data: { counts: { use_cases: 42 } } })
+    await http.post('/demo/load', undefined, { adapter: load.adapter })
+    assert.equal(load.seen[0].headers[ACCOUNT_HEADER], 'acct-admin')
+    assert.equal(load.seen[0].method, 'post')
+    assert.equal(load.seen[0].url, '/demo/load')
+
+    const reset = capturingAdapter({ data: { counts: { use_cases: 4 } } })
+    await http.post('/demo/reset', undefined, { adapter: reset.adapter })
+    assert.equal(reset.seen[0].headers[ACCOUNT_HEADER], 'acct-admin')
+
+    const provision = capturingAdapter({ data: { space_id: 'sp-1' } })
+    await http.post('/genie/provision', {}, { adapter: provision.adapter })
+    assert.equal(provision.seen[0].headers[ACCOUNT_HEADER], 'acct-admin')
+
+    const branding = capturingAdapter({ data: { ok: true, bytes: 2048, mime: 'image/png' } })
+    await http.post('/branding/logo', new FormData(), { adapter: branding.adapter })
+    assert.equal(branding.seen[0].headers[ACCOUNT_HEADER], 'acct-admin')
+  }
+
+tests['the account switch clears the react-query cache rather than invalidating it'] = () => {
+  // §4.1: a scoped view holding the PREVIOUS account's rows after the header changed
+  // is the tenant-mixing failure the interceptor exists to prevent. `invalidate`
+  // keeps stale data on screen while it refetches — the exact window to avoid — so
+  // the switch must CLEAR the cache outright.
+  const source = readFileSync('src/views/AccountsView.tsx', 'utf8')
+  assert.match(source, /queryClient\.clear\(\)/)
+  assert.match(source, /setAccountId\(/)
+}
+
+tests['a non-admin account list falls back to active-only rather than erroring'] = () => {
+  // `include_inactive=true` is admin-gated; a 403 is the DESIGNED answer for a
+  // non-admin, so the switcher narrows the request instead of showing a broken page.
+  const source = readFileSync('src/views/AccountsView.tsx', 'utf8')
+  assert.match(source, /error\.isForbidden/)
+  assert.match(source, /api\.accounts\(false\)/)
+}
+
+tests['the branding logo rejection matches the server cap and type list'] = () => {
+  // A courtesy check, not a gate — the server sniffs magic bytes. But the obvious
+  // mistakes (a 5MB photo, a .txt) should not cost a round trip and a 413/422.
+  assert.equal(logoRejection(fakeFile('logo.png', 1024)), null)
+  assert.equal(logoRejection(fakeFile('logo.svg', 4096)), null)
+  assert.match(logoRejection(fakeFile('empty.png', 0)) ?? '', /empty/)
+  const tooBig = logoRejection(fakeFile('huge.png', 3 * 1024 * 1024)) ?? ''
+  assert.match(tooBig, /the limit is 2 MB/)
+  assert.match(logoRejection(fakeFile('doc.txt', 512)) ?? '', /not an accepted image type/)
+
+  // Uploaded through the shared FileDrop with a custom validate, not a bare input.
+  const source = readFileSync('src/views/BrandingView.tsx', 'utf8')
+  assert.match(source, /MAX_LOGO_BYTES = 2 \* 1024 \* 1024/)
+  assert.match(source, /<FileDrop/)
+  assert.match(source, /validate=\{logoRejection\}/)
 }
 
 // ---------------------------------------------------------------------------

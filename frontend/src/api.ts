@@ -9,13 +9,19 @@ import axios from 'axios'
 import { ACCOUNT_HEADER, accountId } from './lib/account'
 import { describeError } from './lib/errors'
 import type {
+  Account,
+  AccountsResponse,
+  AccountCreateResponse,
   ArtifactsResponse,
   Assumption,
   AttributeResponse,
   BlastRadiusResponse,
   BlastNode,
   BootstrapResponse,
+  Branding,
+  BrandingLogoResponse,
   CanonicalizeResponse,
+  CleanupResponse,
   CatalogRecommendResponse,
   ChatResponse,
   ClassificationRule,
@@ -27,6 +33,7 @@ import type {
   CurrentSnapshotResponse,
   DashboardData,
   DataAsset,
+  DemoStatusResponse,
   DetectDependenciesResponse,
   Domain,
   DomainGapsResponse,
@@ -41,6 +48,8 @@ import type {
   GenerateUseCasesInput,
   GenerateUseCasesResponse,
   GenieAskResponse,
+  GenieProvisionResponse,
+  GenieStatusResponse,
   GlossaryResponse,
   HealthResponse,
   HypothesizedValue,
@@ -73,6 +82,7 @@ import type {
   SetupStatusResponse,
   SnapshotsResponse,
   SourceAlias,
+  SyncGenieResponse,
   SourceRecommendResponse,
   TaxonomyCoverage,
   TaxonomyResponse,
@@ -818,6 +828,119 @@ export const api = {
         dry_run: false,
       })
       .then((r) => r.data),
+
+  // -------------------------------------------------------------------------
+  // Tier 3 Phase 8 — the Settings surfaces (Accounts, Admin & audit, Branding).
+  //
+  // These are operator surfaces, and three of the writes here are ADMIN-GATED
+  // server-side after the Phase 0 hardening: `POST /demo/load`, `POST /demo/reset`
+  // and `POST /genie/provision` all call `require_admin` and fail closed. There is
+  // deliberately no `is_admin` endpoint the client could trust, so the UI does NOT
+  // gate them client-side — it attempts the call and surfaces the server's 403
+  // `detail`. `include_inactive=true` on the account list is admin-gated the same
+  // way (`accounts.py:list_accounts`), which is why the switcher requests it and
+  // treats a 403 as "you cannot see archived accounts", not as a broken page.
+  //
+  // Every one goes through `http`, so the account interceptor scopes it — a
+  // missing header on a WRITE mutates the DEFAULT account's data (`§4.1`). The
+  // account SWITCH itself is the highest-risk item: it writes localStorage and the
+  // caller clears the whole react-query cache, because a scoped view holding the
+  // previous account's rows is the exact tenant-mixing failure this phase guards.
+  // -------------------------------------------------------------------------
+
+  /**
+   * The accounts this caller may switch between, with counts for the switcher.
+   *
+   * `include_inactive` enumerates ARCHIVED accounts and is admin-gated — a 403 is
+   * the designed answer for a non-admin, not a failure, so the view narrows the
+   * request to active accounts on 403 rather than showing an error.
+   */
+  accounts: (include_inactive = false) =>
+    http
+      .get<AccountsResponse>(`/accounts?include_inactive=${include_inactive}`)
+      .then((r) => r.data),
+
+  /** Add an account. Admin-gated server-side; a 403 carries the reason. */
+  createAccount: (body: { name: string; utility_type?: string | null }) =>
+    http.post<AccountCreateResponse>('/accounts', body).then((r) => r.data),
+
+  /** Rename / retype / activate / make-default. Admin-gated server-side. */
+  updateAccount: (
+    id: number,
+    body: {
+      name?: string
+      utility_type?: string | null
+      is_active?: boolean
+      make_default?: boolean
+    },
+  ) => http.patch<Account>(`/accounts/${id}`, body).then((r) => r.data),
+
+  // ---- Admin & audit -------------------------------------------------------
+
+  /**
+   * Demo-mode state. A 404 is the designed answer when `DEMO_MODE` is off, so the
+   * view catches it and renders the disabled card rather than an error.
+   */
+  demoStatus: () => http.get<DemoStatusResponse>('/demo/status').then((r) => r.data),
+
+  /**
+   * Replace the portfolio with the showcase dataset. Destructive, confirm-gated in
+   * the view, and ADMIN-GATED server-side — a non-admin gets a 403 whose `detail`
+   * is surfaced verbatim. `NO_RETRY` at the call site: an automatic replay of a
+   * destructive write after an ambiguous failure is never correct.
+   */
+  demoLoad: () => http.post<{ counts?: Record<string, number> }>('/demo/load').then((r) => r.data),
+
+  /** Reset the portfolio to pristine day-1. Destructive, admin-gated server-side. */
+  demoReset: () => http.post<{ counts?: Record<string, number> }>('/demo/reset').then((r) => r.data),
+
+  /** Genie readiness, and whether this app can provision a space itself. */
+  genieStatus: () => http.get<GenieStatusResponse>('/genie/status').then((r) => r.data),
+
+  /**
+   * Create the Genie space over the portfolio mirror. ADMIN-GATED server-side and
+   * `sweep`-limited; the view spreads `NO_RETRY` because it mirrors the portfolio
+   * and builds a space — replaying it after a timeout could half-build a second.
+   */
+  genieProvision: () =>
+    http.post<GenieProvisionResponse>('/genie/provision', {}).then((r) => r.data),
+
+  /** Refresh the mirror the Genie space reads. Not admin-gated. */
+  syncGenieMirror: () =>
+    http.post<SyncGenieResponse>('/live/sync-genie').then((r) => r.data),
+
+  /** Reclaim expired generation previews and consumed confirm tokens. Safe. */
+  generateCleanup: () =>
+    http.post<CleanupResponse>('/generate/cleanup').then((r) => r.data),
+
+  // ---- Branding ------------------------------------------------------------
+
+  /** What the header renders. Never raises server-side — branding is chrome. */
+  branding: () => http.get<Branding>('/branding').then((r) => r.data),
+
+  /** Set name / subtitle / accent. Returns the recomputed branding. */
+  updateBranding: (body: {
+    display_name?: string | null
+    subtitle?: string | null
+    accent_color?: string | null
+  }) => http.put<Branding>('/branding', body).then((r) => r.data),
+
+  /**
+   * Upload a logo (≤2MB, image MIME only server-side, `branding.py:MAX_LOGO_BYTES`).
+   *
+   * Like every other multipart call, no `Content-Type` is set: axios derives the
+   * boundary from the `FormData`, and setting one by hand omits it so the server
+   * cannot parse the body. It still goes through `http`, so the interceptor scopes
+   * it — a logo is per-account.
+   */
+  uploadBrandingLogo: (file: File) => {
+    const body = new FormData()
+    body.append('file', file)
+    return http.post<BrandingLogoResponse>('/branding/logo', body).then((r) => r.data)
+  },
+
+  /** Remove the logo. Returns the recomputed branding. */
+  deleteBrandingLogo: () => http.delete<Branding>('/branding/logo').then((r) => r.data),
 }
 
 /** Value-model helper: the drawer and the wizard both read components this way. */
