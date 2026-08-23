@@ -520,7 +520,10 @@ class TestSpaSourceIsTheSourceOfTruth(unittest.TestCase):
             r"const ENTRY_TAB: TabId = '([a-zA-Z_][a-zA-Z0-9_]*)'", self.header
         )
         self.assertIsNotNone(entry, "no ENTRY_TAB declared")
-        unreachable = self.declared_tab_ids() - grouped - {entry.group(1)}
+        tool_tabs = re.search(r"const TOOL_TABS: TabId\[\] = \[(.*?)\]", self.header, re.S)
+        self.assertIsNotNone(tool_tabs, "no TOOL_TABS declared")
+        tools = set(re.findall(r"'([a-zA-Z_][a-zA-Z0-9_]*)'", tool_tabs.group(1)))
+        unreachable = self.declared_tab_ids() - grouped - {entry.group(1)} - tools
         self.assertEqual(unreachable, set(),
                          f"tabs unreachable from the nav: {sorted(unreachable)}")
 
@@ -561,9 +564,12 @@ class TestSpaSourceIsTheSourceOfTruth(unittest.TestCase):
         self.assertIn("matchesUseCase", portfolio)
 
     def test_the_console_links_are_present(self):
-        for href in ("/console/#kb", "/console/#proposals", "/console/"):
+        for href in ("/console/#kb", "/console/"):
             self.assertIn(href, self.header,
                           f"the SPA header does not link to {href}")
+        self.assertNotIn("/console/#proposals", self.header,
+                         "proposals are ported and must stay inside the SPA")
+        self.assertIn("setTab(id)", self.header)
 
     def test_the_menus_are_accessible(self):
         """A dropdown a keyboard cannot close is a trap."""
@@ -600,22 +606,14 @@ class TestSpaSourceIsTheSourceOfTruth(unittest.TestCase):
                           "a setTab call does not first dismiss the open menu: "
                           f"...{self.header[max(0, at - 90):at + 30]!r}")
 
-    def test_the_drawer_proposal_link_uses_the_id_prop(self):
-        """It must read the ID, not the edit-form draft.
-
-        The original patch bound this to the edit draft, which is only populated
-        in edit mode — so the link never rendered on a normal open. It deployed
-        looking like the patch had failed. In source the binding is explicit.
-        """
+    def test_the_drawer_proposal_action_uses_the_id_prop(self):
+        """It must pass the real ID into the in-SPA proposal view."""
         self.assertIn("data-gaProposalBtn", self.drawer)
-        self.assertIn("/console/#proposals/${ucId}", self.drawer,
-                      "the drawer link must interpolate the ucId prop")
-        self.assertNotIn("proposals/${draft", self.drawer,
-                         "the draft is only populated in edit mode")
+        self.assertIn("onWriteProposal(ucId)", self.drawer)
+        self.assertNotIn("/console/#proposals", self.drawer)
 
     def test_the_drawer_proposal_link_is_guarded_on_the_id(self):
-        """The drawer renders before its data arrives; an unguarded link would
-        read #proposals/undefined and open the console pointed at nothing."""
+        """The drawer renders before its data arrives; keep the action guarded."""
         index = self.drawer.index("data-gaProposalBtn")
         self.assertIn("ucId ?", self.drawer[max(0, index - 200):index],
                       "the proposal link is not guarded on the id being present")

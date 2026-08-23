@@ -69,7 +69,7 @@ import type { ConfirmApplyResponse, ConfirmCardData } from '../types'
 
 export interface ConfirmCardProps {
   /** The token from the preview step. Single-use; the server expires it. */
-  token: string
+  token?: string
   /**
    * The card contents, when the caller already has them from the preview
    * response. Omit to peek `GET /confirm/{token}` — which is what a card restored
@@ -80,6 +80,8 @@ export interface ConfirmCardProps {
   summary?: string | null
   /** Called with the server's response after a successful apply. */
   onApplied?: (response: ConfirmApplyResponse) => void
+  /** Run a caller-owned expensive action after approval instead of consuming a token. */
+  onApprove?: () => Promise<unknown>
   /** Called when the user declines. Nothing was written. */
   onCancel?: () => void
   /** Label for the approve button — "Create 4 use cases" beats "Approve". */
@@ -91,6 +93,7 @@ export function ConfirmCard({
   data = null,
   summary,
   onApplied,
+  onApprove,
   onCancel,
   approveLabel = 'Approve',
 }: ConfirmCardProps) {
@@ -99,8 +102,8 @@ export function ConfirmCard({
   // where the preview response already carried everything.
   const peek = useQuery({
     queryKey: ['confirm', token],
-    queryFn: () => api.readConfirm(token),
-    enabled: data == null,
+    queryFn: () => api.readConfirm(token!),
+    enabled: data == null && token != null,
     // A peeked token must not be re-read on a whim: it is cheap but it is rate
     // limited, and its answer only changes when we ourselves consume it.
     staleTime: Infinity,
@@ -140,7 +143,17 @@ export function ConfirmCard({
   }, [peek.isError, peek.error])
 
   const apply = useMutation({
-    mutationFn: () => api.applyConfirm(token),
+    mutationFn: async () => {
+      if (onApprove) {
+        const response = await onApprove()
+        return {
+          ...(response && typeof response === 'object' ? response : {}),
+          ok: true,
+          intent: card?.intent ?? 'approved_action',
+        } as ConfirmApplyResponse
+      }
+      return api.applyConfirm(token!)
+    },
     // Single-use token: an automatic second POST is not a retry, it is a
     // guaranteed 409 that overwrites the real error. See `lib/retry.ts`.
     ...NO_RETRY,
@@ -171,7 +184,7 @@ export function ConfirmCard({
     <div
       className="card p-4 space-y-3"
       data-ga-confirm={phase}
-      data-ga-confirm-token={token}
+      data-ga-confirm-token={token ?? 'local-action'}
     >
       <div className="flex items-start gap-2">
         <PhaseIcon phase={phase} />

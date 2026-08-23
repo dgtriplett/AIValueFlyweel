@@ -30,6 +30,9 @@ import type {
   EstimateValueResponse,
   ExecutivePack,
   FundingRequest,
+  GenerateCommitInput,
+  GenerateUseCasesInput,
+  GenerateUseCasesResponse,
   GenieAskResponse,
   GlossaryResponse,
   HealthResponse,
@@ -45,9 +48,14 @@ import type {
   LiveSyncResponse,
   Lob,
   PortfolioValue,
+  ProposalContextResponse,
+  ProposalGenerateResponse,
   RecommendResponse,
   RequiresEdge,
   RoadmapResponse,
+  RoadmapImportApplyResponse,
+  RoadmapImportPreviewResponse,
+  RoadmapPackage,
   RuleInput,
   RuleSeedResponse,
   RuleTestResponse,
@@ -634,6 +642,43 @@ export const api = {
   /** Dry-run the active rules against real discovered rows. `generate`-limited. */
   testRules: (limit = 100) =>
     http.post<RuleTestResponse>('/rules/test', { limit }).then((r) => r.data),
+
+  // Tier 3 Phase 6 — every call stays on the account-scoped axios client. The
+  // views mark all POST mutations NO_RETRY because generation and import must
+  // never be replayed automatically after an ambiguous failure.
+  generateUseCases: (body: GenerateUseCasesInput) =>
+    http.post<GenerateUseCasesResponse>('/generate/use-cases', body).then((r) => r.data),
+
+  prepareGeneratedUseCases: (body: GenerateCommitInput) =>
+    http.post<ConfirmCardData>('/generate/use-cases/commit', body).then((r) => r.data),
+
+  proposalContext: (useCaseId: number) =>
+    http
+      .get<ProposalContextResponse>(`/proposals/use-cases/${useCaseId}/context`)
+      .then((r) => r.data),
+
+  generateProposal: (useCaseId: number, regenerate = false) =>
+    http
+      .post<ProposalGenerateResponse>(
+        `/proposals/use-cases/${useCaseId}${regenerate ? '?regenerate=true' : ''}`,
+      )
+      .then((r) => r.data),
+
+  previewRoadmapImport: (roadmapPackage: RoadmapPackage) =>
+    http
+      .post<RoadmapImportPreviewResponse>('/sync/maturity-roadmap/preview', {
+        package: roadmapPackage,
+        dry_run: true,
+      })
+      .then((r) => r.data),
+
+  applyRoadmapImport: (roadmapPackage: RoadmapPackage) =>
+    http
+      .post<RoadmapImportApplyResponse>('/sync/maturity-roadmap/apply', {
+        package: roadmapPackage,
+        dry_run: false,
+      })
+      .then((r) => r.data),
 }
 
 /** Value-model helper: the drawer and the wizard both read components this way. */

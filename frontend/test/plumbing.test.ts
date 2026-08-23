@@ -55,6 +55,9 @@ import { downloadOnboardingTemplate } from '../src/views/OnboardingView'
 import { canonicalOptions } from '../src/views/SourceMappingView'
 import { classifySummary, dimensionLabel, rankedValues } from '../src/views/TaxonomyView'
 import { draftToRule, testSummary } from '../src/views/RulesView'
+import { generationConfirmation } from '../src/views/GenerateView'
+import { proposalGenerationConfirmation } from '../src/views/ProposalsView'
+import { parseRoadmapPackage, roadmapImportConfirmation } from '../src/views/RoadmapImportView'
 import type { ConfirmCardData } from '../src/types'
 
 // ---------------------------------------------------------------------------
@@ -948,6 +951,67 @@ tests['a 429 on a generate-limited curation write keeps the server’s retry adv
       },
     )
   }
+
+// ---------------------------------------------------------------------------
+// 7. Tier 3 Phase 6 — token-spending generation and roadmap import
+// ---------------------------------------------------------------------------
+
+tests['roadmap packages accept either envelope shape and require use cases'] = () => {
+  assert.deepEqual(
+    parseRoadmapPackage('{"package":{"useCases":[{"id":"uc-1"}]}}'),
+    { useCases: [{ id: 'uc-1' }] },
+  )
+  assert.deepEqual(
+    parseRoadmapPackage('{"use_cases":[{"title":"Grid visibility"}]}'),
+    { use_cases: [{ title: 'Grid visibility' }] },
+  )
+  assert.throws(() => parseRoadmapPackage(''), /Choose a roadmap package/)
+  assert.throws(() => parseRoadmapPackage('{nope'), /not valid JSON/)
+  assert.throws(() => parseRoadmapPackage('{"useCases":[]}'), /non-empty useCases array/)
+}
+
+tests['Phase 6 expensive actions explain the spend before approval'] = () => {
+  const generation = generationConfirmation({
+    lob_id: null,
+    lens: 'ready',
+    count: 4,
+    time_horizon_bias: null,
+    prioritize_regulatory: false,
+  })
+  assert.match(generation.summary ?? '', /Generate 4 use-case candidates with the LLM/)
+  assert.equal(generation.after?.lens, 'ready')
+
+  const proposal = proposalGenerationConfirmation(17)
+  assert.match(proposal.summary ?? '', /spends an LLM generation/)
+  assert.match(proposal.summary ?? '', /use case 17/)
+
+  const roadmap = roadmapImportConfirmation({
+    useCases: { incoming: 5, mapped: 2, toCreateOrTitleMatch: 3 },
+  })
+  assert.equal(roadmap.intent, 'apply_maturity_roadmap')
+  assert.equal(roadmap.after?.incoming, 5)
+  assert.equal(roadmap.after?.create_or_match, 3)
+}
+
+tests['Phase 6 views use shared safety plumbing and never the console proposal route'] = () => {
+  for (const file of ['GenerateView.tsx', 'ProposalsView.tsx', 'RoadmapImportView.tsx']) {
+    const source = readFileSync(`src/views/${file}`, 'utf8')
+    assert.match(source, /<ConfirmCard/)
+    assert.match(source, /NO_RETRY/)
+    assert.doesNotMatch(source, /\bfetch\s*\(/)
+    assert.doesNotMatch(source, /\/console\/#proposals/)
+  }
+  const apiSource = readFileSync('src/api.ts', 'utf8')
+  for (const endpoint of [
+    '/generate/use-cases',
+    '/proposals/use-cases/',
+    '/sync/maturity-roadmap/preview',
+    '/sync/maturity-roadmap/apply',
+  ]) {
+    assert.match(apiSource, new RegExp(endpoint.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')))
+  }
+  assert.match(readFileSync('src/components/FileDrop.tsx', 'utf8'), /validate\?: \(file: File\)/)
+}
 
 // ---------------------------------------------------------------------------
 // Runner

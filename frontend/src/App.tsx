@@ -56,6 +56,11 @@ const SourceMappingView = lazy(() => import('./views/SourceMappingView'))
 const TaxonomyView = lazy(() => import('./views/TaxonomyView'))
 const RulesView = lazy(() => import('./views/RulesView'))
 
+// Tier 3 Phase 6 — token-spending generation and roadmap handoff flows.
+const GenerateView = lazy(() => import('./views/GenerateView'))
+const ProposalsView = lazy(() => import('./views/ProposalsView'))
+const RoadmapImportView = lazy(() => import('./views/RoadmapImportView'))
+
 function ComingSoon({ label }: { label: string }) {
   return (
     <section className="rounded-xl border border-navy-700 bg-navy-800 px-6 py-10 text-center">
@@ -83,6 +88,7 @@ function AppShell() {
   const [drawerUcId, setDrawerUcId] = useState<number | null>(null)
   const [focusUcId, setFocusUcId] = useState<number | null>(null)
   const [creating, setCreating] = useState(false)
+  const [proposalUcId, setProposalUcId] = useState<number | null>(null)
 
   /** Jump to the flywheel with a use case already lit up. */
   const focusOnFlywheel = (id: number) => {
@@ -159,6 +165,12 @@ function AppShell() {
         return <TaxonomyView />
       case 'rules':
         return <RulesView />
+      case 'generate':
+        return <GenerateView />
+      case 'proposals':
+        return <ProposalsView initialUseCaseId={proposalUcId} />
+      case 'roadmap_import':
+        return <RoadmapImportView />
       case 'research':
         return <ComingSoon label="Research" />
       case 'accounts':
@@ -234,6 +246,11 @@ function AppShell() {
           lobs={lobs}
           onClose={() => setDrawerUcId(null)}
           onOpenUseCase={setDrawerUcId}
+          onWriteProposal={(id) => {
+            setProposalUcId(id)
+            setDrawerUcId(null)
+            setTab('proposals')
+          }}
         />
       ) : null}
 
