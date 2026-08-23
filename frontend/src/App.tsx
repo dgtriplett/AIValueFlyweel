@@ -100,6 +100,7 @@ function AppShell() {
   }
 
   const health = useQuery({ queryKey: ['health'], queryFn: api.health })
+  const brandingQuery = useQuery({ queryKey: ['branding'], queryFn: api.branding })
   const lobsQuery = useQuery({ queryKey: ['lobs'], queryFn: api.lobs })
   const useCasesQuery = useQuery({ queryKey: ['use-cases'], queryFn: () => api.useCases() })
   const assetsQuery = useQuery({ queryKey: ['data-assets'], queryFn: api.dataAssets })
@@ -107,6 +108,7 @@ function AppShell() {
   const lobs = lobsQuery.data ?? []
   const useCases = useCasesQuery.data ?? []
   const assets = assetsQuery.data ?? []
+  const branding = brandingQuery.data ?? null
 
   const totalValue = useCases.reduce((sum, uc) => sum + (uc.computed_value ?? 0), 0)
   // "Buildable" excludes blocked work: a number that includes value you cannot
@@ -195,7 +197,7 @@ function AppShell() {
 
   return (
     <div className="min-h-screen">
-      <Header env={health.data?.environment} tab={tab} setTab={setTab} />
+      <Header env={health.data?.environment} tab={tab} setTab={setTab} branding={branding} />
 
       <main className="max-w-[1440px] mx-auto px-6 py-5 space-y-5">
         <div className="grid grid-cols-2 md:grid-cols-5 gap-4">
@@ -243,7 +245,14 @@ function AppShell() {
         </Suspense>
 
         <footer className="text-center text-xs text-navy-600 pt-4 pb-8">
-          AI Value Flywheel · Powered by Databricks · P&amp;U Data &amp; AI catalog
+          <div className="space-y-1">
+            <div>
+              {branding?.display_name ?? 'AI Value Flywheel'}
+            </div>
+            <div className="text-navy-700">
+              Powered by Databricks
+            </div>
+          </div>
         </footer>
       </main>
 

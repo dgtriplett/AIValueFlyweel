@@ -102,7 +102,7 @@ export function BrandingView(): JSX.Element {
       }),
     onSuccess: () => {
       invalidate()
-      setSaved('Saved. Reload to see it in the header.')
+      setSaved('Saved.')
     },
     onError: (error) => {
       setSaved(null)
@@ -116,7 +116,7 @@ export function BrandingView(): JSX.Element {
     ...NO_RETRY,
     onSuccess: (result) => {
       invalidate()
-      setSaved(`Uploaded ${Math.round(result.bytes / 1024)}KB. Reload to see it in the header.`)
+      setSaved(`Uploaded ${Math.round(result.bytes / 1024)}KB.`)
     },
     onError: (error) => reportError(error, 'Could not upload the logo.'),
   })
