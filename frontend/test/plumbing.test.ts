@@ -349,6 +349,47 @@ tests['what-if source enforces and explains server selection caps'] = () => {
   assert.match(source, /Comparison is unavailable with \$\{selected\.size\} sources selected/)
 }
 
+tests['Header component accepts and renders branding data'] = () => {
+  // The regression this prevents: Header.tsx was hardcoded with literal text and
+  // never read saved branding, even though the API and save path worked. This
+  // asserts structurally that the component accepts branding props and uses them
+  // for rendering instead of hardcoded fallbacks.
+  const source = readFileSync('src/components/Header.tsx', 'utf8')
+  
+  // The component must accept a branding prop in its interface
+  assert.match(source, /branding\?:\s*HeaderBranding\s*\|\s*null/)
+  
+  // The component must use branding fields rather than hardcoded strings
+  assert.match(source, /branding\?\.display_name/)
+  assert.match(source, /branding\?\.subtitle/)
+  assert.match(source, /branding\?\.accent_color/)
+  assert.match(source, /branding\?\.logo_url/)
+  
+  // The hardcoded fallbacks should still exist for when branding is not loaded
+  assert.match(source, /\?\? ['"]AI Value Flywheel['"]/)
+  assert.match(source, /\?\? ['"]Power & Utilities — Data & AI Catalog/)
+  assert.match(source, /\?\? ['"]#FF3621['"]/)
+  
+  // "Powered by Databricks" must NOT be in the header anymore
+  assert.doesNotMatch(source, /Powered by Databricks/)
+}
+
+tests['App fetches branding on load and passes it to Header'] = () => {
+  // The other half of the fix: App.tsx must query the branding API and pass the
+  // result to Header, so saved branding actually appears in the UI.
+  const source = readFileSync('src/App.tsx', 'utf8')
+  
+  // Must query branding via the API
+  assert.match(source, /useQuery.*\[\s*['"]branding['"]\s*\]/)
+  assert.match(source, /api\.branding/)
+  
+  // Must pass branding to Header component
+  assert.match(source, /<Header[^>]*branding=\{branding\}/)
+  
+  // Footer must contain "Powered by Databricks" in a less prominent location
+  assert.match(source, /<footer[\s\S]*Powered by Databricks[\s\S]*<\/footer>/)
+}
+
 // ---------------------------------------------------------------------------
 // 2. 429 becomes an ApiError carrying Retry-After
 // ---------------------------------------------------------------------------
