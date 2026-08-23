@@ -14,6 +14,7 @@ import type {
   AccountCreateResponse,
   ArtifactsResponse,
   Assumption,
+  AssumptionResearchResponse,
   AttributeResponse,
   BlastRadiusResponse,
   BlastNode,
@@ -29,8 +30,10 @@ import type {
   Comment,
   ConfirmApplyResponse,
   ConfirmCardData,
+  CompanyProfile,
   CoverageMatrixResponse,
   CurrentSnapshotResponse,
+  CustomerEnhancementResponse,
   DashboardData,
   DataAsset,
   DemoStatusResponse,
@@ -70,6 +73,10 @@ import type {
   ProposalGenerateResponse,
   RecommendResponse,
   RequiresEdge,
+  ResearchApplyInput,
+  ResearchApplyResponse,
+  ResearchCompanyInput,
+  ResearchCompanyResponse,
   RoadmapResponse,
   RoadmapImportApplyResponse,
   RoadmapImportPreviewResponse,
@@ -827,6 +834,43 @@ export const api = {
         package: roadmapPackage,
         dry_run: false,
       })
+      .then((r) => r.data),
+
+  // -------------------------------------------------------------------------
+  // Tier 3 Phase 7 — company research & assumption recalibration.
+  //
+  // `POST /research/company` and `GET /agents/customer-enhancements` are the two
+  // token-spending calls (both `limiter("research")` server-side,
+  // `server/routes/research.py` / `agents.py`), so the views spread `NO_RETRY`:
+  // an automatic second POST after a 429 spends the budget the `Retry-After`
+  // asked us to wait out, and research is minutes of model time, not a cheap GET.
+  //
+  // Applying goes through the shared confirm gate (`prepareResearchApply` returns
+  // a ConfirmCardData; `<ConfirmCard>` consumes the token via `applyConfirm`),
+  // because recalibration re-quantifies every dollar figure in the portfolio at
+  // once — the exact write `useAssumptionInvalidation` exists to refresh.
+  // -------------------------------------------------------------------------
+
+  /** The stored profile, or `{ researched: false }` when none exists yet. */
+  researchCompany: () =>
+    http.get<CompanyProfile>('/research/company').then((r) => r.data),
+
+  /** The latest run's assumption proposals, with provenance. */
+  researchAssumptions: () =>
+    http.get<AssumptionResearchResponse>('/research/assumptions').then((r) => r.data),
+
+  /** Research a company — writes the profile + proposals, never the assumptions. */
+  runResearch: (body: ResearchCompanyInput) =>
+    http.post<ResearchCompanyResponse>('/research/company', body).then((r) => r.data),
+
+  /** Stage a recalibration for confirmation. Writes nothing itself. */
+  prepareResearchApply: (body: ResearchApplyInput) =>
+    http.post<ResearchApplyResponse>('/research/apply', body).then((r) => r.data),
+
+  /** Advisory agent: refinements + 10 app enhancements. Applies nothing. */
+  customerEnhancements: () =>
+    http
+      .get<CustomerEnhancementResponse>('/agents/customer-enhancements')
       .then((r) => r.data),
 
   // -------------------------------------------------------------------------

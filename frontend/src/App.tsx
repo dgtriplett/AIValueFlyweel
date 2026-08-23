@@ -61,21 +61,17 @@ const GenerateView = lazy(() => import('./views/GenerateView'))
 const ProposalsView = lazy(() => import('./views/ProposalsView'))
 const RoadmapImportView = lazy(() => import('./views/RoadmapImportView'))
 
+// Tier 3 Phase 7 — company research and assumption recalibration. Lazy for the
+// same reason as the rest: a wide review table with its own model calls, opened
+// deliberately at a new account rather than on the first screen.
+const ResearchView = lazy(() => import('./views/ResearchView'))
+
 // Tier 3 Phase 8 — the Settings surfaces. Lazy for the same reason as the rest:
 // the account switcher, the branding editor and the admin console are operator
 // screens opened deliberately, not weight every visitor pays for in the entry chunk.
 const AccountsView = lazy(() => import('./views/AccountsView'))
 const AdminView = lazy(() => import('./views/AdminView'))
 const BrandingView = lazy(() => import('./views/BrandingView'))
-
-function ComingSoon({ label }: { label: string }) {
-  return (
-    <section className="rounded-xl border border-navy-700 bg-navy-800 px-6 py-10 text-center">
-      <h2 className="text-lg font-semibold text-white">{label}</h2>
-      <p className="mt-2 text-sm text-navy-400">This feature is being migrated into the app.</p>
-    </section>
-  )
-}
 
 function AppShell() {
   // 'portfolio' unless the app was cold-loaded on a KB article deep link.
@@ -183,7 +179,7 @@ function AppShell() {
       case 'roadmap_import':
         return <RoadmapImportView />
       case 'research':
-        return <ComingSoon label="Research" />
+        return <ResearchView />
       case 'accounts':
         return <AccountsView />
       case 'admin':

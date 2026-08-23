@@ -1330,6 +1330,128 @@ export interface RoadmapImportApplyResponse {
 }
 
 // ---------------------------------------------------------------------------
+// Tier 3 Phase 7 — company research & assumption recalibration
+//
+// Shapes mirror `server/routes/research.py` and the customer-enhancement agent in
+// `server/routes/agents.py`. Nearly everything is optional because these payloads
+// are assembled across two or three model passes and any pass may be skipped
+// (`calibrate_assumptions`/`propose_lobs` are toggles) or fall back to a heuristic.
+// ---------------------------------------------------------------------------
+
+/** The researched customer profile. `researched:false` means none is on record. */
+export interface CompanyProfile {
+  researched?: boolean
+  hint?: string | null
+  company_name?: string | null
+  utility_type?: string | null
+  segments?: string[] | null
+  service_territory?: string | null
+  regulator?: string | null
+  iso_rto?: string | null
+  description?: string | null
+  research_notes?: string | null
+  model?: string | null
+}
+
+/** One proposed assumption change, WITH the provenance the review table needs. */
+export interface AssumptionProposal {
+  key: string
+  label?: string | null
+  unit?: string | null
+  category?: string | null
+  value_before?: number | null
+  value_proposed?: number | null
+  /** Percent change; `null` when the current value is 0 (division undefined). */
+  pct_change?: number | null
+  confidence?: 'high' | 'medium' | 'low' | null
+  basis?: string | null
+  rationale?: string | null
+  /** Set once the recalibration has been confirmed and written. */
+  applied?: boolean
+}
+
+/** Rollup counts across a proposal set — drives the "needs review" caveat. */
+export interface AssumptionResearchSummary {
+  total?: number
+  changed?: number
+  needs_review?: number
+  by_confidence?: { high?: number; medium?: number; low?: number }
+}
+
+/** `GET /research/assumptions` — the latest run's proposals, with provenance. */
+export interface AssumptionResearchResponse {
+  run_id: number | null
+  assumptions: AssumptionProposal[]
+  summary: AssumptionResearchSummary
+}
+
+/** `POST /research/company` — the profile, proposals, and (optional) LOBs. */
+export interface ResearchCompanyResponse {
+  run_id: number | null
+  company: CompanyProfile
+  assumptions: AssumptionProposal[]
+  assumption_summary: AssumptionResearchSummary
+  lobs: { name: string; description?: string | null }[]
+  model?: string | null
+  used_llm?: boolean
+  warnings?: string[]
+  applied?: boolean
+  next?: string | null
+}
+
+export interface ResearchCompanyInput {
+  company_name: string
+  calibrate_assumptions: boolean
+  propose_lobs: boolean
+}
+
+/** `POST /research/apply` — a confirm card, plus the chosen rows echoed back. */
+export interface ResearchApplyResponse extends ConfirmCardData {
+  assumptions: AssumptionProposal[]
+  run_id: number | null
+}
+
+export interface ResearchApplyInput {
+  run_id?: number | null
+  keys: string[]
+  apply_profile?: boolean
+  apply_lobs?: boolean
+}
+
+/** One recommended assumption refinement from the customer-enhancement agent. */
+export interface AssumptionRefinement {
+  key: string
+  label?: string | null
+  current_value?: number | null
+  /** `null` when the model could not defensibly recommend a company-specific value. */
+  recommended_value?: number | null
+  confidence?: 'high' | 'medium' | 'low' | null
+  basis?: string | null
+  rationale?: string | null
+}
+
+/** One of the exactly-10 app enhancements the agent proposes. */
+export interface AppEnhancement {
+  title: string
+  it_delivers?: string | null
+  why?: string | null
+  implementation_hint?: string | null
+}
+
+/** `GET /agents/customer-enhancements` — advisory only, applies nothing. */
+export interface CustomerEnhancementResponse {
+  company?: CompanyProfile | null
+  researched?: boolean
+  model?: string | null
+  used_llm?: boolean
+  fallback_note?: string | null
+  generic_assumption_count?: number
+  next?: string | null
+  assumption_refinements: AssumptionRefinement[]
+  app_enhancements: AppEnhancement[]
+}
+
+// ---------------------------------------------------------------------------
 // Tier 3 Phase 8 — the Settings surfaces (Accounts, Admin & audit, Branding).
 // ---------------------------------------------------------------------------
 
