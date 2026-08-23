@@ -1075,6 +1075,147 @@ export interface RuleTestResponse {
 }
 
 // ---------------------------------------------------------------------------
+// Tier 3 Phase 9 — the onboarding wizard.
+//
+// Shapes mirror `server/routes/setup.py` and `server/routes/ingestion.py`. Almost
+// everything is optional, and that is not defensive habit: both routers DEGRADE
+// rather than fail. `GET /setup/status` skips downstream probes when an upstream
+// one is red and emits the skipped checks with `ok: false` and no `grants`;
+// `GET /ingestion/summary` returns `{configured: false}` alone when ATLAS_CATALOG
+// is unset, and `{configured: true, available: false, error}` when the catalog is
+// set but the discovery tables are missing. The wizard has to render all three
+// states, so the type must be able to express all three.
+// ---------------------------------------------------------------------------
+
+/** One dependency probe. `grants` is the SQL a metastore admin runs to fix it. */
+export interface SetupCheck {
+  name: string
+  label: string
+  ok: boolean
+  detail?: string
+  /** Required checks decide `ready`; optional ones are unconfigured features. */
+  required?: boolean
+  fix?: string | null
+  grants?: string[]
+}
+
+export interface SetupStatusResponse {
+  /** Reflects only the REQUIRED checks — an install is not broken for lacking
+   *  a feature the customer never asked for (`setup.py:16-22`). */
+  ready: boolean
+  checks?: SetupCheck[]
+  summary?: {
+    total?: number
+    passing?: number
+    required_failing?: number
+    optional_failing?: number
+  }
+  service_principal?: string
+  grants_sql?: string[]
+  environment?: string
+  /** The first required failure's fix — the root cause, not a symptom. */
+  next_action?: string | null
+}
+
+export interface SetupGrantsResponse {
+  service_principal?: string
+  sql: string
+}
+
+/**
+ * Discovery inventory rollup.
+ *
+ * The three states this has to carry: not configured (`configured: false`),
+ * configured but unreachable (`available: false` plus `error`), and populated.
+ * The wizard keys step 2A's controls off exactly that distinction — the bootstrap
+ * button has to be reachable from the middle state or a first-run install cannot
+ * get to the upload controls at all.
+ */
+export interface IngestionSummaryResponse {
+  configured: boolean
+  available?: boolean
+  error?: string | null
+  catalog?: string | null
+  schema?: string | null
+  schemas?: number
+  tables?: number
+  enriched_tables?: number
+  workspaces?: number
+  canonicals?: number
+  serving_endpoint?: string | null
+}
+
+/** What the extractor ZIP contains, rendered before anyone clicks download. */
+export interface ExtractorInfoResponse {
+  available: boolean
+  files?: string[]
+  total_bytes?: number
+  requires?: string[]
+  reads?: string
+  produces?: string[]
+}
+
+export interface BootstrapResponse {
+  ok?: boolean
+  catalog?: string | null
+  schema?: string | null
+  tables?: string[]
+}
+
+/** A CSV ingest. `rows_in_file` vs `rows_written` is the number that matters —
+ *  a file whose rows were all skipped for missing columns reports the gap. */
+export interface InventoryUploadResponse {
+  ok?: boolean
+  run_id?: number | null
+  rows_in_file?: number
+  rows_written?: number
+}
+
+export interface EnrichSchemasResponse {
+  ok?: boolean
+  run_id?: number | null
+  schemas_enriched_total?: number
+}
+
+/** `staged_errors` is a PARTIAL run, not a failure: `failOnError=>false` lets
+ *  individual `ai_query` rows fail while the rest of the batch succeeds. */
+export interface EnrichTablesResponse {
+  ok?: boolean
+  run_id?: number | null
+  status?: string
+  tables_enriched_total?: number
+  staged_rows?: number
+  staged_ok?: number
+  staged_errors?: number
+}
+
+export interface CanonicalizeResponse {
+  ok?: boolean
+  run_id?: number | null
+  distinct_labels?: number
+  newly_resolved?: number
+  exact?: number
+  normalized?: number
+  llm?: number
+  other?: number
+  skipped_manual?: number
+}
+
+/** Attribution — the join that turns raw inventory into portfolio signal.
+ *  `unmatched_canonicals` are discovered source systems the catalog has no
+ *  module for, which is a prompt to add one rather than an error. */
+export interface AttributeResponse {
+  ok?: boolean
+  run_id?: number | null
+  canonicals_discovered?: number
+  assets_matched?: number
+  assets_advanced?: number
+  stale_assets_reset?: number
+  advanced?: { id?: number; label: string; from?: string; to?: string }[]
+  unmatched_canonicals?: string[]
+}
+
+// ---------------------------------------------------------------------------
 // Tier 3 Phase 6 — token-spending generation and roadmap handoff flows.
 // ---------------------------------------------------------------------------
 

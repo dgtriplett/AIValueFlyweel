@@ -119,7 +119,11 @@ function AppShell() {
   const renderActiveView = () => {
     switch (tab) {
       case 'onboarding':
-        return <OnboardingView />
+        // `setTab` because the wizard's last step links onward into the app. Those
+        // were `<a href="#coverage">` hash links into the console's router and one
+        // `<a href="/">` back to the SPA; with one app they are ordinary nav, and a
+        // full page load there would throw away every cached query.
+        return <OnboardingView setTab={setTab} />
       case 'portfolio':
         return (
           <PortfolioView

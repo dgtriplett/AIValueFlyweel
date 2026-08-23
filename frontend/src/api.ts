@@ -11,8 +11,11 @@ import { describeError } from './lib/errors'
 import type {
   ArtifactsResponse,
   Assumption,
+  AttributeResponse,
   BlastRadiusResponse,
   BlastNode,
+  BootstrapResponse,
+  CanonicalizeResponse,
   CatalogRecommendResponse,
   ClassificationRule,
   ClassifyResponse,
@@ -27,8 +30,11 @@ import type {
   Domain,
   DomainGapsResponse,
   EnablesEdge,
+  EnrichSchemasResponse,
+  EnrichTablesResponse,
   EstimateValueResponse,
   ExecutivePack,
+  ExtractorInfoResponse,
   FundingRequest,
   GenerateCommitInput,
   GenerateUseCasesInput,
@@ -37,6 +43,8 @@ import type {
   GlossaryResponse,
   HealthResponse,
   HypothesizedValue,
+  IngestionSummaryResponse,
+  InventoryUploadResponse,
   JointCase,
   KbArticle,
   KbArticleListResponse,
@@ -60,6 +68,8 @@ import type {
   RuleSeedResponse,
   RuleTestResponse,
   RulesResponse,
+  SetupGrantsResponse,
+  SetupStatusResponse,
   SnapshotsResponse,
   SourceAlias,
   SourceRecommendResponse,
@@ -642,6 +652,115 @@ export const api = {
   /** Dry-run the active rules against real discovered rows. `generate`-limited. */
   testRules: (limit = 100) =>
     http.post<RuleTestResponse>('/rules/test', { limit }).then((r) => r.data),
+
+  // -------------------------------------------------------------------------
+  // Tier 3 Phase 9 — the onboarding wizard.
+  //
+  // These are the endpoints behind the merged "Get started" surface: the setup
+  // probes, the discovery pipeline, and the workbook round-trip. Most of the
+  // writes here are `limiter("sweep")` or `limiter("generate")` server-side
+  // (`ingestion.py`), so every mutation built on them spreads `NO_RETRY` — an
+  // automatic second POST after a 429 spends the budget the `Retry-After` asked
+  // us to wait out, and an enrichment retry spends real money twice.
+  //
+  // None is confirm-gated, and that is the server's decision rather than an
+  // omission: the destructive-looking one (`/ingestion/attribute` with
+  // `advance_status`) is capped at `landed` and only ever moves a status FORWARD
+  // (`ingestion.py:836-846`), so it cannot demote a source a human marked
+  // governed. The UI's job is to say what will change, which the wizard does in
+  // words next to the checkbox — not to invent a gate the server does not have.
+  // -------------------------------------------------------------------------
+
+  /** Every dependency probe at once. Drives which wizard steps unlock. */
+  setupStatus: () => http.get<SetupStatusResponse>('/setup/status').then((r) => r.data),
+
+  /** Just the GRANT statements, for handing to a metastore admin. */
+  setupGrants: () => http.get<SetupGrantsResponse>('/setup/grants').then((r) => r.data),
+
+  /** Inventory rollup. Reports not-configured and configured-but-unreachable
+   *  as data rather than as an error — see `IngestionSummaryResponse`. */
+  ingestionSummary: () =>
+    http.get<IngestionSummaryResponse>('/ingestion/summary').then((r) => r.data),
+
+  extractorInfo: () =>
+    http.get<ExtractorInfoResponse>('/ingestion/extractor/info').then((r) => r.data),
+
+  /**
+   * The metadata extractor as a ZIP, for running under the user's own credentials.
+   *
+   * `responseType: 'blob'` and routed through axios rather than an `<a href>` for
+   * §4.1's reason: an anchor skips the account interceptor, a missing account
+   * header does NOT raise (`server/accounts.py:19-22` falls back to the default
+   * account), so the failure is silent. The ZIP is per-account only in that its
+   * instructions name this deployment, but the rule does not get to be applied
+   * selectively — a bare `/api` anchor anywhere is the pattern that comes back.
+   */
+  extractorZip: () =>
+    http
+      .get<Blob>('/ingestion/extractor/download', { responseType: 'blob' })
+      .then((r) => r.data),
+
+  /** CREATE the discovery schema + tables in Unity Catalog. Idempotent. */
+  ingestionBootstrap: () =>
+    http.post<BootstrapResponse>('/ingestion/bootstrap').then((r) => r.data),
+
+  /**
+   * Ingest one extractor CSV. ≤64 MB server-side (`ingestion.py:53`).
+   *
+   * Like every other multipart call, no `Content-Type` is set: axios derives the
+   * boundary from the `FormData`, and setting one by hand omits it so the server
+   * cannot parse the body.
+   */
+  uploadInventoryCsv: (kind: 'schemas' | 'tables' | 'columns', file: File) => {
+    const body = new FormData()
+    body.append('file', file)
+    return http
+      .post<InventoryUploadResponse>(`/ingestion/upload/${kind}`, body)
+      .then((r) => r.data)
+  },
+
+  enrichSchemas: (body: { company_name?: string | null; max_rows?: number | null }) =>
+    http.post<EnrichSchemasResponse>('/ingestion/enrich/schemas', body).then((r) => r.data),
+
+  enrichTables: (body: { company_name?: string | null; max_rows?: number | null }) =>
+    http.post<EnrichTablesResponse>('/ingestion/enrich/tables', body).then((r) => r.data),
+
+  /** Resolve raw source-system labels to the canonical vocabulary. */
+  canonicalizeSources: () =>
+    http.post<CanonicalizeResponse>('/ingestion/canonicalize', {}).then((r) => r.data),
+
+  /** Attribute discovered tables to catalog modules. `advance_status` is the
+   *  only part that moves readiness, which is why the caller makes it explicit. */
+  attributeDiscovered: (advance_status: boolean) =>
+    http
+      .post<AttributeResponse>('/ingestion/attribute', { advance_status })
+      .then((r) => r.data),
+
+  /**
+   * The onboarding workbook, pre-filled with this account's portfolio.
+   *
+   * Returns the blob AND the `Content-Disposition`, because the server names the
+   * file and the client should not second-guess it. Through axios, not an anchor:
+   * this response is SCOPED TO AN ACCOUNT — `onboarding.py:_compute_import` and
+   * the export both read `accounts.current()` — so a request without the header
+   * silently exports the default account's portfolio. That is the tenant leak
+   * §4.1 is about, and it is the one download in the app where the leaked bytes
+   * are the customer's whole portfolio.
+   */
+  onboardingTemplate: () =>
+    http
+      .get<Blob>('/onboarding/export.xlsx', { responseType: 'blob' })
+      .then((response) => ({
+        blob: response.data,
+        // `AxiosHeaders.get` is case-insensitive; the plain-object fallback is for
+        // a mocked adapter, which is how the tests drive this.
+        contentDisposition:
+          (typeof response.headers?.get === 'function'
+            ? (response.headers.get('content-disposition') as string | null)
+            : ((response.headers as unknown as Record<string, string>)?.[
+                'content-disposition'
+              ] ?? null)) ?? null,
+      })),
 
   // Tier 3 Phase 6 — every call stays on the account-scoped axios client. The
   // views mark all POST mutations NO_RETRY because generation and import must

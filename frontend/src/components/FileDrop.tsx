@@ -6,6 +6,13 @@
 // extension rules are known to the client, so the obvious ones are answered
 // immediately.
 //
+// The rules are the KB attachment ones BY DEFAULT, not by construction: the caps
+// differ per endpoint (attachments 25 MB, discovery CSVs 64 MB), so callers pass a
+// custom `validate` (typically wrapping `rejectionOf` with the right `FileLimits`)
+// to override them. Defaulting rather than requiring it keeps the checks honest —
+// a drop zone that silently used the wrong cap would reject files the server would
+// have accepted.
+//
 // WHAT THIS DOES *NOT* DO
 // -----------------------
 // It does not decide whether an upload is safe. `server/knowledge.py`
@@ -54,23 +61,53 @@ export function formatBytes(bytes?: number | null): string {
 }
 
 /**
+ * The rules a file is checked against, when they are not the KB attachment ones.
+ *
+ * Added in Tier 3 Phase 9, and the reason is a real mismatch rather than
+ * generality for its own sake: the discovery CSV uploads accept 64 MB
+ * (`server/routes/ingestion.py:53` — a 200k-table estate extracts to ~40 MB),
+ * so an attachment-capped drop zone would reject valid files BEFORE the request,
+ * which is worse than the round trip it was built to save. Both fields are
+ * optional and default to the attachment rules, so every existing caller and
+ * every existing assertion is unchanged.
+ */
+export interface FileLimits {
+  /** Bytes. Defaults to `MAX_ATTACHMENT_BYTES`. */
+  maxBytes?: number
+  /** Lower-case, dot-prefixed. Defaults to `ACCEPTED_EXTENSIONS`. */
+  extensions?: readonly string[]
+}
+
+/** `25 MB` / `64 MB` — whole megabytes, because that is how the caps are written. */
+function capLabel(maxBytes: number): string {
+  return `${Math.round(maxBytes / 1024 / 1024)} MB`
+}
+
+/**
  * Why this file cannot be uploaded, in words, or `null` if it can.
  *
  * The size message quotes the actual size and the cap, and repeats the server's
  * advice ("link to it in the article body instead") — a bare "too large" leaves
- * someone with a 40MB study and no idea what to do with it.
+ * someone with a 40MB study and no idea what to do with it. That advice is only
+ * appended for ATTACHMENTS: telling someone with an oversized `all_tables.csv` to
+ * link to it in an article body would be confident nonsense, so a caller that
+ * raised the cap gets the size sentence without it.
  */
-export function rejectionOf(file: File): string | null {
+export function rejectionOf(file: File, limits: FileLimits = {}): string | null {
+  const maxBytes = limits.maxBytes ?? MAX_ATTACHMENT_BYTES
+  const extensions = limits.extensions ?? ACCEPTED_EXTENSIONS
   if (file.size === 0) return `${file.name} is empty.`
-  if (file.size > MAX_ATTACHMENT_BYTES) {
+  if (file.size > maxBytes) {
     return (
-      `${file.name} is ${formatBytes(file.size)}; the limit is 25 MB. ` +
-      'Link to it in the article body instead of attaching it.'
+      `${file.name} is ${formatBytes(file.size)}; the limit is ${capLabel(maxBytes)}.` +
+      (maxBytes === MAX_ATTACHMENT_BYTES
+        ? ' Link to it in the article body instead of attaching it.'
+        : '')
     )
   }
   const lowered = file.name.toLowerCase()
-  if (!ACCEPTED_EXTENSIONS.some((extension) => lowered.endsWith(extension))) {
-    return `${file.name} is not an accepted file type. Accepted: ${ACCEPTED_EXTENSIONS.join(', ')}.`
+  if (!extensions.some((extension) => lowered.endsWith(extension))) {
+    return `${file.name} is not an accepted file type. Accepted: ${extensions.join(', ')}.`
   }
   return null
 }
