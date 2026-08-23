@@ -925,3 +925,151 @@ export interface KbAttachmentUploadResponse extends Partial<KbAttachment> {
   already_existed?: boolean
   note?: string | null
 }
+
+// ---------------------------------------------------------------------------
+// Tier 3 Phase 5 — the curation-write surfaces.
+//
+// These three views WRITE, which is what separates them from the Phase-3 ports
+// above, and it is why the shapes below carry more than rows. Each write answers
+// with a count, a set of notes, or a distribution the user is meant to judge:
+// `/taxonomy/classify` reports `warnings` per batch, `/rules/test` reports what
+// matched NOTHING, and `/rules/seed` reports how many of the seeds were new. A
+// type that modelled only the rows would drop exactly the part the user acts on.
+// ---------------------------------------------------------------------------
+
+/**
+ * One raw source label and what the normalizer resolved it to.
+ *
+ * `confidence` is the field the review queue is ordered around: `low` and a null
+ * `canonical` are what `?needs_review=true` selects for (`ingestion.py:898-912`).
+ * `is_user_edited` is why a correction is permanent — a later sweep skips the row.
+ */
+export interface SourceAlias {
+  id: number
+  raw: string
+  canonical?: string | null
+  mapped_by?: string | null
+  confidence?: string | null
+  is_user_edited?: boolean | null
+  updated_at?: string | null
+}
+
+/** The three taxonomy dimensions, as the server names them. */
+export type TaxonomyDimension = 'integration_pattern' | 'criticality' | 'vendor_type'
+
+/**
+ * How much of the catalog is labelled. `GET /taxonomy/coverage`.
+ *
+ * `pct` is on the response rather than derived here for the reason the route
+ * gives: a distribution over 12 of 146 assets looks authoritative and means
+ * nothing, so the view must be able to say what the distribution is over.
+ */
+export interface TaxonomyCoverage {
+  total_assets: number
+  fully_classified: number
+  by_dimension: Record<string, { classified: number; pct: number }>
+}
+
+/** `GET /taxonomy` — current (effective_to IS NULL) rows plus a rollup. */
+export interface TaxonomyResponse {
+  classifications: {
+    data_asset_id: number
+    dimension: string
+    value: string
+    source?: string | null
+    confidence?: number | null
+    ai_reasoning?: string | null
+    source_category?: string | null
+    module?: string | null
+  }[]
+  /** dimension -> value -> count. Empty inner objects are real: an unclassified
+   *  dimension is present with no values, and the view must not render a card. */
+  distribution: Record<string, Record<string, number>>
+  total: number
+}
+
+/**
+ * `POST /taxonomy/classify`. Rate-limited `generate` (burst 4 / 12 per minute).
+ *
+ * `warnings` is load-bearing and de-duplicated server-side: a run that wrote
+ * nothing because the serving endpoint was unreachable must not read as "every
+ * asset was already classified", and `detail` carries that distinction.
+ */
+export interface ClassifyResponse {
+  ok: boolean
+  model?: string | null
+  used_llm?: boolean
+  assets_considered?: number
+  values_written?: number
+  batches?: number
+  warnings?: string[]
+  /** Present only on the nothing-to-do path. */
+  detail?: string | null
+}
+
+/** A naming-convention rule. First match wins per dimension, hence `priority`. */
+export interface ClassificationRule {
+  id: number
+  dimension: string
+  field: string
+  match_type: string
+  pattern: string
+  value?: string | null
+  case_sensitive?: boolean
+  priority: number
+  is_active?: boolean
+  notes?: string | null
+  origin?: string | null
+}
+
+/** What a new or edited rule submits. Mirrors `RuleIn` in `inventory.py`. */
+export interface RuleInput {
+  dimension: string
+  field: string
+  match_type: string
+  pattern: string
+  value?: string | null
+  case_sensitive?: boolean
+  priority?: number
+  is_active?: boolean
+  notes?: string | null
+}
+
+/**
+ * `GET /rules`. The vocabulary travels with the rows deliberately.
+ *
+ * `dimension`, `field` and `match_type` are closed sets defined in
+ * `server/rules.py`, and hardcoding them in the SPA would mean a server-side
+ * addition silently 422s from a form that cannot offer it. So the selects are
+ * built from this.
+ */
+export interface RulesResponse {
+  rules: ClassificationRule[]
+  vocabulary: { dimensions: string[]; fields: string[]; match_types: string[] }
+}
+
+/** `POST /rules/seed`. Idempotent, so `created` can legitimately be 0. */
+export interface RuleSeedResponse {
+  created: number
+  total_seeds: number
+}
+
+/**
+ * `POST /rules/test`. Rate-limited `generate` because it queries the warehouse.
+ *
+ * `sample_source` is the honesty field: `discovered_tables` means the rules were
+ * tried against the real estate, `supplied` means they were tried against rows
+ * the caller passed. A summary that does not say which is not interpretable.
+ */
+export interface RuleTestResponse {
+  sample_source: string
+  rules_applied: number
+  results: { sample: Record<string, unknown>; result: Record<string, unknown> }[]
+  summary: {
+    total: number
+    ignored: number
+    /** The number that says whether the rules actually work. */
+    unmatched: number
+    by_dimension: Record<string, Record<string, number>>
+  }
+}
