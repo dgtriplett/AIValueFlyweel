@@ -3,31 +3,32 @@
 // Every hypothesized and calculated-realized figure in the app is a formula over
 // these assumptions, so one edit here re-quantifies the whole portfolio. That is
 // why a save invalidates the use-case list and the blast radius too, not just the
-// two totals shown at the top of this view.
+// two totals shown at the top of this view. The exact set is owned by
+// `useAssumptionInvalidation`, shared with the research recalibration path so a
+// manual edit and a recalibration refresh identical KPIs.
 
-import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
+import { useMutation, useQuery } from '@tanstack/react-query'
 import { RotateCcw, SlidersVertical, TrendingUp } from 'lucide-react'
 import { useState } from 'react'
 
 import { api } from '../api'
 import { fmtMoney } from '../constants'
+import { useAssumptionInvalidation } from '../hooks/useAssumptionInvalidation'
 import type { Assumption } from '../types'
 
 export default function AssumptionsView() {
-  const queryClient = useQueryClient()
   const assumptionsQuery = useQuery({ queryKey: ['assumptions'], queryFn: api.assumptions })
   const portfolioQuery = useQuery({ queryKey: ['portfolio-value'], queryFn: api.portfolioValue })
   const [drafts, setDrafts] = useState<Record<string, number>>({})
 
+  // A manual edit and a research recalibration re-quantify the SAME KPIs, so both
+  // invalidate through this one hook. See `hooks/useAssumptionInvalidation.ts`.
+  const invalidateKpis = useAssumptionInvalidation()
+
   const save = useMutation({
     mutationFn: ({ key, value }: { key: string; value: number }) =>
       api.updateAssumption(key, value),
-    onSuccess: () => {
-      queryClient.invalidateQueries({ queryKey: ['assumptions'] })
-      queryClient.invalidateQueries({ queryKey: ['portfolio-value'] })
-      queryClient.invalidateQueries({ queryKey: ['use-cases'] })
-      queryClient.invalidateQueries({ queryKey: ['blast'] })
-    },
+    onSuccess: invalidateKpis,
   })
 
   const assumptions = assumptionsQuery.data ?? []
