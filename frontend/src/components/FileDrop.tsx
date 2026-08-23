@@ -7,10 +7,11 @@
 // immediately.
 //
 // The rules are the KB attachment ones BY DEFAULT, not by construction: the caps
-// differ per endpoint (attachments 25 MB, discovery CSVs 64 MB), so `maxBytes` and
-// `extensions` are optional props that override them. Defaulting rather than
-// requiring them keeps the checks honest — a drop zone that silently used the
-// wrong cap would reject files the server would have accepted.
+// differ per endpoint (attachments 25 MB, discovery CSVs 64 MB), so callers pass a
+// custom `validate` (typically wrapping `rejectionOf` with the right `FileLimits`)
+// to override them. Defaulting rather than requiring it keeps the checks honest —
+// a drop zone that silently used the wrong cap would reject files the server would
+// have accepted.
 //
 // WHAT THIS DOES *NOT* DO
 // -----------------------
@@ -111,13 +112,15 @@ export function rejectionOf(file: File, limits: FileLimits = {}): string | null 
   return null
 }
 
-export interface FileDropProps extends FileLimits {
+export interface FileDropProps {
   onFile: (file: File) => void
   /** Disables the zone and dims it — set while an upload is in flight. */
   busy?: boolean
   busyLabel?: string
   label?: string
   hint?: string
+  accept?: string
+  validate?: (file: File) => string | null
 }
 
 export function FileDrop({
@@ -126,8 +129,8 @@ export function FileDrop({
   busyLabel = 'Uploading…',
   label = 'Drop a file here, or click to choose',
   hint = 'PDF, Word, Excel, PowerPoint, CSV, text, images. Up to 25 MB — enough for an interconnection study.',
-  maxBytes = MAX_ATTACHMENT_BYTES,
-  extensions = ACCEPTED_EXTENSIONS,
+  accept = ACCEPTED_EXTENSIONS.join(','),
+  validate = rejectionOf,
 }: FileDropProps) {
   const input = useRef<HTMLInputElement>(null)
   const [dragging, setDragging] = useState(false)
@@ -135,7 +138,7 @@ export function FileDrop({
 
   const offer = (file: File | null | undefined) => {
     if (!file) return
-    const problem = rejectionOf(file, { maxBytes, extensions })
+    const problem = validate(file)
     setRejected(problem)
     if (!problem) onFile(file)
   }
@@ -180,7 +183,7 @@ export function FileDrop({
         ref={input}
         type="file"
         className="hidden"
-        accept={extensions.join(',')}
+        accept={accept}
         onChange={(event) => {
           offer(event.target.files?.[0])
           // Cleared so picking the SAME file again still fires `change`. Without

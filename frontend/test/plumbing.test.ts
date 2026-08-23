@@ -55,6 +55,9 @@ import { downloadOnboardingTemplate, templateFilename } from '../src/views/Onboa
 import { canonicalOptions } from '../src/views/SourceMappingView'
 import { classifySummary, dimensionLabel, rankedValues } from '../src/views/TaxonomyView'
 import { draftToRule, testSummary } from '../src/views/RulesView'
+import { generationConfirmation } from '../src/views/GenerateView'
+import { proposalGenerationConfirmation } from '../src/views/ProposalsView'
+import { parseRoadmapPackage, roadmapImportConfirmation } from '../src/views/RoadmapImportView'
 import type { ConfirmCardData } from '../src/types'
 
 // ---------------------------------------------------------------------------
@@ -286,7 +289,9 @@ tests['the onboarding wizard reaches the API only through the shared client'] = 
   // The CSV drop zones must raise the cap, or a valid 40MB extract is rejected
   // client-side before the server ever sees it.
   assert.match(source, /const MAX_INVENTORY_BYTES = 64 \* 1024 \* 1024/)
-  assert.match(source, /maxBytes=\{MAX_INVENTORY_BYTES\}/)
+  // Reconciled to the FileDrop `validate` API: the 64MB cap is now enforced by a
+  // custom validator wrapping `rejectionOf`, not a `maxBytes` prop.
+  assert.match(source, /maxBytes: MAX_INVENTORY_BYTES/)
 }
 
 tests['frontend source has no bare anchor downloads from /api'] = () => {
@@ -791,15 +796,20 @@ tests['FileDrop honours a raised maxBytes and a narrowed extension list'] = () =
 }
 
 tests['FileDrop passes its limits through to the input and the check'] = () => {
-  // The props have to reach BOTH the `accept` attribute and `rejectionOf`. Wiring
+  // The config has to reach BOTH the `accept` attribute and the validator. Wiring
   // only the first gives a picker that hides the file and a drop zone that accepts
   // it; only the second gives the reverse. There is no DOM harness here, so this is
   // asserted on the source — the same technique the what-if caps check uses.
+  //
+  // Reconciled in the dev merge to the general `accept` + `validate` prop API:
+  // callers pass an `accept` string and a `validate` function (typically wrapping
+  // `rejectionOf` with the right `FileLimits`) rather than `maxBytes`/`extensions`
+  // props. The defaults still fall back to the attachment rules.
   const source = readFileSync('src/components/FileDrop.tsx', 'utf8')
-  assert.match(source, /maxBytes = MAX_ATTACHMENT_BYTES/)
-  assert.match(source, /extensions = ACCEPTED_EXTENSIONS/)
-  assert.match(source, /rejectionOf\(file, \{ maxBytes, extensions \}\)/)
-  assert.match(source, /accept=\{extensions\.join\(','\)\}/)
+  assert.match(source, /accept = ACCEPTED_EXTENSIONS\.join\(','\)/)
+  assert.match(source, /validate = rejectionOf/)
+  assert.match(source, /const problem = validate\(file\)/)
+  assert.match(source, /accept=\{accept\}/)
 }
 
 tests['article tags are split and trimmed, blanks dropped'] = () => {
@@ -1048,6 +1058,67 @@ tests['a 429 on a generate-limited curation write keeps the server’s retry adv
       },
     )
   }
+
+// ---------------------------------------------------------------------------
+// 7. Tier 3 Phase 6 — token-spending generation and roadmap import
+// ---------------------------------------------------------------------------
+
+tests['roadmap packages accept either envelope shape and require use cases'] = () => {
+  assert.deepEqual(
+    parseRoadmapPackage('{"package":{"useCases":[{"id":"uc-1"}]}}'),
+    { useCases: [{ id: 'uc-1' }] },
+  )
+  assert.deepEqual(
+    parseRoadmapPackage('{"use_cases":[{"title":"Grid visibility"}]}'),
+    { use_cases: [{ title: 'Grid visibility' }] },
+  )
+  assert.throws(() => parseRoadmapPackage(''), /Choose a roadmap package/)
+  assert.throws(() => parseRoadmapPackage('{nope'), /not valid JSON/)
+  assert.throws(() => parseRoadmapPackage('{"useCases":[]}'), /non-empty useCases array/)
+}
+
+tests['Phase 6 expensive actions explain the spend before approval'] = () => {
+  const generation = generationConfirmation({
+    lob_id: null,
+    lens: 'ready',
+    count: 4,
+    time_horizon_bias: null,
+    prioritize_regulatory: false,
+  })
+  assert.match(generation.summary ?? '', /Generate 4 use-case candidates with the LLM/)
+  assert.equal(generation.after?.lens, 'ready')
+
+  const proposal = proposalGenerationConfirmation(17)
+  assert.match(proposal.summary ?? '', /spends an LLM generation/)
+  assert.match(proposal.summary ?? '', /use case 17/)
+
+  const roadmap = roadmapImportConfirmation({
+    useCases: { incoming: 5, mapped: 2, toCreateOrTitleMatch: 3 },
+  })
+  assert.equal(roadmap.intent, 'apply_maturity_roadmap')
+  assert.equal(roadmap.after?.incoming, 5)
+  assert.equal(roadmap.after?.create_or_match, 3)
+}
+
+tests['Phase 6 views use shared safety plumbing and never the console proposal route'] = () => {
+  for (const file of ['GenerateView.tsx', 'ProposalsView.tsx', 'RoadmapImportView.tsx']) {
+    const source = readFileSync(`src/views/${file}`, 'utf8')
+    assert.match(source, /<ConfirmCard/)
+    assert.match(source, /NO_RETRY/)
+    assert.doesNotMatch(source, /\bfetch\s*\(/)
+    assert.doesNotMatch(source, /\/console\/#proposals/)
+  }
+  const apiSource = readFileSync('src/api.ts', 'utf8')
+  for (const endpoint of [
+    '/generate/use-cases',
+    '/proposals/use-cases/',
+    '/sync/maturity-roadmap/preview',
+    '/sync/maturity-roadmap/apply',
+  ]) {
+    assert.match(apiSource, new RegExp(endpoint.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')))
+  }
+  assert.match(readFileSync('src/components/FileDrop.tsx', 'utf8'), /validate\?: \(file: File\)/)
+}
 
 // ---------------------------------------------------------------------------
 // Runner

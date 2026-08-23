@@ -65,7 +65,7 @@ import type { ReactNode } from 'react'
 
 import { api } from '../api'
 import { Banner } from '../components/Banner'
-import { FileDrop } from '../components/FileDrop'
+import { FileDrop, rejectionOf } from '../components/FileDrop'
 import { StatStrip } from '../components/StatStrip'
 import { useApiErrorToast } from '../components/Toasts'
 import type { TabId } from '../components/Header'
@@ -496,8 +496,13 @@ function SweepCard({ inventory }: { inventory: IngestionSummaryResponse }) {
                     busyLabel="Ingesting…"
                     label="Drop the CSV here, or click to choose"
                     hint={slot.hint}
-                    maxBytes={MAX_INVENTORY_BYTES}
-                    extensions={INVENTORY_EXTENSIONS}
+                    accept={INVENTORY_EXTENSIONS.join(',')}
+                    validate={(file) =>
+                      rejectionOf(file, {
+                        maxBytes: MAX_INVENTORY_BYTES,
+                        extensions: INVENTORY_EXTENSIONS,
+                      })
+                    }
                   />
                 </div>
               ))}
@@ -636,7 +641,8 @@ function WorkbookCard() {
         busyLabel={result ? 'Applying…' : 'Checking…'}
         label="Drop the filled workbook here, or click to choose"
         hint="Excel or CSV. Previewed first — nothing is written until you confirm."
-        extensions={WORKBOOK_EXTENSIONS}
+        accept={WORKBOOK_EXTENSIONS.join(',')}
+        validate={(file) => rejectionOf(file, { extensions: WORKBOOK_EXTENSIONS })}
       />
 
       {preview ? (
