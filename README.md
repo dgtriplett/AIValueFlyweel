@@ -53,7 +53,7 @@ catalog, 63 data domains, 34 value assumptions** — so day one is populated.
 | **Get Started** | Excel export/import for bulk offline population. |
 | **Genie assistant** | NL Q&A over the portfolio. The app creates the Genie space itself (**Admin → Genie**), seeded with the units, the readiness vocabulary and starter questions — see [`INSTALL.md`](INSTALL.md). |
 
-### Discovery & agents *(the console, at `/console`)*
+### Discovery & agents
 | Area | What it does |
 |---|---|
 | **Get started** | Guided setup: probes every dependency — Lakebase, warehouse, Unity Catalog, serving endpoint, system tables, Genie — and prints the exact GRANT statements for anything failing. Also Excel export/import for bulk offline population, and a downloadable extractor for workspaces this one cannot reach. |
@@ -76,21 +76,20 @@ catalog, 63 data domains, 34 value assumptions** — so day one is populated.
 | **Logs** | Structured JSON with a request id on every line, echoed as `X-Request-Id`. `LOG_LEVEL` turns up detail without a redeploy. OAuth tokens are redacted in the formatter, not at call sites. |
 | **Rate limits** | Per-actor token buckets on the endpoints that cost money or warehouse time, plus a per-request query budget bounding one chat turn's share of the connection pool. Guard rails against accidental load, not a quota — set `RATE_LIMITS=off` for a demo. |
 | **Human approval** | Every agent-initiated write goes through a single-use, server-side, 10-minute propose/confirm token. The client's authority is one bit: yes or no to what it was shown. |
-| **CI** | [`scripts/check.py`](scripts/check.py) runs every gate — tests, lint, secret scan, console syntax, and a clean import against the real dependencies. The workflow only calls it, so the gates are identical locally and in CI. |
+| **CI** | [`scripts/check.py`](scripts/check.py) runs every gate — tests, lint, secret scan, and a clean import against the real dependencies. The workflow only calls it, so the gates are identical locally and in CI. |
 
 ---
 
 ## Reference architecture
 
-One **Databricks App** (FastAPI serving a pre-built React SPA plus the console),
-backed by **Lakebase** for portfolio state and **Unity Catalog** for the discovery
-layer, with the **Foundation Model API** behind the agents.
+One **Databricks App** (FastAPI serving a pre-built React SPA), backed by
+**Lakebase** for portfolio state and **Unity Catalog** for the discovery layer,
+with the **Foundation Model API** behind the agents.
 
 ```
                         ┌───────────────────────────────┐
                         │  User (browser)                │
                         │  /          portfolio SPA      │
-                        │  /console   operator console   │
                         └───────────────┬────────────────┘
                                         │ HTTPS (Databricks App auth)
 ┌───────────────────── Databricks App: "grid-atlas" ──────────────────────────┐
@@ -202,7 +201,7 @@ wrong:
 
 | Layer | Technology |
 |---|---|
-| **Frontend** | React 18 · TypeScript · Vite · TailwindCSS (Databricks Blueprint dark) · TanStack Query · React Flow · Recharts · dagre. Plus a dependency-free operator console. |
+| **Frontend** | React 18 · TypeScript · Vite · TailwindCSS (Databricks Blueprint dark) · TanStack Query · React Flow · Recharts · dagre. |
 | **Backend** | FastAPI · `asyncpg` (pooled, OAuth-token password, ~45-min refresh) · Uvicorn. Lakebase SQL is parameterized. |
 | **Portfolio state** | Lakebase — Autoscaling Postgres in your workspace. Migrations in [`server/migrations/`](server/migrations/). |
 | **Discovery state** | Unity Catalog Delta tables in `ATLAS_CATALOG.ATLAS_SCHEMA`. |
@@ -216,7 +215,7 @@ wrong:
 
 ```
 .
-├── app.py                      # FastAPI entry: /api routers, SPA, console
+├── app.py                      # FastAPI entry: /api routers, SPA
 ├── app.yaml                    # App runtime config (ships with no environment baked in)
 ├── databricks.yml              # Asset Bundle — every value is a variable
 ├── requirements.txt            # Databricks App runtime dependencies
@@ -252,8 +251,7 @@ wrong:
 │   └── pu_domains.py           # 63-domain vocabulary + module mappings
 ├── schema-extractor/           # Standalone multi-workspace metadata sweep
 ├── frontend/
-│   ├── dist/                   # Pre-built SPA (COMMITTED — served by the app)
-│   └── console/                # Operator console (plain HTML/JS, no build)
+│   └── dist/                   # Pre-built SPA (COMMITTED — served by the app)
 ├── tests/                      # stdlib-only test suite + a local dev server
 ├── .github/workflows/ci.yml    # Calls scripts/check.py — no logic of its own
 └── ARCHITECTURE.md · INSTALL.md · DEMO_MODE.md · DELTA_SHARING.md · LICENSE.md
@@ -286,8 +284,8 @@ python3 scripts/deploy.py --yes \
   --lakebase-project grid-atlas-db
 ```
 
-Then open the app and go to **`/console`** → *Setup & health*. Every dependency is
-probed there, with copy-pastable GRANTs for anything missing.
+Then open the app and go to the **Get started** tab. Every dependency is probed
+there, with copy-pastable GRANTs for anything missing.
 
 Full manual steps are in [`INSTALL.md`](INSTALL.md).
 
@@ -349,16 +347,16 @@ Standard library only — no pytest, no containers, no database, no network. See
 faked rather than provisioned.
 
 `scripts/check.py` is the single definition of "does this repo pass": tests, lint,
-a secret scan, a syntax check of the operator console, and a clean import of
-`app.py` against the **real** dependencies (the suite stubs `asyncpg`/`openai`, so
-that last gate is what catches "works in tests, crashes on boot"). CI only calls
-this script, so the gates are identical on a laptop and in CI, and a missing tool
-is reported as *skipped* rather than counted as a pass.
+a secret scan, and a clean import of `app.py` against the **real** dependencies
+(the suite stubs `asyncpg`/`openai`, so that last gate is what catches "works in
+tests, crashes on boot"). CI only calls this script, so the gates are identical on
+a laptop and in CI, and a missing tool is reported as *skipped* rather than
+counted as a pass.
 
 To work on the UI without a workspace:
 
 ```bash
-python3 tests/serve_local.py --port 8000       # then open /console
+python3 tests/serve_local.py --port 8000
 ```
 
 ---
@@ -420,11 +418,6 @@ consequences worth knowing:
   they are stable identifiers for the same behaviour across a minified rebuild,
   which is what [`scripts/check_spa_bundle.py`](scripts/check_spa_bundle.py) keys
   on — minified variable names change on every build, so they cannot be asserted.
-
-The discovery and agent screens remain a separate, dependency-free page in
-`frontend/console/`. That was originally because adding them to the SPA meant
-reverse-engineering a minified bundle; now it is simply because the console is a
-different tool for a different user, and it needs no build step of its own.
 
 ## License
 

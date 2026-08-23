@@ -9,7 +9,7 @@ from contextlib import asynccontextmanager
 from pathlib import Path
 
 from fastapi import FastAPI
-from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, RedirectResponse
+from fastapi.responses import FileResponse, HTMLResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 
 from server import limits, logging_setup
@@ -61,10 +61,6 @@ logger = logging.getLogger("grid_atlas.app")
 BASE_DIR = Path(__file__).parent
 MIGRATIONS_DIR = BASE_DIR / "server" / "migrations"
 FRONTEND_DIST = BASE_DIR / "frontend" / "dist"
-# Operator console: a dependency-free page for the discovery/agent workflows.
-# Separate from the SPA because the SPA's TypeScript source isn't in this repo
-# (see README) — this way the new screens ship without touching the built bundle.
-CONSOLE_DIR = BASE_DIR / "frontend" / "console"
 
 
 def app_env() -> str:
@@ -316,22 +312,6 @@ async def runtime():
         "app_env": app_env(),
         "databricks_app": bool(IS_DATABRICKS_APP),
     }
-
-
-# --- Operator console ------------------------------------------------------
-# Mounted BEFORE the SPA's catch-all, which matches every path and would
-# otherwise return index.html for /console.
-if CONSOLE_DIR.exists():
-    # `/console` (no trailing slash) does NOT hit the mount below — it falls
-    # through to the SPA catch-all, which serves index.html and silently shows the
-    # portfolio instead. Redirecting makes both spellings work, so a typed URL or
-    # a stale bookmark still lands on the console.
-    @app.get("/console", include_in_schema=False)
-    async def console_redirect():
-        return RedirectResponse(url="/console/", status_code=308)
-
-    app.mount("/console", StaticFiles(directory=str(CONSOLE_DIR), html=True),
-              name="console")
 
 
 # --- Static SPA ------------------------------------------------------------

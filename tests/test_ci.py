@@ -111,12 +111,6 @@ class TestGatesAreNotSilentlyDropped(unittest.TestCase):
     def test_it_lints(self):
         self.assertIn("ruff", self.source)
 
-    def test_it_checks_the_console_bundle(self):
-        # The console is hand-written JS with no build step, so a syntax error
-        # ships and renders a blank page. This is the only gate before that.
-        self.assertIn("--check", self.source)
-        self.assertIn("console.js", self.source)
-
     def test_it_checks_the_spa_bundle_matches_its_source(self):
         """The SPA gate must survive the move from patching to building.
 
