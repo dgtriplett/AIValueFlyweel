@@ -1305,3 +1305,111 @@ export interface RoadmapImportApplyResponse {
   summary?: Record<string, number>
   idMap?: Record<string, number>
 }
+
+// ---------------------------------------------------------------------------
+// Tier 3 Phase 8 — the Settings surfaces (Accounts, Admin & audit, Branding).
+// ---------------------------------------------------------------------------
+
+/**
+ * One account row as the switcher renders it (`server/routes/accounts.py`
+ * `list_accounts`). The counts drive the "sources ready", "researched" and "KB"
+ * columns; `is_default` / `is_active` gate the "Make default" and "archived"
+ * affordances.
+ */
+export interface Account {
+  id: number
+  slug: string
+  name: string
+  utility_type?: string | null
+  is_active: boolean
+  is_default: boolean
+  notes?: string | null
+  created_at?: string | null
+  sources_ready?: number
+  sources_tracked?: number
+  researched?: boolean
+  kb_articles?: number
+}
+
+/**
+ * The account list envelope. `note` is the pre-migration answer — an install
+ * without migration 009 returns `{ accounts: [], current_account_id: null, note }`
+ * rather than a 500, so the view shows the note instead of a table.
+ */
+export interface AccountsResponse {
+  accounts: Account[]
+  current_account_id: number | null
+  note?: string
+}
+
+/** What `POST /accounts` returns: the thin created row plus the seeding note. */
+export interface AccountCreateResponse extends Account {
+  note?: string
+  seeded_assumptions?: number
+}
+
+/** `GET /demo/status`. A 404 is the designed answer when `DEMO_MODE` is off. */
+export interface DemoStatusResponse {
+  enabled: boolean
+  db_connected?: boolean
+  mode?: string
+  error?: string
+}
+
+/** `GET /genie/status` — whether Ask works, and if not whether this app can fix it. */
+export interface GenieStatusResponse {
+  configured: boolean
+  space_id?: string | null
+  can_provision?: boolean
+  warehouse_bound?: boolean
+  mirror_target?: string
+  space_url?: string | null
+}
+
+/** `POST /genie/provision` — the created space, and the one manual step left. */
+export interface GenieProvisionResponse {
+  space_id: string
+  title?: string
+  tables?: string[]
+  rules?: number
+  starter_questions?: number
+  url?: string | null
+  next_step?: string
+  mirror?: unknown
+}
+
+/** `POST /live/sync-genie` — refresh the mirror the Genie space reads. */
+export interface SyncGenieResponse {
+  ok?: boolean
+  schema?: string
+  created?: string[]
+  error?: string
+  [key: string]: unknown
+}
+
+/** `POST /generate/cleanup` — reclaim expired previews and consumed tokens. */
+export interface CleanupResponse {
+  ok: boolean
+  previews_deleted?: number | string
+  tokens_deleted?: number | string
+}
+
+/** `GET /branding` — what the header should render, and where the name came from. */
+export interface Branding {
+  display_name: string
+  subtitle: string
+  accent_color: string
+  has_logo: boolean
+  logo_url?: string | null
+  source: 'custom' | 'company_profile' | 'default'
+  company_name?: string | null
+  updated_at?: string | null
+}
+
+/** `POST /branding/logo` — the stored bytes' size and MIME. */
+export interface BrandingLogoResponse {
+  ok: boolean
+  bytes: number
+  mime: string
+  logo_url?: string
+}
