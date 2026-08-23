@@ -53,11 +53,13 @@ export function UseCaseDrawer({
   lobs,
   onClose,
   onOpenUseCase,
+  onWriteProposal,
 }: {
   ucId: number
   lobs: Lob[]
   onClose: () => void
   onOpenUseCase: (id: number) => void
+  onWriteProposal: (id: number) => void
 }) {
   const queryClient = useQueryClient()
   const {
@@ -282,18 +284,16 @@ export function UseCaseDrawer({
               </button>
             )}
             {/* You decide to write a proposal while looking AT a use case, so the
-                action belongs here. Guarded on the id: the drawer renders before
-                its data arrives, and a link built then would read
-                #proposals/undefined and open the console pointed at nothing. */}
+                action belongs here and stays in the SPA with the id pre-filled. */}
             {ucId ? (
-              <a
+              <button
                 data-gaProposalBtn="1"
-                href={`/console/#proposals/${ucId}`}
                 title="Generate an eight-section proposal for this use case, grounded in its computed value, its real data gaps and this instance’s company profile"
                 className="text-navy-400 hover:text-lava-300 flex items-center gap-1 text-sm"
+                onClick={() => onWriteProposal(ucId)}
               >
                 ✎ Write proposal
-              </a>
+              </button>
             ) : null}
             <button
               aria-label="Close"

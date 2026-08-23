@@ -1073,3 +1073,94 @@ export interface RuleTestResponse {
     by_dimension: Record<string, Record<string, number>>
   }
 }
+
+// ---------------------------------------------------------------------------
+// Tier 3 Phase 6 — token-spending generation and roadmap handoff flows.
+// ---------------------------------------------------------------------------
+
+export interface GenerateUseCasesInput {
+  lob_id: number | null
+  lens: 'both' | 'ready' | 'gap'
+  count: number
+  time_horizon_bias: 'quick_win' | 'strategic' | null
+  prioritize_regulatory: boolean
+}
+
+export interface GeneratedDomainRequirement {
+  name?: string
+  label: string
+  satisfied: boolean
+  necessity?: string
+}
+
+export interface GeneratedUseCaseCandidate {
+  candidate_id: string
+  title: string
+  description: string
+  business_value: string
+  lens: 'ready' | 'gap'
+  effort_tshirt: string
+  is_regulatory?: boolean
+  required_domains: GeneratedDomainRequirement[]
+}
+
+export interface GenerateUseCasesResponse {
+  preview_id: string
+  lob_id?: number | null
+  lob_name?: string | null
+  lens: string
+  model: string
+  used_llm: boolean
+  candidates: GeneratedUseCaseCandidate[]
+  summary: { total: number; ready: number; gap: number }
+  warnings?: string[]
+  expires_at?: string
+}
+
+export interface GenerateCommitInput {
+  preview_id: string
+  candidate_ids: string[]
+  in_portfolio: boolean
+}
+
+export interface ProposalContextResponse {
+  use_case: { id: number; title: string; status?: string; effort_tshirt?: string | null }
+  context: {
+    value?: { mid?: number | null; [key: string]: unknown }
+    domains?: { satisfied?: string[]; gaps?: string[] }
+    sources?: unknown[]
+    [key: string]: unknown
+  }
+  warnings?: string[]
+}
+
+export interface ProposalGenerateResponse {
+  use_case_id: number
+  confirm: ConfirmCardData
+  preview_md: string
+  sections?: string[]
+  warnings?: string[]
+  regenerating?: boolean
+}
+
+export type RoadmapPackage = Record<string, unknown> & {
+  useCases?: unknown[]
+  use_cases?: unknown[]
+  roadmapItems?: unknown[]
+  roadmap?: unknown[]
+}
+
+export interface RoadmapImportPreviewResponse {
+  dryRun?: boolean
+  sourceApp?: string
+  useCases?: { incoming?: number; mapped?: number; toCreateOrTitleMatch?: number }
+  datasets?: { incomingUnique?: number; currentUseCases?: number }
+  roadmapItems?: number
+}
+
+export interface RoadmapImportApplyResponse {
+  ok: boolean
+  sourceApp?: string
+  summary?: Record<string, number>
+  idMap?: Record<string, number>
+}

@@ -1,4 +1,4 @@
-// The app's front door: wordmark, the grouped nav, and the links out to /console.
+// The app's front door: wordmark, grouped nav, generation tools, and console link.
 
 import { useEffect, useRef, useState } from 'react'
 import {
@@ -18,6 +18,7 @@ import {
   Radar,
   Rocket,
   Search,
+  Sparkles,
   Settings,
   Shield,
   SlidersVertical,
@@ -44,6 +45,9 @@ export type TabId =
   | 'sourcemapping'
   | 'taxonomy'
   | 'rules'
+  | 'generate'
+  | 'roadmap_import'
+  | 'proposals'
   | 'research'
   | 'accounts'
   | 'admin'
@@ -171,6 +175,24 @@ export const TABS: Tab[] = [
     hint: 'The policies that govern how knowledge is curated',
   },
   {
+    id: 'generate',
+    label: 'Generate use cases',
+    icon: <Sparkles className="w-4 h-4" />,
+    hint: 'Propose use cases grounded in the data already landed',
+  },
+  {
+    id: 'roadmap_import',
+    label: 'Import roadmap',
+    icon: <CalendarRange className="w-4 h-4" />,
+    hint: 'Bring a maturity-assessment roadmap into the portfolio',
+  },
+  {
+    id: 'proposals',
+    label: 'Write a proposal',
+    icon: <FileText className="w-4 h-4" />,
+    hint: 'Generate an eight-section proposal grounded in this instance',
+  },
+  {
     id: 'research',
     label: 'Research',
     icon: <Search className="w-4 h-4" />,
@@ -232,6 +254,7 @@ const NAV_GROUPS: { label: string; ids: TabId[] }[] = [
 
 /** The entry-point surface: outside the groups, always one click away. */
 const ENTRY_TAB: TabId = 'onboarding'
+const TOOL_TABS: TabId[] = ['generate', 'roadmap_import', 'proposals']
 
 /** The console is a separate dependency-free page; these are its entry points. */
 const CONSOLE_LINKS = [
@@ -242,14 +265,6 @@ const CONSOLE_LINKS = [
     title:
       'Standards, proposals, studies and runbooks — attached to the use cases they explain',
     marginLeftAuto: true,
-  },
-  {
-    key: 'prop-link',
-    href: '/console/#proposals',
-    label: 'Write a proposal',
-    title:
-      'Generate an eight-section proposal for a use case, grounded in this instance’s own data',
-    marginLeftAuto: false,
   },
   {
     key: 'console-link',
@@ -489,12 +504,30 @@ export function Header({
             />
           ) : null}
 
+          <div className="ml-auto flex items-center gap-1">
+            {TOOL_TABS.map((id) => {
+              const item = TABS.find((candidate) => candidate.id === id)
+              if (!item) return null
+              return (
+                <TabButton
+                  key={id}
+                  tab={item}
+                  active={tab === id}
+                  onSelect={() => {
+                    setOpenMenu(null)
+                    setTab(id)
+                  }}
+                />
+              )
+            })}
+          </div>
+
           {CONSOLE_LINKS.map((link) => (
             <a
               key={link.key}
               href={link.href}
               title={link.title}
-              className={`${NAV_ITEM} ${NAV_INACTIVE}${link.marginLeftAuto ? ' ml-auto' : ''}`}
+              className={`${NAV_ITEM} ${NAV_INACTIVE}`}
             >
               {link.label}
             </a>

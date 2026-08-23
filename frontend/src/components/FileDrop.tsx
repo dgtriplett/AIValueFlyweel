@@ -82,6 +82,8 @@ export interface FileDropProps {
   busyLabel?: string
   label?: string
   hint?: string
+  accept?: string
+  validate?: (file: File) => string | null
 }
 
 export function FileDrop({
@@ -90,6 +92,8 @@ export function FileDrop({
   busyLabel = 'Uploading…',
   label = 'Drop a file here, or click to choose',
   hint = 'PDF, Word, Excel, PowerPoint, CSV, text, images. Up to 25 MB — enough for an interconnection study.',
+  accept = ACCEPTED_EXTENSIONS.join(','),
+  validate = rejectionOf,
 }: FileDropProps) {
   const input = useRef<HTMLInputElement>(null)
   const [dragging, setDragging] = useState(false)
@@ -97,7 +101,7 @@ export function FileDrop({
 
   const offer = (file: File | null | undefined) => {
     if (!file) return
-    const problem = rejectionOf(file)
+    const problem = validate(file)
     setRejected(problem)
     if (!problem) onFile(file)
   }
@@ -142,7 +146,7 @@ export function FileDrop({
         ref={input}
         type="file"
         className="hidden"
-        accept={ACCEPTED_EXTENSIONS.join(',')}
+        accept={accept}
         onChange={(event) => {
           offer(event.target.files?.[0])
           // Cleared so picking the SAME file again still fires `change`. Without
