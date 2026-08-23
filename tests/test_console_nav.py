@@ -650,18 +650,26 @@ class TestSpaSourceIsTheSourceOfTruth(unittest.TestCase):
                                  f"customer-visible phase text in {where}: {stale}")
 
     def test_the_product_name_is_current_in_the_source(self):
-        """The wordmark accents its second half, so in JSX the name is split
-        across an element (`AI Value <span>Flywheel</span>`) rather than being one
-        contiguous literal. Both halves and the accent are asserted here; the
-        assembled string is asserted against the built bundle."""
-        self.assertRegex(
-            self.header,
-            r"AI Value\s*<span[^>]*#FF3621[^>]*>\s*Flywheel\s*</span>",
-            "the header wordmark is not the current product name")
-        # The footer carries the name as a single literal, so it can be exact.
+        """The wordmark accents its second half and is now driven by branding data.
+        The Header component accepts branding props and falls back to 'AI Value Flywheel'
+        with the Flywheel part accented. The dynamic accent uses accentColor from branding."""
+        # The header must use branding?.display_name and have the fallback
+        self.assertIn("branding?.display_name ?? 'AI Value Flywheel'", self.header,
+                      "the header must use branding data for the display name")
+        # The accent color must come from branding with #FF3621 as fallback
+        self.assertIn("branding?.accent_color ?? '#FF3621'", self.header,
+                      "the header must use branding accent color")
+        # The Flywheel-splitting logic must still exist for the default name
+        self.assertIn("displayName.includes('Flywheel')", self.header,
+                      "the header must split Flywheel for accent when present")
+        self.assertIn("style={{ color: accentColor }}>Flywheel</span>", self.header,
+                      "the header must accent Flywheel with the brand color")
+        # The footer now shows branding name and "Powered by Databricks" separately
         app = (ROOT / "frontend" / "src" / "App.tsx").read_text()
-        self.assertIn("AI Value Flywheel · Powered by Databricks", app,
-                      "the footer does not carry the current product name")
+        self.assertIn("Powered by Databricks", app,
+                      "the footer must contain Powered by Databricks credit")
+        self.assertIn("branding?.display_name ?? 'AI Value Flywheel'", app,
+                      "the footer must show the branding name")
         combined = self.header + app + "".join(self.views.values()) \
             + "".join(self.components.values())
         self.assertNotIn("Grid Atlas", combined,

@@ -415,14 +415,23 @@ function NavGroup({
   )
 }
 
+export interface HeaderBranding {
+  display_name: string
+  subtitle: string
+  accent_color: string
+  logo_url?: string | null
+}
+
 export function Header({
   env,
   tab,
   setTab,
+  branding,
 }: {
   env?: string | null
   tab: TabId
   setTab: (id: TabId) => void
+  branding?: HeaderBranding | null
 }) {
   const [openMenu, setOpenMenu] = useState<string | null>(null)
   const navRef = useRef<HTMLElement | null>(null)
@@ -449,17 +458,39 @@ export function Header({
 
   const entry = TABS.find((candidate) => candidate.id === ENTRY_TAB)
 
+  // Use branding when available, fall back to defaults
+  const displayName = branding?.display_name ?? 'AI Value Flywheel'
+  const subtitle = branding?.subtitle ?? 'Power & Utilities — Data & AI Catalog, Value & Roadmap'
+  const accentColor = branding?.accent_color ?? '#FF3621'
+  const logoUrl = branding?.logo_url
+
   return (
     <header className="border-b border-navy-600 bg-navy-800/90 backdrop-blur sticky top-0 z-30">
       <div className="max-w-[1440px] mx-auto px-6">
         <div className="flex items-center justify-between py-3">
-          <div>
-            <h1 className="text-xl font-bold tracking-tight text-white">
-              AI Value <span style={{ color: '#FF3621' }}>Flywheel</span>
-            </h1>
-            <p className="text-xs text-navy-400 -mt-0.5">
-              Power &amp; Utilities — Data &amp; AI Catalog, Value &amp; Roadmap
-            </p>
+          <div className="flex items-center gap-3">
+            {logoUrl ? (
+              <img
+                src={logoUrl}
+                alt="Logo"
+                className="max-h-8 rounded"
+                style={{ maxWidth: '120px' }}
+              />
+            ) : null}
+            <div>
+              <h1 className="text-xl font-bold tracking-tight text-white">
+                {displayName.includes('Flywheel') ? (
+                  <>
+                    {displayName.split('Flywheel')[0]}
+                    <span style={{ color: accentColor }}>Flywheel</span>
+                    {displayName.split('Flywheel')[1] || ''}
+                  </>
+                ) : (
+                  displayName
+                )}
+              </h1>
+              <p className="text-xs text-navy-400 -mt-0.5">{subtitle}</p>
+            </div>
           </div>
           <div className="flex items-center gap-3">
             {env ? (
@@ -471,7 +502,6 @@ export function Header({
                 {env}
               </span>
             ) : null}
-            <span className="text-xs text-navy-500">Powered by Databricks</span>
           </div>
         </div>
 
