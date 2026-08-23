@@ -49,6 +49,13 @@ const ExecutiveView = lazy(() => import('./views/ExecutiveView'))
 // largest of these: three modes plus the markdown parser and renderer.
 const KnowledgeView = lazy(() => import('./views/KnowledgeView'))
 
+// Tier 3 Phase 5 — the curation writes. Lazy for the same reason as the rest:
+// these are the screens a data steward opens deliberately, not ones every visitor
+// lands on, so they should not be weight in the entry chunk.
+const SourceMappingView = lazy(() => import('./views/SourceMappingView'))
+const TaxonomyView = lazy(() => import('./views/TaxonomyView'))
+const RulesView = lazy(() => import('./views/RulesView'))
+
 function ComingSoon({ label }: { label: string }) {
   return (
     <section className="rounded-xl border border-navy-700 bg-navy-800 px-6 py-10 text-center">
@@ -151,11 +158,11 @@ function AppShell() {
       case 'knowledge':
         return <KnowledgeView />
       case 'sourcemapping':
-        return <ComingSoon label="Source Mapping" />
+        return <SourceMappingView />
       case 'taxonomy':
-        return <ComingSoon label="Taxonomy" />
+        return <TaxonomyView />
       case 'rules':
-        return <ComingSoon label="Rules" />
+        return <RulesView />
       case 'research':
         return <ComingSoon label="Research" />
       case 'accounts':

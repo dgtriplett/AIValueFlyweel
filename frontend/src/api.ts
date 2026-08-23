@@ -17,6 +17,8 @@ import type {
   BootstrapResponse,
   CanonicalizeResponse,
   CatalogRecommendResponse,
+  ClassificationRule,
+  ClassifyResponse,
   Comment,
   ConfirmApplyResponse,
   ConfirmCardData,
@@ -54,10 +56,17 @@ import type {
   RecommendResponse,
   RequiresEdge,
   RoadmapResponse,
+  RuleInput,
+  RuleSeedResponse,
+  RuleTestResponse,
+  RulesResponse,
   SetupGrantsResponse,
   SetupStatusResponse,
   SnapshotsResponse,
+  SourceAlias,
   SourceRecommendResponse,
+  TaxonomyCoverage,
+  TaxonomyResponse,
   NetworkResponse,
   OnboardingImportResponse,
   UnattributedArtifactsResponse,
@@ -563,6 +572,78 @@ export const api = {
 
   deleteKbAttachment: (attachmentId: number) =>
     http.delete<{ deleted: boolean }>(`/kb/attachments/${attachmentId}`).then((r) => r.data),
+
+  // -------------------------------------------------------------------------
+  // Tier 3 Phase 5 — the curation writes.
+  //
+  // These are the first ported surfaces where the user CHANGES the estate rather
+  // than reading it, and the rate-limit classes differ per call in a way the call
+  // sites have to respect (`server/limits.py:129-145`):
+  //
+  //   PATCH /ingestion/aliases/{id}   unlimited — a per-row human correction
+  //   POST  /taxonomy/classify        `generate`  burst 4, 12/min — calls an LLM
+  //   POST  /rules, PUT, DELETE       unlimited — small metadata writes
+  //   POST  /rules/seed               unlimited, and idempotent
+  //   POST  /rules/test               `generate`  burst 4, 12/min — hits the warehouse
+  //   POST  /artifacts/sync           `sweep`     burst 2, 4/min — walks system tables
+  //
+  // Every mutation built on the two `generate` calls and the one `sweep` call
+  // spreads `NO_RETRY` from `lib/retry.ts`. That is not a change to react-query's
+  // default (mutations already resolve `retry ?? 0`) but a statement at the call
+  // site, because retrying a 429 spends the budget the `Retry-After` asked us to
+  // wait out and can push a soft limit into a longer one.
+  //
+  // `inventory.py` declares NO router prefix, so the rules endpoints live at
+  // `/api/rules`, not `/api/inventory/rules` — the same trap `artifacts` above
+  // documents.
+  // -------------------------------------------------------------------------
+
+  /** Alias mappings. `needs_review` selects unresolved and low-confidence rows. */
+  sourceAliases: (needsReview = true, limit = 200) =>
+    http
+      .get<SourceAlias[]>(`/ingestion/aliases?needs_review=${needsReview}&limit=${limit}`)
+      .then((r) => r.data),
+
+  /**
+   * Correct one mapping by hand. Pins it permanently against future sweeps.
+   *
+   * The server validates `canonical` against the live vocabulary and 422s an
+   * unknown value, so the caller builds its select from the real categories on
+   * `/data-assets` rather than from a hardcoded list.
+   */
+  patchSourceAlias: (aliasId: number, canonical: string) =>
+    http
+      .patch<SourceAlias>(`/ingestion/aliases/${aliasId}`, { canonical })
+      .then((r) => r.data),
+
+  taxonomyCoverage: () =>
+    http.get<TaxonomyCoverage>('/taxonomy/coverage').then((r) => r.data),
+
+  taxonomy: () => http.get<TaxonomyResponse>('/taxonomy').then((r) => r.data),
+
+  /** AI-classify unlabelled assets. `generate`-limited — see the note above. */
+  classifyTaxonomy: (max_assets = 200) =>
+    http
+      .post<ClassifyResponse>('/taxonomy/classify', { max_assets })
+      .then((r) => r.data),
+
+  rules: () => http.get<RulesResponse>('/rules').then((r) => r.data),
+
+  createRule: (body: RuleInput) =>
+    http.post<ClassificationRule>('/rules', body).then((r) => r.data),
+
+  updateRule: (ruleId: number, body: RuleInput) =>
+    http.put<ClassificationRule>(`/rules/${ruleId}`, body).then((r) => r.data),
+
+  deleteRule: (ruleId: number) =>
+    http.delete<{ deleted: boolean }>(`/rules/${ruleId}`).then((r) => r.data),
+
+  /** Load the common conventions. Idempotent, so `created` can be 0. */
+  seedRules: () => http.post<RuleSeedResponse>('/rules/seed').then((r) => r.data),
+
+  /** Dry-run the active rules against real discovered rows. `generate`-limited. */
+  testRules: (limit = 100) =>
+    http.post<RuleTestResponse>('/rules/test', { limit }).then((r) => r.data),
 
   // -------------------------------------------------------------------------
   // Tier 3 Phase 9 — the onboarding wizard.

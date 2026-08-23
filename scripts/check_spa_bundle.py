@@ -163,6 +163,29 @@ SOURCE_REQUIRED = {
         "<JointFundingView",
         "<AssumptionsView",
         "<OnboardingView",
+        # Tier 3 Phase 5 — the curation writes. Each replaced a `<ComingSoon>`
+        # slot, and a regression here is a white screen on a tab the nav offers.
+        "<SourceMappingView",
+        "<TaxonomyView",
+        "<RulesView",
+    ],
+    # These three WRITE, and the disciplines that make that safe are invisible in
+    # the rendered output: a mutation that forgot `NO_RETRY` on a `generate`-limited
+    # endpoint looks identical until a 429 turns into four. So they are asserted in
+    # source, where the intent lives.
+    "views/SourceMappingView.tsx": [
+        "api.patchSourceAlias",
+        "queryClient.invalidateQueries({ queryKey: ['source-aliases'] })",
+    ],
+    "views/TaxonomyView.tsx": [
+        "api.classifyTaxonomy",
+        "...NO_RETRY",
+        "queryClient.invalidateQueries({ queryKey: ['taxonomy'] })",
+    ],
+    "views/RulesView.tsx": [
+        "api.testRules",
+        "...NO_RETRY",
+        "queryKey: ['rules']",
     ],
     "views/PortfolioView.tsx": [
         "<CatalogView",

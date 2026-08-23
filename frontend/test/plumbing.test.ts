@@ -52,6 +52,9 @@ import { MAX_ATTACHMENT_BYTES, rejectionOf } from '../src/components/FileDrop'
 import { parseTags } from '../src/views/ArticleEditor'
 import { splitExcerpt } from '../src/views/KnowledgeView'
 import { downloadOnboardingTemplate, templateFilename } from '../src/views/OnboardingView'
+import { canonicalOptions } from '../src/views/SourceMappingView'
+import { classifySummary, dimensionLabel, rankedValues } from '../src/views/TaxonomyView'
+import { draftToRule, testSummary } from '../src/views/RulesView'
 import type { ConfirmCardData } from '../src/types'
 
 // ---------------------------------------------------------------------------
@@ -116,6 +119,18 @@ function capturingAdapter(response: { status?: number; data?: unknown; headers?:
  */
 function fakeFile(name: string, size: number): File {
   return { name, size } as File
+}
+
+/**
+ * The rejection message from `draftToRule`, asserting it rejected at all.
+ *
+ * Narrows the union rather than reaching for `as`, so a draft that unexpectedly
+ * VALIDATES fails the test with "expected an error" instead of comparing a regex
+ * against `undefined` and passing for the wrong reason.
+ */
+function errorOf(result: { rule: unknown } | { error: string }): string {
+  assert.ok('error' in result, 'expected the draft to be rejected, but it validated')
+  return result.error
 }
 
 // ---------------------------------------------------------------------------
@@ -791,6 +806,248 @@ tests['article tags are split and trimmed, blanks dropped'] = () => {
   assert.deepEqual(parseTags(' protection , ansi c37 ,, '), ['protection', 'ansi c37'])
   assert.deepEqual(parseTags(''), [])
 }
+
+// ---------------------------------------------------------------------------
+// 6. Tier 3 Phase 5 — the curation writes
+//
+// These are the first ported screens that CHANGE the estate, and the three claims
+// below are each a bug the console shipped rather than a hypothetical:
+//
+//   - its alias select defaulted to its first option regardless of what the row was
+//     already mapped to, so Save on an untouched row silently re-mapped it;
+//   - its rule form omitted priority and let a blank `value` submit on any
+//     dimension, which 422s for every dimension except `ignore`;
+//   - its taxonomy distribution rendered a card per dimension including the empty
+//     ones, because `list_taxonomy` seeds all three keys whether or not anything is
+//     classified.
+//
+// Each is invisible on screen until it is wrong against real data, which is exactly
+// what makes them worth pinning here.
+// ---------------------------------------------------------------------------
+
+tests['canonical options always offer Other, deduped and sorted, with no blanks'] = () => {
+  // `Other` is `server/normalize.py`'s sentinel and is valid even when no asset
+  // carries it, so it leads the list unconditionally. Nulls come from assets whose
+  // source_category was never set.
+  assert.deepEqual(
+    canonicalOptions(['SCADA', null, 'AMI', 'SCADA', undefined, '']),
+    ['Other', 'AMI', 'SCADA'],
+  )
+  assert.deepEqual(canonicalOptions([]), ['Other'])
+  // Not duplicated when the vocabulary already contains it.
+  assert.deepEqual(canonicalOptions(['Other', 'GIS']), ['Other', 'GIS'])
+}
+
+tests['a rule needs every closed-vocabulary choice made before it can submit'] = () => {
+  const base = {
+    dimension: '',
+    field: '',
+    match_type: '',
+    pattern: '',
+    value: '',
+    priority: '100',
+    notes: '',
+  }
+  assert.match(errorOf(draftToRule(base)), /what the rule decides/)
+  assert.match(errorOf(draftToRule({ ...base, dimension: 'environment' })), /which field/)
+  assert.match(
+    errorOf(draftToRule({ ...base, dimension: 'environment', field: 'catalog_name' })),
+    /how the pattern/,
+  )
+  // Whitespace is not a pattern. `validate_rule` rejects it server-side too; the
+  // point of checking here is not spending a round trip to be told.
+  assert.match(
+    errorOf(
+      draftToRule({
+        ...base,
+        dimension: 'environment',
+        field: 'catalog_name',
+        match_type: 'prefix',
+        pattern: '   ',
+      }),
+    ),
+    /needs a pattern/,
+  )
+}
+
+tests['a blank Assign is only valid on the ignore dimension'] = () => {
+  const partial = {
+    field: 'catalog_name',
+    match_type: 'prefix',
+    pattern: 'prod_',
+    value: '',
+    priority: '10',
+    notes: '',
+  }
+  // Every other dimension has to assign something — a rule that decides
+  // `environment` and assigns nothing is not a rule.
+  assert.match(errorOf(draftToRule({ ...partial, dimension: 'environment' })), /assign a value/)
+
+  // An ignore rule's effect IS exclusion, so it assigns nothing and `value` must
+  // reach the server as null rather than as an empty string it would store.
+  const ignore = draftToRule({ ...partial, dimension: 'ignore' })
+  assert.ok('rule' in ignore)
+  assert.equal(ignore.rule.value, null)
+  assert.equal(ignore.rule.dimension, 'ignore')
+}
+
+tests['a rule trims its pattern and carries an explicit priority'] = () => {
+  // Priority is on the form because FIRST MATCH WINS per dimension: the console
+  // omitted it, so every rule landed on the server default of 100 and the tie was
+  // broken by insertion order — which is not a convention anybody stated.
+  const parsed = draftToRule({
+    dimension: 'environment',
+    field: 'catalog_name',
+    match_type: 'prefix',
+    pattern: '  prod_  ',
+    value: '  production  ',
+    priority: '5',
+    notes: '  common convention  ',
+  })
+  assert.ok('rule' in parsed)
+  assert.equal(parsed.rule.pattern, 'prod_')
+  assert.equal(parsed.rule.value, 'production')
+  assert.equal(parsed.rule.priority, 5)
+  assert.equal(parsed.rule.notes, 'common convention')
+
+  // A blank note is absence, not an empty note.
+  const unnoted = draftToRule({
+    dimension: 'environment',
+    field: 'catalog_name',
+    match_type: 'prefix',
+    pattern: 'dev',
+    value: 'development',
+    priority: '10',
+    notes: '   ',
+  })
+  assert.ok('rule' in unnoted)
+  assert.equal(unnoted.rule.notes, null)
+}
+
+tests['a non-integer or negative priority is refused before the round trip'] = () => {
+  const base = {
+    dimension: 'environment',
+    field: 'catalog_name',
+    match_type: 'prefix',
+    pattern: 'prod',
+    value: 'production',
+    notes: '',
+  }
+  assert.match(errorOf(draftToRule({ ...base, priority: 'first' })), /whole number/)
+  assert.match(errorOf(draftToRule({ ...base, priority: '1.5' })), /whole number/)
+  assert.match(errorOf(draftToRule({ ...base, priority: '-1' })), /whole number/)
+  // An empty box is not zero: `Number('')` is 0, which would silently make the
+  // rule the highest-priority one in the whole set.
+  assert.match(errorOf(draftToRule({ ...base, priority: '' })), /whole number/)
+}
+
+tests['a dry run says what it was tested against, and flags what matched nothing'] = () => {
+  // `sample_source` is what makes the rest interpretable: rules that work on
+  // supplied samples and fail on the estate are the problem the endpoint exists
+  // to catch, so the sentence must name which it was.
+  const summary = testSummary({
+    sample_source: 'discovered_tables',
+    rules_applied: 8,
+    results: [],
+    summary: { total: 100, ignored: 12, unmatched: 30, by_dimension: {} },
+  })
+  assert.match(summary, /8 rule\(s\) over 100 row\(s\)/)
+  assert.match(summary, /from discovered_tables/)
+  assert.match(summary, /30 matched nothing/)
+}
+
+tests['an unclassified taxonomy dimension renders no distribution card'] = () => {
+  // `list_taxonomy` seeds `{d: {} for d in DIMENSIONS}`, so all three keys are
+  // always present. An empty one must be `null` — a card with no rows reads as
+  // "classified, nothing found" rather than "not classified".
+  assert.equal(rankedValues({}), null)
+  assert.equal(rankedValues(undefined), null)
+  // Highest count first: the distribution is read for its shape, and alphabetical
+  // ordering hides it.
+  assert.deepEqual(rankedValues({ batch: 3, streaming: 11, cdc: 7 }), [
+    ['streaming', 11],
+    ['cdc', 7],
+    ['batch', 3],
+  ])
+}
+
+tests['dimension keys are shown as words, not as snake_case'] = () => {
+  assert.equal(dimensionLabel('integration_pattern'), 'integration pattern')
+  assert.equal(dimensionLabel('criticality'), 'criticality')
+}
+
+tests['a classify run that wrote nothing says so in the server’s own words'] = () => {
+  // The nothing-to-do path returns `detail` and no counts. Falling through to the
+  // count sentence would render "0 classification(s) across 0 asset(s)", which
+  // reads as a failure rather than as "there was nothing left to do".
+  assert.equal(
+    classifySummary({ ok: true, detail: 'Every asset is already classified.' }),
+    'Every asset is already classified.',
+  )
+  assert.match(
+    classifySummary({
+      ok: true,
+      values_written: 84,
+      assets_considered: 40,
+      batches: 1,
+      warnings: [],
+    }),
+    /84 classification\(s\) written across 40 asset\(s\) in 1 batch\(es\)\./,
+  )
+}
+
+tests['the curation writes carry the account header and hit the unprefixed rule paths'] =
+  async () => {
+    // `inventory.py` declares no router prefix, so these are `/api/rules`, not
+    // `/api/inventory/rules`. And every one is a WRITE: a missing account header
+    // on a write does not read another tenant's data, it MUTATES the default
+    // account's — which is why this is asserted per verb rather than once.
+    installStorage('acct-curation')
+
+    const patch = capturingAdapter({ data: {} })
+    await http.patch('/ingestion/aliases/7', { canonical: 'SCADA' }, { adapter: patch.adapter })
+    assert.equal(patch.seen[0].headers[ACCOUNT_HEADER], 'acct-curation')
+    assert.equal(patch.seen[0].method, 'patch')
+
+    const post = capturingAdapter({ data: {} })
+    await http.post('/rules', { dimension: 'environment' }, { adapter: post.adapter })
+    assert.equal(post.seen[0].headers[ACCOUNT_HEADER], 'acct-curation')
+    assert.equal(post.seen[0].url, '/rules')
+
+    const del = capturingAdapter({ data: { deleted: true } })
+    await http.delete('/rules/3', { adapter: del.adapter })
+    assert.equal(del.seen[0].headers[ACCOUNT_HEADER], 'acct-curation')
+    assert.equal(del.seen[0].method, 'delete')
+
+    const classify = capturingAdapter({ data: { ok: true } })
+    await http.post('/taxonomy/classify', { max_assets: 200 }, { adapter: classify.adapter })
+    assert.equal(classify.seen[0].headers[ACCOUNT_HEADER], 'acct-curation')
+  }
+
+tests['a 429 on a generate-limited curation write keeps the server’s retry advice'] =
+  async () => {
+    // `/rules/test` and `/taxonomy/classify` are both `limiter("generate")`. The
+    // limit message is written to be shown verbatim, and the views spread
+    // `NO_RETRY` so this arrives once rather than four times.
+    installStorage('acct-limited')
+    const { adapter } = capturingAdapter({
+      status: 429,
+      data: { detail: 'Too many dry runs. Wait 9s and try again.' },
+      headers: { 'retry-after': '9' },
+    })
+    await assert.rejects(
+      http.post('/rules/test', { limit: 100 }, { adapter }),
+      (error: unknown) => {
+        assert.ok(isLimited(error))
+        assert.equal(error.message, 'Too many dry runs. Wait 9s and try again.')
+        assert.equal(retryHint(error), 'in 9s')
+        // And it must NOT be retriable: spending the budget the Retry-After asked
+        // us to wait out can push a soft limit into a longer one.
+        assert.equal(isRetriable(error), false)
+        return true
+      },
+    )
+  }
 
 // ---------------------------------------------------------------------------
 // Runner
