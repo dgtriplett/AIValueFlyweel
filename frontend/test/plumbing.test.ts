@@ -1506,6 +1506,80 @@ tests['the branding logo rejection matches the server cap and type list'] = () =
 }
 
 // ---------------------------------------------------------------------------
+// Feedback item A — full-page use-case detail view
+//
+// The drawer got cramped once the progression / notes / status-history content
+// grew, so the same use-case detail must be reachable as a FULL PAGE for better
+// tracking visibility. The claim worth pinning is structural: there is ONE detail
+// body rendered in two layouts (drawer vs page), the expand affordance and the
+// back breadcrumb both exist, App wires an expand path that carries the same ucId,
+// and the executive persona lands in a read-only variant. No DOM harness here, so
+// this is asserted on source — the same technique the what-if caps and
+// curation-write checks above use.
+// ---------------------------------------------------------------------------
+
+tests['UseCaseDrawer exposes both drawer and full-page layouts from one body'] = () => {
+  const source = readFileSync('src/components/UseCaseDrawer.tsx', 'utf8')
+  // One shared body component rendered in two layouts — not two copies of the
+  // progression / asset / value logic.
+  assert.match(source, /function UseCaseDetail\(/)
+  assert.match(source, /export function UseCaseDrawer\(/)
+  assert.match(source, /export function UseCaseDetailPage\(/)
+  // Both wrappers delegate to the shared body with an explicit layout.
+  assert.match(source, /<UseCaseDetail \{\.\.\.props\} layout="drawer" \/>/)
+  assert.match(source, /layout="page"/)
+  // The full-page layout is a real, distinguishable surface.
+  assert.match(source, /const isPage = layout === 'page'/)
+  assert.match(source, /data-ga-uc-page="1"/)
+}
+
+tests['the drawer offers an expand affordance and the page offers a way back'] = () => {
+  const source = readFileSync('src/components/UseCaseDrawer.tsx', 'utf8')
+  // Expand-to-full-page button (drawer only) and Back breadcrumb (page only).
+  assert.match(source, /data-ga-uc-expand="1"/)
+  assert.match(source, /aria-label="Expand to full page"/)
+  assert.match(source, /data-ga-uc-back="1"/)
+  // Expand is drawer-only; Back is page-only — the two never appear together.
+  assert.match(source, /\{!isPage && onExpand \? \(/)
+  assert.match(source, /\{isPage && onBack \? \(/)
+}
+
+tests['App wires the full-page mode and carries the same ucId'] = () => {
+  const source = readFileSync('src/App.tsx', 'utf8')
+  // The page is reachable from the drawer's expand, carrying the SAME id.
+  assert.match(source, /const \[pageUcId, setPageUcId\] = useState<number \| null>\(null\)/)
+  assert.match(source, /import \{ UseCaseDrawer, UseCaseDetailPage \}/)
+  assert.match(source, /onExpand=\{\(\) => \{/)
+  assert.match(source, /setPageUcId\(drawerUcId\)/)
+  // The page renders and Back returns the user to where they were.
+  assert.match(source, /<UseCaseDetailPage/)
+  assert.match(source, /onBack=\{\(\) => \{/)
+}
+
+tests['the full-page detail is read-only for the executive persona'] = () => {
+  const app = readFileSync('src/App.tsx', 'utf8')
+  // Read-only is derived from the executive persona and passed to both surfaces.
+  assert.match(app, /const detailReadOnly = activePersona === 'executive'/)
+  assert.match(app, /readOnly=\{detailReadOnly\}/)
+  const source = readFileSync('src/components/UseCaseDrawer.tsx', 'utf8')
+  // The body honours it: edit controls hide and mutations are gated.
+  assert.match(source, /readOnly = false/)
+  assert.match(source, /\{ucId \? \(/)
+  assert.match(source, /!readOnly \? \(/)
+  assert.match(source, /disabled=\{readOnly \|\| advance\.isPending\}/)
+}
+
+tests['the full-page detail surfaces tracking signals prominently'] = () => {
+  const source = readFileSync('src/components/UseCaseDrawer.tsx', 'utf8')
+  // The tracking banner (go-live, milestone, owner) is page-only.
+  assert.match(source, /data-ga-uc-tracking="1"/)
+  // Milestone/stage indicator (item A.3b) is built from the existing status field.
+  assert.match(source, /const statusIndex = detail\?\.status \? STATUSES\.indexOf\(detail\.status\)/)
+  // Owner (item A.3a) surfaces the existing created_by rather than a fabricated field.
+  assert.match(source, /const owner = detail\?\.created_by \?\? null/)
+}
+
+// ---------------------------------------------------------------------------
 // Runner
 // ---------------------------------------------------------------------------
 

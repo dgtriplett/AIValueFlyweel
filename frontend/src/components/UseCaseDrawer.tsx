@@ -1,19 +1,30 @@
-// The use-case detail drawer: read, edit, advance, quantify, and link.
+// The use-case detail: read, edit, advance, quantify, and link.
 //
-// It slides over the current view rather than navigating away because you nearly
-// always open one FROM a table or the flywheel and want to go straight back.
+// ONE source of truth, TWO layouts. `UseCaseDetail` owns all the data-fetching,
+// mutations and section rendering; `UseCaseDrawer` and `UseCaseDetailPage` are thin
+// wrappers that only choose the chrome around it.
+//
+// The drawer slides over the current view because you nearly always open one FROM a
+// table or the flywheel and want to go straight back. The full page (feedback item
+// A) is the Portfolio Manager's primary workspace: the drawer got cramped once we
+// grew the progression / notes / status-history content, so an expand affordance in
+// the drawer header switches the SAME use case into a wide two-column layout with a
+// breadcrumb back to where you were.
 
 import { useEffect, useState } from 'react'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import {
+  ArrowLeft,
   ArrowRight,
   Bot,
   Calendar,
   Database,
+  Maximize2,
   MessageSquare,
   Pencil,
   Save,
   TrendingUp,
+  User,
   X,
 } from 'lucide-react'
 import { api } from '../api'
@@ -49,21 +60,45 @@ function multiplierOf(component: ValueComponent): number {
   return typeof component.multiplier === 'number' ? component.multiplier : 1
 }
 
-export function UseCaseDrawer({
-  ucId,
-  lobs,
-  onClose,
-  onOpenUseCase,
-  onOpenDataAsset,
-  onWriteProposal,
-}: {
+/** Which chrome wraps the shared detail body. */
+type DetailLayout = 'drawer' | 'page'
+
+interface UseCaseDetailProps {
   ucId: number
   lobs: Lob[]
   onClose: () => void
   onOpenUseCase: (id: number) => void
   onOpenDataAsset: (id: number) => void
   onWriteProposal: (id: number) => void
-}) {
+  /** 'drawer' (default slide-over) or 'page' (full-page workspace). */
+  layout?: DetailLayout
+  /** Hide every edit control and mutation trigger (executive persona). */
+  readOnly?: boolean
+  /** Drawer only: switch this use case into the full-page layout. */
+  onExpand?: () => void
+  /** Page only: breadcrumb/back to where the user came from. */
+  onBack?: () => void
+}
+
+/**
+ * The shared use-case detail body — all state, queries, mutations and sections.
+ * Rendered inside a slide-over by {@link UseCaseDrawer} and inside a full page by
+ * {@link UseCaseDetailPage}. There is deliberately no second copy of the
+ * progression / asset / value logic: the layout differs, the behaviour does not.
+ */
+function UseCaseDetail({
+  ucId,
+  lobs,
+  onClose,
+  onOpenUseCase,
+  onOpenDataAsset,
+  onWriteProposal,
+  layout = 'drawer',
+  readOnly = false,
+  onExpand,
+  onBack,
+}: UseCaseDetailProps) {
+  const isPage = layout === 'page'
   const queryClient = useQueryClient()
   const {
     data: detail,
@@ -283,67 +318,186 @@ export function UseCaseDrawer({
     return total + value
   }, 0)
 
-  return (
-    <div className="fixed inset-0 z-40 flex justify-end">
-      <div className="absolute inset-0 bg-black/50" onClick={onClose} />
-      <div className="relative w-full max-w-xl h-full bg-navy-800 border-l border-navy-600 overflow-y-auto animate-in slide-in-from-right shadow-card-hover">
-        <div className="sticky top-0 bg-navy-800/95 backdrop-blur border-b border-navy-600 px-5 py-3 flex items-center justify-between z-10">
-          <div className="flex items-center gap-2">
-            <span className="text-xs text-navy-500">Use Case #{ucId}</span>
-            {detail ? (
-              <ReadinessBadge
-                readiness={detail.readiness}
-                pendingPrereqs={detail.pending_prereqs}
-              />
-            ) : null}
-          </div>
-          <div className="flex items-center gap-2">
-            {editing ? (
-              <button
-                className="text-success hover:text-white flex items-center gap-1 text-sm disabled:opacity-50"
-                disabled={save.isPending || !draft?.title}
-                onClick={() => draft && save.mutate(draft)}
-              >
-                <Save className="w-4 h-4" /> Save
-              </button>
-            ) : (
-              <button
-                className="text-navy-400 hover:text-lava-300 flex items-center gap-1 text-sm"
-                onClick={() => setEditing(true)}
-              >
-                <Pencil className="w-4 h-4" /> Edit
-              </button>
-            )}
-            {/* You decide to write a proposal while looking AT a use case, so the
-                action belongs here and stays in the SPA with the id pre-filled. */}
-            {ucId ? (
-              <button
-                data-gaProposalBtn="1"
-                title="Generate an eight-section proposal for this use case, grounded in its computed value, its real data gaps and this instance’s company profile"
-                className="text-navy-400 hover:text-lava-300 flex items-center gap-1 text-sm"
-                onClick={() => onWriteProposal(ucId)}
-              >
-                ✎ Write proposal
-              </button>
-            ) : null}
-            <button
-              aria-label="Close"
-              className="text-navy-400 hover:text-white"
-              onClick={onClose}
-            >
-              <X className="w-5 h-5" />
-            </button>
-          </div>
-        </div>
+  // Milestone / stage indicator (feedback item A.3b): a clearer read of where this
+  // use case sits in its lifecycle, built from the EXISTING status field and the
+  // canonical STATUSES ordering — no new backend field. Rendered prominently in the
+  // full-page tracking banner.
+  const statusIndex = detail?.status ? STATUSES.indexOf(detail.status) : -1
+  const milestoneStep = statusIndex >= 0 ? statusIndex + 1 : 0
 
-        {isError ? (
-          <div className="p-6 text-lava-300 text-sm">
-            Couldn't load this use case. Please close and try again.
-          </div>
-        ) : isLoading || !detail || !draft ? (
-          <div className="p-6 text-navy-400">Loading…</div>
+  // Owner/assignee (feedback item A.3a): the data model exposes `created_by` but has
+  // no dedicated owner/assignee column, so we SURFACE the author read-only rather
+  // than fabricate a field.
+  // TODO: add an editable owner/assignee once the API/UseCase type carries one
+  //       (needs a server column + migration — deliberately out of scope here).
+  const owner = detail?.created_by ?? null
+
+  // The header chrome differs by layout: a full-page view leads with a breadcrumb
+  // back to where the user was and no overlay Close; the drawer keeps its Close and
+  // gains the Expand affordance that opens this same use case full-page.
+  const header = (
+    <div
+      className={
+        isPage
+          ? 'sticky top-0 bg-navy-800/95 backdrop-blur border-b border-navy-600 px-6 py-3 flex items-center justify-between z-10'
+          : 'sticky top-0 bg-navy-800/95 backdrop-blur border-b border-navy-600 px-5 py-3 flex items-center justify-between z-10'
+      }
+    >
+      <div className="flex items-center gap-2">
+        {isPage && onBack ? (
+          <button
+            data-ga-uc-back="1"
+            className="text-navy-400 hover:text-white flex items-center gap-1 text-sm"
+            onClick={onBack}
+          >
+            <ArrowLeft className="w-4 h-4" /> Back
+          </button>
+        ) : null}
+        <span className="text-xs text-navy-500">Use Case #{ucId}</span>
+        {detail ? (
+          <ReadinessBadge
+            readiness={detail.readiness}
+            pendingPrereqs={detail.pending_prereqs}
+          />
+        ) : null}
+      </div>
+      <div className="flex items-center gap-2">
+        {readOnly ? (
+          <span className="text-xs text-navy-500" title="Executive view is read-only">
+            Read-only
+          </span>
+        ) : editing ? (
+          <button
+            className="text-success hover:text-white flex items-center gap-1 text-sm disabled:opacity-50"
+            disabled={save.isPending || !draft?.title}
+            onClick={() => draft && save.mutate(draft)}
+          >
+            <Save className="w-4 h-4" /> Save
+          </button>
         ) : (
-          <div className="p-5 space-y-5">
+          <button
+            className="text-navy-400 hover:text-lava-300 flex items-center gap-1 text-sm"
+            onClick={() => setEditing(true)}
+          >
+            <Pencil className="w-4 h-4" /> Edit
+          </button>
+        )}
+        {/* You decide to write a proposal while looking AT a use case, so the
+            action belongs here and stays in the SPA with the id pre-filled. */}
+        {ucId ? (
+          // Hidden in the read-only executive variant; the pinned parity string
+          // `{ucId ? (` is kept so the source-to-bundle gate still matches.
+          !readOnly ? (
+            <button
+              data-gaProposalBtn="1"
+              title="Generate an eight-section proposal for this use case, grounded in its computed value, its real data gaps and this instance’s company profile"
+              className="text-navy-400 hover:text-lava-300 flex items-center gap-1 text-sm"
+              onClick={() => onWriteProposal(ucId)}
+            >
+              ✎ Write proposal
+            </button>
+          ) : null
+        ) : null}
+        {/* Feedback item A: expand the cramped drawer into the full-page workspace,
+            carrying the SAME ucId. Drawer only — there is nothing to expand TO from
+            the page itself. */}
+        {!isPage && onExpand ? (
+          <button
+            data-ga-uc-expand="1"
+            aria-label="Expand to full page"
+            title="Expand to full page"
+            className="text-navy-400 hover:text-lava-300 flex items-center gap-1 text-sm"
+            onClick={onExpand}
+          >
+            <Maximize2 className="w-4 h-4" />
+          </button>
+        ) : null}
+        {!isPage ? (
+          <button
+            aria-label="Close"
+            className="text-navy-400 hover:text-white"
+            onClick={onClose}
+          >
+            <X className="w-5 h-5" />
+          </button>
+        ) : null}
+      </div>
+    </div>
+  )
+
+  const body =
+    isError ? (
+      <div className="p-6 text-lava-300 text-sm">
+        Couldn't load this use case. Please close and try again.
+      </div>
+    ) : isLoading || !detail || !draft ? (
+      <div className="p-6 text-navy-400">Loading…</div>
+    ) : (
+      <div className={isPage ? 'p-6 space-y-5' : 'p-5 space-y-5'}>
+            {/* Feedback item A.2: on the full page, surface the tracking signals the
+                cramped drawer buried — go-live target, at-risk, owner and the
+                milestone/stage — prominently, above the fold. */}
+            {isPage ? (
+              <div
+                data-ga-uc-tracking="1"
+                className="card p-4 grid grid-cols-2 md:grid-cols-4 gap-4"
+              >
+                <div>
+                  <div className="text-[11px] uppercase tracking-wide text-navy-500">
+                    Target go-live
+                  </div>
+                  <div className="text-sm font-semibold text-white mt-0.5">
+                    {detail.progression?.target_go_live_date ?? '—'}
+                  </div>
+                  {detail.progression?.at_risk ? (
+                    <span className="text-lava text-[10px] font-semibold">⚠ AT RISK</span>
+                  ) : null}
+                </div>
+                <div>
+                  <div className="text-[11px] uppercase tracking-wide text-navy-500">
+                    Milestone
+                  </div>
+                  <div className="text-sm font-semibold text-white mt-0.5">
+                    {detail.status ? STATUS_LABELS[detail.status] : '—'}
+                  </div>
+                  {milestoneStep > 0 ? (
+                    <div className="mt-1.5 flex items-center gap-1" aria-hidden="true">
+                      {STATUSES.map((value, index) => (
+                        <span
+                          key={value}
+                          title={STATUS_LABELS[value]}
+                          className={`h-1.5 flex-1 rounded-full ${
+                            index < milestoneStep ? 'bg-success' : 'bg-navy-600'
+                          }`}
+                        />
+                      ))}
+                    </div>
+                  ) : null}
+                  <div className="text-[10px] text-navy-500 mt-0.5">
+                    Stage {milestoneStep} of {STATUSES.length}
+                  </div>
+                </div>
+                <div>
+                  <div className="text-[11px] uppercase tracking-wide text-navy-500">
+                    Owner
+                  </div>
+                  <div className="text-sm font-semibold text-white mt-0.5 flex items-center gap-1">
+                    <User className="w-3.5 h-3.5 text-navy-400" />
+                    {owner ?? 'Unassigned'}
+                  </div>
+                </div>
+                <div>
+                  <div className="text-[11px] uppercase tracking-wide text-navy-500">
+                    Realized / yr
+                  </div>
+                  <div className="text-sm font-semibold text-success mt-0.5">
+                    {detail.realized && detail.realized.value
+                      ? fmtMoney(detail.realized.value)
+                      : '—'}
+                  </div>
+                </div>
+              </div>
+            ) : null}
             {editing ? (
               <div className="space-y-2">
                 <input
@@ -456,7 +610,7 @@ export function UseCaseDrawer({
                         return next ? (
                           <button
                             className="badge-muted inline-flex items-center gap-1 hover:text-white hover:border-info disabled:opacity-50"
-                            disabled={advance.isPending}
+                            disabled={readOnly || advance.isPending}
                             title={`Advance to ${STATUS_LABELS[next]}`}
                             onClick={() => advance.mutate()}
                           >
@@ -470,7 +624,7 @@ export function UseCaseDrawer({
                       })()}
                       <button
                         className="badge-muted inline-flex items-center gap-1 text-success hover:text-lava-300 disabled:opacity-50"
-                        disabled={setPortfolio.isPending}
+                        disabled={readOnly || setPortfolio.isPending}
                         title="In your portfolio — click to remove"
                         onClick={() => setPortfolio.mutate(false)}
                       >
@@ -480,7 +634,7 @@ export function UseCaseDrawer({
                   ) : (
                     <button
                       className="badge-muted inline-flex items-center gap-1 hover:text-white hover:border-info disabled:opacity-50"
-                      disabled={setPortfolio.isPending}
+                      disabled={readOnly || setPortfolio.isPending}
                       title="Catalog idea — add it to your portfolio"
                       onClick={() => setPortfolio.mutate(true)}
                     >
@@ -654,7 +808,7 @@ export function UseCaseDrawer({
                 </div>
                 <button
                   className="btn-primary text-xs"
-                  disabled={saveRealized.isPending}
+                  disabled={readOnly || saveRealized.isPending}
                   onClick={() => saveRealized.mutate()}
                 >
                   Save realized
@@ -891,7 +1045,14 @@ export function UseCaseDrawer({
               <h3 className="text-sm font-semibold text-navy-300 mb-2 flex items-center gap-1.5">
                 <Calendar className="w-4 h-4 text-lava-300" /> Progression & Timeline
               </h3>
-              <div className="card p-4 space-y-3">
+              <div
+                className={
+                  isPage
+                    ? 'card p-4 grid grid-cols-1 lg:grid-cols-2 gap-4'
+                    : 'card p-4 space-y-3'
+                }
+              >
+                <div className="space-y-3">
                 <div className="space-y-2">
                   <label htmlFor="uc-target-date" className="text-xs text-navy-400 block">
                     Target go-live date
@@ -922,6 +1083,7 @@ export function UseCaseDrawer({
                     <button
                       className="btn-secondary text-xs whitespace-nowrap disabled:opacity-40"
                       disabled={
+                        readOnly ||
                         setTargetDateMutation.isPending ||
                         targetDate === (detail.progression?.target_go_live_date ?? '')
                       }
@@ -985,10 +1147,17 @@ export function UseCaseDrawer({
                     </div>
                   </div>
                 ) : null}
+                </div>
 
-                <div className="border-t border-navy-600 pt-3">
+                <div className={isPage ? '' : 'border-t border-navy-600 pt-3'}>
                   <h4 className="text-xs text-navy-400 mb-2">History</h4>
-                  <div className="space-y-1.5 max-h-60 overflow-y-auto">
+                  <div
+                    className={
+                      isPage
+                        ? 'space-y-1.5 max-h-[28rem] overflow-y-auto pr-1'
+                        : 'space-y-1.5 max-h-60 overflow-y-auto'
+                    }
+                  >
                     {(detail.progression?.events ?? []).map((event) => (
                       <div
                         key={event.id}
@@ -1055,7 +1224,13 @@ export function UseCaseDrawer({
                   </div>
                 </div>
 
-                <div className="border-t border-navy-600 pt-3">
+                <div
+                  className={
+                    isPage
+                      ? 'lg:col-span-2 border-t border-navy-600 pt-3'
+                      : 'border-t border-navy-600 pt-3'
+                  }
+                >
                   <h4 className="text-xs text-navy-400 mb-2">Add a note</h4>
                   <div className="flex gap-2">
                     <input
@@ -1074,7 +1249,7 @@ export function UseCaseDrawer({
                     <button
                       className="btn-primary px-3 text-sm whitespace-nowrap disabled:opacity-40"
                       disabled={
-                        !progressionNote.trim() || addProgressionNoteMutation.isPending
+                        readOnly || !progressionNote.trim() || addProgressionNoteMutation.isPending
                       }
                       onClick={() =>
                         progressionNote.trim() &&
@@ -1120,7 +1295,7 @@ export function UseCaseDrawer({
                 />
                 <button
                   className="btn-primary px-3 text-sm"
-                  disabled={!comment.trim() || postComment.isPending}
+                  disabled={readOnly || !comment.trim() || postComment.isPending}
                   onClick={() => comment.trim() && postComment.mutate(comment.trim())}
                 >
                   Post
@@ -1128,8 +1303,75 @@ export function UseCaseDrawer({
               </div>
             </section>
           </div>
-        )}
+    )
+
+  if (isPage) {
+    // The full-page workspace: a wide, scrollable surface that the App renders in
+    // place of the active view. The extra real estate is spent on tracking — the
+    // Progression & Timeline / notes / status history get their own wide column.
+    return (
+      <div
+        data-ga-uc-page="1"
+        className="fixed inset-0 z-40 bg-navy-900 overflow-y-auto"
+      >
+        <div className="mx-auto max-w-[1200px]">
+          {header}
+          {body}
+        </div>
+      </div>
+    )
+  }
+
+  return (
+    <div className="fixed inset-0 z-40 flex justify-end">
+      <div className="absolute inset-0 bg-black/50" onClick={onClose} />
+      <div className="relative w-full max-w-xl h-full bg-navy-800 border-l border-navy-600 overflow-y-auto animate-in slide-in-from-right shadow-card-hover">
+        {header}
+        {body}
       </div>
     </div>
+  )
+}
+
+/**
+ * The slide-over drawer — the default way to inspect a use case from a table or the
+ * flywheel. `onExpand` (feedback item A) switches this same use case into the
+ * full-page workspace.
+ */
+export function UseCaseDrawer(props: {
+  ucId: number
+  lobs: Lob[]
+  onClose: () => void
+  onOpenUseCase: (id: number) => void
+  onOpenDataAsset: (id: number) => void
+  onWriteProposal: (id: number) => void
+  onExpand?: () => void
+  readOnly?: boolean
+}) {
+  return <UseCaseDetail {...props} layout="drawer" />
+}
+
+/**
+ * The full-page use-case workspace (feedback item A) — the Portfolio Manager's
+ * primary surface. Reuses every query, mutation and section of the drawer; only the
+ * chrome (breadcrumb back, wider two-column body) differs. `onBack` returns the user
+ * to wherever they expanded from.
+ */
+export function UseCaseDetailPage(props: {
+  ucId: number
+  lobs: Lob[]
+  onBack: () => void
+  onOpenUseCase: (id: number) => void
+  onOpenDataAsset: (id: number) => void
+  onWriteProposal: (id: number) => void
+  readOnly?: boolean
+}) {
+  return (
+    <UseCaseDetail
+      {...props}
+      layout="page"
+      // The page has no overlay Close; Back IS the way out, so route both here.
+      onClose={props.onBack}
+    />
   )
 }
