@@ -38,6 +38,7 @@ from ..config import SERVING_ENDPOINT
 from ..db import db
 from ..readiness import ready_assets
 from ..limits import limiter
+from ..routes.agents import build_value_model
 
 router = APIRouter(prefix="/generate", tags=["generation"])
 confirm_router = APIRouter(prefix="/confirm", tags=["generation"])
@@ -350,6 +351,28 @@ async def _execute_create_use_cases(payload: dict, actor: str) -> dict:
                        ON CONFLICT (use_case_id, domain_id) DO NOTHING""",
                     uc_id, domain_id, necessity,
                     "Declared by the use-case generation agent.")
+
+        # BUG 1 FIX: Automatically build and persist a value model for the generated use case.
+        # This reuses the same LLM-based logic that estimate_value uses, so a freshly
+        # generated use case immediately has a real hypothesized_value_json (non-zero,
+        # grounded in the account's shared assumptions) exactly as generation.py's
+        # docstring claims. Handle failures gracefully — if valuation fails, still
+        # create the use case.
+        try:
+            value_model_dict = await build_value_model(row["title"], _describe(candidate))
+            if value_model_dict:
+                await db.execute(
+                    """UPDATE use_cases
+                       SET hypothesized_value_json = $1::jsonb
+                       WHERE id = $2""",
+                    json.dumps(value_model_dict), uc_id)
+        except Exception as exc:  # noqa: BLE001
+            # Log but don't fail the batch — a use case without a value model is
+            # better than no use case at all.
+            import logging
+            logging.getLogger(__name__).warning(
+                "Failed to auto-generate value model for use case %d (%s): %s",
+                uc_id, row["title"], exc)
 
         created.append({"id": uc_id, "title": row["title"], "lens": candidate.get("lens")})
         await write_audit("use_case", uc_id, "generate", actor,

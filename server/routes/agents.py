@@ -823,16 +823,14 @@ class EstimateIn(BaseModel):
     description: str | None = None
 
 
-@router.post("/estimate-value", dependencies=[Depends(limiter("research"))])
-async def estimate_value(body: EstimateIn):
-    title, desc = body.title, body.description
-    if body.use_case_id is not None:
-        uc = await db.fetchrow("SELECT title, description FROM use_cases WHERE id=$1", body.use_case_id)
-        if uc:
-            title, desc = uc["title"], uc["description"]
-    if not title:
-        raise HTTPException(422, "Provide use_case_id or title")
-
+async def build_value_model(title: str, description: str | None = None) -> dict:
+    """Build a parameterized value model for a use case.
+    
+    Shared helper extracted from estimate_value so generated use cases can
+    automatically get a value model without duplicating the LLM logic.
+    
+    Returns: dict with keys {driver, components, roiMonths, notes}
+    """
     assumptions = [dict(a) for a in await db.fetch("SELECT key, label, unit FROM value_assumptions ORDER BY category")]
     benchmarks = [dict(b) for b in await db.fetch("SELECT * FROM benchmark_library")]
     keys = [a["key"] for a in assumptions]
@@ -843,7 +841,7 @@ async def estimate_value(body: EstimateIn):
         "conversion), assumptionKeys (subset of the allowed keys), lowCoeff, highCoeff}. Annual value in $M = sum over "
         "components of multiplier * product(assumption values) * coeff. Keep it realistic and conservative. "
         "Return STRICT JSON: {\"components\":[...], \"roiMonths\":int, \"notes\":str}. "
-        f"USE CASE: {title} — {desc or ''}\n"
+        f"USE CASE: {title} — {description or ''}\n"
         f"ALLOWED ASSUMPTION KEYS: {json.dumps(keys)}\n"
         f"BENCHMARKS (reference ranges): {json.dumps(benchmarks[:15], default=str)}"
     )
@@ -867,11 +865,32 @@ async def estimate_value(body: EstimateIn):
     if not comps:
         comps = [{"name": "O&M efficiency", "calculationDisplay": "O&M budget x 0.3%",
                   "multiplier": 0.003, "assumptionKeys": ["omBudgetMM"], "lowCoeff": 0.6, "highCoeff": 1.4}]
-    return {"model": SERVING_ENDPOINT if used_llm else "heuristic", "used_llm": used_llm,
-            "fallback_note": note,
-            "value_model": {"driver": title, "components": comps,
-                            "roiMonths": (parsed or {}).get("roiMonths", 12),
-                            "notes": (parsed or {}).get("notes", "")}}
+    
+    return {
+        "driver": title,
+        "components": comps,
+        "roiMonths": (parsed or {}).get("roiMonths", 12),
+        "notes": (parsed or {}).get("notes", ""),
+    }
+
+
+@router.post("/estimate-value", dependencies=[Depends(limiter("research"))])
+async def estimate_value(body: EstimateIn):
+    title, desc = body.title, body.description
+    if body.use_case_id is not None:
+        uc = await db.fetchrow("SELECT title, description FROM use_cases WHERE id=$1", body.use_case_id)
+        if uc:
+            title, desc = uc["title"], uc["description"]
+    if not title:
+        raise HTTPException(422, "Provide use_case_id or title")
+
+    value_model = await build_value_model(title, desc)
+    return {
+        "model": SERVING_ENDPOINT,
+        "used_llm": True,
+        "fallback_note": None,
+        "value_model": value_model,
+    }
 
 
 # ---------------------------------------------------------------------------
