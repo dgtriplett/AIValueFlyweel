@@ -5,18 +5,19 @@
 // and cost a full remount on every tab change — the flywheel's layout and the
 // dashboards' queries would be thrown away and recomputed each time.
 
-import { lazy, Suspense, useState } from 'react'
+import { lazy, Suspense, useEffect, useState } from 'react'
 import { useQuery } from '@tanstack/react-query'
 import { Database, Layers, TrendingUp, Zap } from 'lucide-react'
 import { api } from './api'
 import { fmtMoney } from './constants'
 import { FilterProvider } from './context/FilterContext'
-import { RoleProvider } from './context/RoleContext'
+import { RoleProvider, usePersona } from './context/RoleContext'
 import { EulaGate } from './components/EulaGate'
 import { FilterBar } from './components/FilterBar'
 import { AssistantPanel } from './components/AssistantPanel'
 import { Header } from './components/Header'
 import type { TabId } from './components/Header'
+import { visibleTabsForPersona } from './components/Header'
 import { NewUseCaseModal } from './components/NewUseCaseModal'
 import { slugFromLocation } from './lib/kbroute'
 import type { UseCaseView } from './components/ScopeSwitch'
@@ -95,6 +96,21 @@ function AppShell() {
   const [focusUcId, setFocusUcId] = useState<number | null>(null)
   const [creating, setCreating] = useState(false)
   const [proposalUcId, setProposalUcId] = useState<number | null>(null)
+
+  // Phase 2: fallback when the active tab is no longer visible to the current persona.
+  // Example: an admin viewing 'accounts' switches to 'pm' persona — accounts is now
+  // hidden, so fall back to the first visible tab for that persona.
+  const activePersona = usePersona()
+  useEffect(() => {
+    const visibleTabs = visibleTabsForPersona(activePersona)
+    if (!visibleTabs.has(tab)) {
+      // Current tab is not visible to this persona — pick the first visible one.
+      const fallback = visibleTabs.values().next().value
+      if (fallback) {
+        setTab(fallback)
+      }
+    }
+  }, [activePersona, tab])
 
   /** Jump to the flywheel with a use case already lit up. */
   const focusOnFlywheel = (id: number) => {

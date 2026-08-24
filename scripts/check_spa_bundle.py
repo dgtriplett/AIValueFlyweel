@@ -130,9 +130,9 @@ FORBIDDEN = [
 
 SOURCE_REQUIRED = {
     "components/Header.tsx": [
-        "const NAV_GROUPS",
+        "const ALL_NAV_GROUPS",
         "TABS.find((candidate) => candidate.id === id)",
-        "NAV_GROUPS.map((group) =>",
+        "const activePersona = usePersona()",
         "const TOOL_TABS: TabId[] = ['generate', 'roadmap_import', 'proposals']",
         "setTab(id)",
         'data-gaGroupedNav="1"',
