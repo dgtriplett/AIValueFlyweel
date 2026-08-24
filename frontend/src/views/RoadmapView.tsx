@@ -13,6 +13,7 @@ import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { FileText, Printer, Sparkles, TriangleAlert, WandSparkles, X, Zap } from 'lucide-react'
 
 import { api } from '../api'
+import { useReadOnly } from '../context/RoleContext'
 import { LOB_COLORS, fmtMoney } from '../constants'
 import type { DashboardData, Lob, RoadmapItem, UseCase } from '../types'
 
@@ -35,6 +36,7 @@ export default function RoadmapView({
   onOpen?: (useCaseId: number) => void
 }) {
   const queryClient = useQueryClient()
+  const readOnly = useReadOnly()
   const [sheetOpen, setSheetOpen] = useState(false)
   const [moved, setMoved] = useState<Record<number, Horizon>>({})
 
@@ -109,27 +111,29 @@ export default function RoadmapView({
           {`Auto-sequenced into dependency-respecting waves (${roadmap.data?.waves ?? 0} waves). ` +
             'Drag between horizons; violations flagged.'}
         </div>
-        <div className="flex gap-2">
-          <button
-            className="btn-secondary text-sm"
-            onClick={() => {
-              setMoved({})
-              roadmap.refetch()
-            }}
-          >
-            <WandSparkles className="w-4 h-4" /> Regenerate
-          </button>
-          <button className="btn-secondary text-sm" onClick={() => setSheetOpen(true)}>
-            <FileText className="w-4 h-4" /> Exec one-pager
-          </button>
-          <button
-            className="btn-primary text-sm"
-            disabled={save.isPending}
-            onClick={() => save.mutate()}
-          >
-            Confirm &amp; save
-          </button>
-        </div>
+        {!readOnly && (
+          <div className="flex gap-2">
+            <button
+              className="btn-secondary text-sm"
+              onClick={() => {
+                setMoved({})
+                roadmap.refetch()
+              }}
+            >
+              <WandSparkles className="w-4 h-4" /> Regenerate
+            </button>
+            <button className="btn-secondary text-sm" onClick={() => setSheetOpen(true)}>
+              <FileText className="w-4 h-4" /> Exec one-pager
+            </button>
+            <button
+              className="btn-primary text-sm"
+              disabled={save.isPending}
+              onClick={() => save.mutate()}
+            >
+              Confirm &amp; save
+            </button>
+          </div>
+        )}
       </div>
 
       {save.isSuccess ? (
@@ -150,10 +154,14 @@ export default function RoadmapView({
               key={column.key}
               className="bg-navy-800/60 border border-navy-600 rounded-card p-3"
               onDragOver={(event: DragEvent<HTMLDivElement>) => event.preventDefault()}
-              onDrop={(event: DragEvent<HTMLDivElement>) => {
-                const useCaseId = Number(event.dataTransfer.getData('text/plain'))
-                if (useCaseId) move(useCaseId, column.key)
-              }}
+              onDrop={
+                !readOnly
+                  ? (event: DragEvent<HTMLDivElement>) => {
+                      const useCaseId = Number(event.dataTransfer.getData('text/plain'))
+                      if (useCaseId) move(useCaseId, column.key)
+                    }
+                  : undefined
+              }
             >
               <div className="flex items-center justify-between border-b border-navy-600 pb-2 mb-2">
                 <div>
@@ -173,7 +181,7 @@ export default function RoadmapView({
                   return (
                     <div
                       key={card.use_case_id}
-                      draggable
+                      draggable={!readOnly}
                       onDragStart={(event: DragEvent<HTMLDivElement>) =>
                         event.dataTransfer.setData('text/plain', String(card.use_case_id))
                       }

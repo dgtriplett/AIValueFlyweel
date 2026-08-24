@@ -164,3 +164,24 @@ export function useRole(): RoleContextValue {
 export function usePersona(): Persona {
   return useRole().activePersona
 }
+
+/**
+ * PHASE 3 — EXECUTIVE READ-ONLY: centralized read-only signal.
+ *
+ * Returns true when the given persona should see a read-only UI (no mutating
+ * affordances: create/edit/delete/generate buttons, inline editors, status changes).
+ * Executives are view-only consumers of value & roadmap data.
+ */
+export function readOnlyForPersona(persona: Persona): boolean {
+  return persona === 'executive'
+}
+
+/**
+ * PHASE 3 — EXECUTIVE READ-ONLY: convenience hook.
+ *
+ * Returns true when the active persona should see a read-only UI.
+ * Views use this to hide mutating controls (buttons, editors, etc).
+ */
+export function useReadOnly(): boolean {
+  return readOnlyForPersona(usePersona())
+}
