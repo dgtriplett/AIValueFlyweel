@@ -1647,6 +1647,131 @@ tests['persona filtering is mutation-worthy: test would fail if pm set is wrong'
     'MUTATION CHECK: executive must NOT see funding — if this fails, the executive set is wrong')
 }
 
+
+// ---------------------------------------------------------------------------
+// Phase 4 — ADMIN LOCKDOWN: enforce admin-only surfaces on TRUSTED isAdmin,
+// not on the self-selected persona.
+//
+// Persona is self-selected and persisted in localStorage, so a NON-admin can
+// carry a stale/forced 'admin' persona. The trusted fact is `isAdmin` from
+// GET /api/me. These pin the three halves of the lockdown:
+//   1. the switcher only OFFERS 'admin' to a trusted admin;
+//   2. RoleContext.effectivePersona COERCES a non-admin's 'admin' down to 'pm'
+//      centrally, so nav filtering and render agree;
+//   3. App.tsx RENDERS a not-authorized panel for admin-only tabs when !isAdmin.
+// Each is mutation-worthy: flip the guard and one of these fails.
+// ---------------------------------------------------------------------------
+
+tests['effectivePersona coerces a non-admin out of the admin persona to pm'] = () => {
+  const { effectivePersona } = require('../src/context/RoleContext')
+  // The core lockdown invariant: a stale/forced 'admin' persona held by a
+  // non-admin resolves to 'pm' for ALL nav/render purposes.
+  assert.equal(effectivePersona('admin', false), 'pm')
+  // MUTATION CHECK: an actual admin keeps admin — coercion must not over-reach.
+  assert.equal(effectivePersona('admin', true), 'admin')
+  // Non-admin personas pass through untouched regardless of isAdmin.
+  assert.equal(effectivePersona('pm', false), 'pm')
+  assert.equal(effectivePersona('pm', true), 'pm')
+  assert.equal(effectivePersona('executive', false), 'executive')
+  assert.equal(effectivePersona('executive', true), 'executive')
+}
+
+tests['a coerced non-admin resolves to the pm nav set, never the admin superset'] = () => {
+  const { effectivePersona } = require('../src/context/RoleContext')
+  const { visibleTabsForPersona } = require('../src/components/Header')
+  // A non-admin whose stored persona is 'admin' must see EXACTLY the pm tabs.
+  const coerced = effectivePersona('admin', false)
+  assert.equal(coerced, 'pm')
+  const tabs = visibleTabsForPersona(coerced)
+  // Sees the PM surfaces...
+  assert.ok(tabs.has('registry'), 'coerced non-admin still sees registry (a PM job)')
+  assert.ok(tabs.has('portfolio'), 'coerced non-admin sees portfolio')
+  // ...but NOT the admin-only ones the stale 'admin' persona would have exposed.
+  for (const forbidden of ['accounts', 'admin', 'sourcemapping', 'taxonomy', 'rules', 'branding']) {
+    assert.ok(!tabs.has(forbidden as any),
+      `MUTATION CHECK: a coerced non-admin must NOT see ${forbidden}`)
+  }
+}
+
+tests['the persona switcher only OFFERS admin to a trusted admin'] = () => {
+  // Source-level, because the switcher is a React component and this suite has no
+  // DOM harness (see the file header). The regex asserts the 'admin' option is
+  // built behind an isAdmin guard, so a non-admin's option list omits it entirely.
+  const source = readFileSync('src/components/Header.tsx', 'utf8')
+  // The admin option is spread in ONLY when isAdmin is true.
+  assert.match(
+    source,
+    /\.\.\.\(isAdmin \? \[\{ value: 'admin' as Persona, label: 'Admin' \}\] : \[\]\)/,
+    'the admin persona option must be gated on isAdmin',
+  )
+  // PM and Executive are unconditional — every non-exec-locked user gets those.
+  assert.match(source, /\{ value: 'pm', label: 'PM' \}/)
+  assert.match(source, /\{ value: 'executive', label: 'Executive' \}/)
+  // MUTATION CHECK: the switcher must READ isAdmin from the role context, or the
+  // guard above is dead. Without this, a rename of the destructured field passes
+  // the regex above while never actually gating.
+  assert.match(source, /const \{ activePersona, setPersona, isAdmin, isExecLocked, loading \} = useRole\(\)/)
+}
+
+tests['ADMIN_ONLY_TABS names exactly the six admin surfaces — registry is NOT one'] = () => {
+  const { ADMIN_ONLY_TABS } = require('../src/components/Header')
+  const adminOnly = [...ADMIN_ONLY_TABS].sort()
+  assert.deepEqual(
+    adminOnly,
+    ['accounts', 'admin', 'branding', 'rules', 'sourcemapping', 'taxonomy'],
+    'admin-only set must be exactly these six',
+  )
+  // REFINEMENT / MUTATION CHECK: registry is data-asset management, a PM job — it
+  // must NEVER be gated. If a mutation adds it here, this fails.
+  assert.ok(!ADMIN_ONLY_TABS.has('registry'),
+    'MUTATION CHECK: registry must NOT be admin-only')
+  // And a couple of ordinary tabs must not sneak in either.
+  assert.ok(!ADMIN_ONLY_TABS.has('portfolio'))
+  assert.ok(!ADMIN_ONLY_TABS.has('knowledge'))
+}
+
+tests['App.tsx gates every admin-only tab render on isAdmin, and only those'] = () => {
+  // Source-level: App is the render shell and there is no DOM harness. The claim
+  // is that each admin-only case short-circuits to <NotAuthorized /> when !isAdmin
+  // BEFORE returning the real view — so a non-admin who forces/deep-links the tab
+  // sees the panel, not admin content. The render CASES stay (the TabId-render
+  // gate requires one per TabId); only their CONTENT is gated.
+  const source = readFileSync('src/App.tsx', 'utf8')
+  const { ADMIN_ONLY_TABS } = require('../src/components/Header')
+
+  for (const tab of ADMIN_ONLY_TABS) {
+    // The case still exists (TabId-render-case gate) ...
+    assert.match(source, new RegExp(`case '${tab}':`),
+      `case '${tab}' must remain so every TabId has a render case`)
+    // ... and its content is gated: the isAdmin short-circuit sits inside the case,
+    // before the real view is returned.
+    assert.match(
+      source,
+      new RegExp(`case '${tab}':\\s*\\n\\s*if \\(!isAdmin\\) return <NotAuthorized />`),
+      `case '${tab}' must render <NotAuthorized /> when !isAdmin`,
+    )
+  }
+
+  // MUTATION CHECK: a NON-admin tab must NOT carry the guard. 'registry' is the
+  // one that matters — gating it would wrongly lock PMs out of data assets.
+  assert.doesNotMatch(
+    source,
+    /case 'registry':\s*\n\s*if \(!isAdmin\)/,
+    'MUTATION CHECK: registry must NOT be gated on isAdmin',
+  )
+  assert.doesNotMatch(
+    source,
+    /case 'portfolio':\s*\n\s*if \(!isAdmin\)/,
+    'portfolio must not be gated',
+  )
+
+  // The panel component exists and is distinct/inspectable.
+  assert.match(source, /function NotAuthorized\(\)/)
+  assert.match(source, /data-ga-not-authorized="1"/)
+
+  // The shell reads the trusted isAdmin from the role context (not persona).
+  assert.match(source, /const \{ activePersona, isAdmin \} = useRole\(\)/)
+}
 // ---------------------------------------------------------------------------
 // Phase 5 — Portfolio view: Kanban preference + AI-recs de-emphasis
 //

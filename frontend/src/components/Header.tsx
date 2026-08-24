@@ -326,6 +326,26 @@ function filterNavForPersona(persona: Persona): {
   }
 }
 
+/**
+ * PHASE 4 — ADMIN LOCKDOWN: the tabs whose CONTENT requires a trusted admin.
+ *
+ * These are the workspace-control and knowledge-CURATION surfaces. Even if a
+ * non-admin reaches one (a deep link, a forced tab, a stale persona), App.tsx
+ * renders a "not authorized" panel instead of the real view — the render half of
+ * defense in depth, on top of the server's own require_admin 403s.
+ *
+ * REFINEMENT: 'registry' (data-asset management) is deliberately NOT here — it is
+ * a PM job and stays PM-accessible. Only these six are admin-only.
+ */
+export const ADMIN_ONLY_TABS: ReadonlySet<TabId> = new Set<TabId>([
+  'accounts',
+  'admin',
+  'sourcemapping',
+  'taxonomy',
+  'rules',
+  'branding',
+])
+
 /** Collect all TabIds that are visible to a persona, for fallback logic. */
 export
 function visibleTabsForPersona(persona: Persona): Set<TabId> {
@@ -652,21 +672,27 @@ export function Header({
 }
 
 /**
- * Minimal persona switcher for Phase 1. Lets users self-select their persona
+ * Persona switcher. Lets users self-select their persona
  * ('admin' | 'pm' | 'executive') unless they're exec-locked.
  *
- * Phase 1: establishes the switcher; the UI does NOT yet react to persona.
- * Phase 2+: nav/views adapt based on activePersona.
+ * Phase 1: establishes the switcher.
+ * Phase 2: nav adapts based on activePersona.
+ * Phase 4 (ADMIN LOCKDOWN): the 'admin' option is only OFFERED when the trusted
+ *   isAdmin (from GET /api/me) is true. A non-admin sees only PM and Executive, so
+ *   they cannot self-select into admin-only surfaces from the UI. This is the OFFER
+ *   half of the lockdown; the coercion in RoleContext.effectivePersona and the
+ *   render gate in App.tsx are the RENDER halves (defense in depth).
  */
 function PersonaSwitcher() {
-  const { activePersona, setPersona, isExecLocked, loading } = useRole()
+  const { activePersona, setPersona, isAdmin, isExecLocked, loading } = useRole()
 
   if (loading) return null
   // Phase 2: hide switcher for exec-locked users (they cannot switch anyway)
   if (isExecLocked) return null
 
+  // Phase 4: only OFFER 'admin' to a trusted admin. Non-admins see PM + Executive.
   const personas: Array<{ value: Persona; label: string }> = [
-    { value: 'admin', label: 'Admin' },
+    ...(isAdmin ? [{ value: 'admin' as Persona, label: 'Admin' }] : []),
     { value: 'pm', label: 'PM' },
     { value: 'executive', label: 'Executive' },
   ]
