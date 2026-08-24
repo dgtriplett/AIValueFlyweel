@@ -23,6 +23,24 @@ import { api } from '../api'
 
 export type Persona = 'admin' | 'pm' | 'executive'
 
+/**
+ * PHASE 4 — ADMIN LOCKDOWN: the central persona-coercion the whole UI agrees on.
+ *
+ * Persona is self-selected and persisted in localStorage, so a non-admin can end
+ * up carrying a STALE or FORCED 'admin' persona (an old localStorage value, an
+ * admin who lost the allowlist, a hand-edited storage key). The trusted fact is
+ * `isAdmin`, sourced from GET /api/me — NOT the self-selected persona.
+ *
+ * `effectivePersona` folds those two facts into the one persona every consumer
+ * (Header nav filtering AND App.tsx render/fallback) reads, so they cannot
+ * disagree: an 'admin' persona held by a non-admin resolves to 'pm'. This is the
+ * single choke point for "treat a non-admin as pm for all nav/render purposes".
+ */
+export function effectivePersona(persona: Persona, isAdmin: boolean): Persona {
+  if (persona === 'admin' && !isAdmin) return 'pm'
+  return persona
+}
+
 interface RoleContextValue {
   email: string | null
   isAdmin: boolean
@@ -116,7 +134,10 @@ export function RoleProvider({ children }: { children: ReactNode }) {
     [isExecLocked],
   )
 
-  const activePersona = persona ?? 'pm'
+  // PHASE 4: coerce a stale/forced 'admin' persona down to 'pm' for a non-admin,
+  // centrally, so Header nav filtering and App render/fallback read the SAME
+  // trusted persona and cannot disagree. isAdmin comes from GET /api/me.
+  const activePersona = effectivePersona(persona ?? 'pm', isAdmin)
 
   const value = useMemo(
     () => ({

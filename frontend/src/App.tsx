@@ -11,7 +11,7 @@ import { Database, Layers, TrendingUp, Zap } from 'lucide-react'
 import { api } from './api'
 import { fmtMoney } from './constants'
 import { FilterProvider } from './context/FilterContext'
-import { RoleProvider, usePersona } from './context/RoleContext'
+import { RoleProvider, useRole } from './context/RoleContext'
 import { EulaGate } from './components/EulaGate'
 import { FilterBar } from './components/FilterBar'
 import { AssistantPanel } from './components/AssistantPanel'
@@ -76,6 +76,28 @@ const AccountsView = lazy(() => import('./views/AccountsView'))
 const AdminView = lazy(() => import('./views/AdminView'))
 const BrandingView = lazy(() => import('./views/BrandingView'))
 
+/**
+ * PHASE 4 — ADMIN LOCKDOWN: the render-time gate for admin-only tabs.
+ *
+ * Shown instead of the real view when a non-admin reaches an admin-only tab
+ * (deep link, forced tab, stale/coerced persona). Defense in depth: the nav
+ * already hides these for non-admins and the server 403s the API, but a
+ * non-admin must never SEE admin content even if they force the tab.
+ */
+function NotAuthorized() {
+  return (
+    <div
+      data-ga-not-authorized="1"
+      className="rounded-lg border border-navy-600 bg-navy-800/60 p-8 text-center"
+    >
+      <div className="text-lg font-semibold text-white">Not authorized</div>
+      <p className="mt-2 text-sm text-navy-400">
+        Admin access required. This view is restricted to workspace administrators.
+      </p>
+    </div>
+  )
+}
+
 function AppShell() {
   // 'portfolio' unless the app was cold-loaded on a KB article deep link.
   //
@@ -100,7 +122,7 @@ function AppShell() {
   // Phase 2: fallback when the active tab is no longer visible to the current persona.
   // Example: an admin viewing 'accounts' switches to 'pm' persona — accounts is now
   // hidden, so fall back to the first visible tab for that persona.
-  const activePersona = usePersona()
+  const { activePersona, isAdmin } = useRole()
   useEffect(() => {
     const visibleTabs = visibleTabsForPersona(activePersona)
     if (!visibleTabs.has(tab)) {
@@ -188,10 +210,13 @@ function AppShell() {
       case 'knowledge':
         return <KnowledgeView />
       case 'sourcemapping':
+        if (!isAdmin) return <NotAuthorized />
         return <SourceMappingView />
       case 'taxonomy':
+        if (!isAdmin) return <NotAuthorized />
         return <TaxonomyView />
       case 'rules':
+        if (!isAdmin) return <NotAuthorized />
         return <RulesView />
       case 'generate':
         return <GenerateView />
@@ -202,10 +227,13 @@ function AppShell() {
       case 'research':
         return <ResearchView />
       case 'accounts':
+        if (!isAdmin) return <NotAuthorized />
         return <AccountsView />
       case 'admin':
+        if (!isAdmin) return <NotAuthorized />
         return <AdminView />
       case 'branding':
+        if (!isAdmin) return <NotAuthorized />
         return <BrandingView />
       default: {
         const unhandledTab: never = tab
