@@ -321,14 +321,6 @@ SELECT update_asset_detail_by_category(
     'Real-time / 1-second to 1-minute'
 );
 
-SELECT update_asset_detail_by_category(
-    'Data Historian', 'Emissions Process Tags',
-    'Process variables correlated with emissions including excess oxygen, flue gas recirculation, and selective catalytic reduction (SCR) parameters — supports emissions optimization.',
-    'Generation team',
-    'Data Historian (OSIsoft PI / Wonderware)',
-    'Real-time / 1-minute'
-);
-
 -- ==============================================================================
 -- Document/Content Mgmt (5 assets) — Corporate Services
 -- ==============================================================================
