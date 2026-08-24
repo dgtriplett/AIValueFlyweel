@@ -21,7 +21,7 @@ import { slugFromLocation } from './lib/kbroute'
 import type { UseCaseView } from './components/ScopeSwitch'
 import { TopKpis } from './components/TopKpis'
 import { ToastProvider } from './components/Toasts'
-import { UseCaseDrawer } from './components/UseCaseDrawer'
+import { UseCaseDrawer, UseCaseDetailPage } from './components/UseCaseDrawer'
 import { DataAssetDrawer } from './components/DataAssetDrawer'
 import { PortfolioView } from './views/PortfolioView'
 import { RegistryView } from './views/RegistryView'
@@ -112,6 +112,10 @@ function AppShell() {
   // the portfolio when you were reading the catalog.
   const [ucScope, setUcScope] = useState<UseCaseView>('portfolio')
   const [drawerUcId, setDrawerUcId] = useState<number | null>(null)
+  // Feedback item A: the full-page use-case workspace. When set, it renders in
+  // place of the active view; `pageReturnTab` is where 'Back' returns the user.
+  const [pageUcId, setPageUcId] = useState<number | null>(null)
+  const [pageReturnTab, setPageReturnTab] = useState<TabId | null>(null)
   const [drawerAssetId, setDrawerAssetId] = useState<number | null>(null)
   const [focusUcId, setFocusUcId] = useState<number | null>(null)
   const [creating, setCreating] = useState(false)
@@ -121,6 +125,9 @@ function AppShell() {
   // Example: an admin viewing 'accounts' switches to 'pm' persona — accounts is now
   // hidden, so fall back to the first visible tab for that persona.
   const { activePersona, isAdmin } = useRole()
+  // Executive persona is read-only across the app; the full-page workspace honours
+  // that by hiding edit controls (admin + pm get the full editing surface).
+  const detailReadOnly = activePersona === 'executive'
   useEffect(() => {
     const visibleTabs = visibleTabsForPersona(activePersona)
     if (!visibleTabs.has(tab)) {
@@ -258,6 +265,7 @@ function AppShell() {
         <UseCaseDrawer
           ucId={drawerUcId}
           lobs={lobs}
+          readOnly={detailReadOnly}
           onClose={() => setDrawerUcId(null)}
           onOpenUseCase={setDrawerUcId}
           onOpenDataAsset={(id) => {
@@ -267,6 +275,37 @@ function AppShell() {
           onWriteProposal={(id) => {
             setProposalUcId(id)
             setDrawerUcId(null)
+            setTab('proposals')
+          }}
+          // Feedback item A: expand the drawer into the full-page workspace for the
+          // SAME use case. The drawer closes and the page opens; Back returns here.
+          onExpand={() => {
+            setPageReturnTab(tab)
+            setPageUcId(drawerUcId)
+            setDrawerUcId(null)
+          }}
+        />
+      ) : null}
+
+      {pageUcId != null ? (
+        <UseCaseDetailPage
+          ucId={pageUcId}
+          lobs={lobs}
+          readOnly={detailReadOnly}
+          onBack={() => {
+            const returnTab = pageReturnTab
+            setPageUcId(null)
+            setPageReturnTab(null)
+            if (returnTab) setTab(returnTab)
+          }}
+          onOpenUseCase={setPageUcId}
+          onOpenDataAsset={(id) => {
+            setDrawerAssetId(id)
+            setPageUcId(null)
+          }}
+          onWriteProposal={(id) => {
+            setProposalUcId(id)
+            setPageUcId(null)
             setTab('proposals')
           }}
         />
