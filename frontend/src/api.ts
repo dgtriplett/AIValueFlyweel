@@ -169,6 +169,12 @@ export type UseCaseScope = 'portfolio' | 'catalog' | 'all'
 export const api = {
   health: () => http.get<HealthResponse>('/health').then((r) => r.data),
 
+  /** The caller's trusted identity + role flags (admin status, exec lock). */
+  me: () =>
+    http
+      .get<{ email: string | null; is_admin: boolean; is_exec_locked: boolean }>('/me')
+      .then((r) => r.data),
+
   lobs: () => http.get<Lob[]>('/lobs').then((r) => r.data),
 
   /** `portfolio` returns a bare array; every other scope returns an envelope. */
