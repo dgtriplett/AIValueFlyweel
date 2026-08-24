@@ -401,7 +401,7 @@ async def get_use_case_detail(uc_id: int):
            ORDER BY urd.necessity, dd.label""",
         uc_id,
     )
-    
+
     # For each domain requirement, resolve its serving assets
     for domain_req in domain_reqs:
         domain_id = domain_req["domain_id"]
@@ -409,7 +409,7 @@ async def get_use_case_detail(uc_id: int):
         domain_name = domain_req["domain_name"]
         domain_label = domain_req["domain_label"]
         rationale = domain_req["rationale"] or f"Required domain: {domain_label}"
-        
+
         # Find all assets that serve this domain, with per-account status overlay
         serving_assets = await db.fetch(
             """SELECT da.*,
@@ -422,7 +422,7 @@ async def get_use_case_detail(uc_id: int):
                ORDER BY da.source_system, da.module""",
             domain_id, account_id,
         )
-        
+
         if serving_assets:
             # Add each serving asset to the appropriate list (required/helpful)
             for asset_row in serving_assets:
@@ -432,12 +432,12 @@ async def get_use_case_detail(uc_id: int):
                 asset_dict["via_domain"] = True  # Mark as coming from domain path
                 asset_dict["domain_name"] = domain_name
                 asset_dict["domain_label"] = domain_label
-                
+
                 # Check if this asset is already in the list (from module path)
                 asset_id = asset_dict["id"]
                 already_present = any(a.get("id") == asset_id for a in (required_list if necessity == "required" else []))
                 already_present = already_present or any(a.get("id") == asset_id for a in (helpful_assets if necessity == "helpful" else []))
-                
+
                 if not already_present:
                     if necessity == "required":
                         required_assets.append(asset_dict)
@@ -453,7 +453,7 @@ async def get_use_case_detail(uc_id: int):
                 "domain_label": domain_label,
                 "source_system": None,
                 "module": f"[Domain] {domain_label}",
-                "description": f"Required data domain with no serving assets yet",
+                "description": "Required data domain with no serving assets yet",
                 "criticality": necessity,
                 "rationale": rationale,
                 "ingestion_status": "not_started",

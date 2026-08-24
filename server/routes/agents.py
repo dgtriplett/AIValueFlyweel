@@ -825,10 +825,10 @@ class EstimateIn(BaseModel):
 
 async def build_value_model(title: str, description: str | None = None) -> dict:
     """Build a parameterized value model for a use case.
-    
+
     Shared helper extracted from estimate_value so generated use cases can
     automatically get a value model without duplicating the LLM logic.
-    
+
     Returns: dict with keys {driver, components, roiMonths, notes}
     """
     assumptions = [dict(a) for a in await db.fetch("SELECT key, label, unit FROM value_assumptions ORDER BY category")]
@@ -865,7 +865,7 @@ async def build_value_model(title: str, description: str | None = None) -> dict:
     if not comps:
         comps = [{"name": "O&M efficiency", "calculationDisplay": "O&M budget x 0.3%",
                   "multiplier": 0.003, "assumptionKeys": ["omBudgetMM"], "lowCoeff": 0.6, "highCoeff": 1.4}]
-    
+
     return {
         "driver": title,
         "components": comps,
