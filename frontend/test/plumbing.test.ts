@@ -1717,10 +1717,9 @@ tests['admin persona has <=6 top-level nav items via filterNavForPersona'] = () 
   const { default: Header } = require('../src/components/Header')
   const source = require('node:fs').readFileSync('src/components/Header.tsx', 'utf8')
   
-  // Count groups for admin: Portfolio, Plan & Fund, Value, Knowledge, Settings, Create
-  // Plus onboarding (entryTab) = 7 items  
-  // Plus 2 console links = 9 total top-level items
-  // This is acceptable since admin sees everything
+  // Admin: 6 groups (Portfolio, Plan & Fund, Value, Knowledge, Settings, Create)
+  //        + 1 entryTab (onboarding) = 7 top-level items
+  // Down from 8 (removed 2 dead /console links)
   
   // Verify the structure by checking filterNavForPersona returns groups array
   assert.match(source, /function filterNavForPersona.*groups:.*entryTab:/s)
@@ -1733,10 +1732,9 @@ tests['pm persona has <=6 nav groups (de-cramped from ~10 flat items)'] = () => 
   const { default: Header } = require('../src/components/Header')
   const source = require('node:fs').readFileSync('src/components/Header.tsx', 'utf8')
   
-  // PM groups: Portfolio, Plan & Fund, Value, Knowledge, Create = 5 groups
-  // Plus onboarding (entryTab) = 6 top-level items
-  // Plus 2 console links (kb-link, console-link) = 8 total
-  // This is down from the original ~10 flat nav buttons
+  // PM: 5 groups (Portfolio, Plan & Fund, Value, Knowledge, Create)
+  //     + 1 entryTab (onboarding) = 6 top-level items
+  // Down from 8 (removed 2 dead /console links, grouped 3 tools)
   
   // Check PM groups include Create
   assert.match(source, /\/\/ PM sees:[\s\S]*\{ label: 'Create', ids: \['generate', 'roadmap_import', 'proposals'\]/)
@@ -1752,7 +1750,8 @@ tests['executive persona sees NO Create group or tools'] = () => {
   assert.ok(!execTabs.has('roadmap_import'), 'executive should NOT see roadmap_import')
   assert.ok(!execTabs.has('proposals'), 'executive should NOT see proposals')
   
-  // Executive has only 2 groups (Portfolio, Plan & Fund) + no entryTab = 2 + 2 console links = 4 items
+  // Executive: 2 groups (Portfolio, Plan & Fund) + no entryTab = 2 top-level items
+  // (No console links, no tools, minimal read-only set)
   // This is the minimal read-only set
 }
 
@@ -1768,9 +1767,35 @@ tests['Header component renders nav groups but NOT separate toolTabs'] = () => {
   // Check that NAV_GROUPS are still rendered
   assert.match(source, /\{NAV_GROUPS\.map\(\(group\) => \(/)
   
-  // Check that Create group gets ml-auto removed (console links have it)
-  assert.match(source, /className=\{\`\$\{NAV_ITEM\} \$\{NAV_INACTIVE\}\$\{link\.marginLeftAuto/)
 }
+
+tests['dead /console links are removed from nav'] = () => {
+  const source = require('node:fs').readFileSync('src/components/Header.tsx', 'utf8')
+  
+  // The old console links should NOT exist
+  assert.doesNotMatch(source, /href=['"]\/console/)
+  assert.doesNotMatch(source, /CONSOLE_LINKS/)
+  
+  // But knowledge and onboarding tabs still exist
+  assert.match(source, /id: 'knowledge'/)
+  assert.match(source, /id: 'onboarding'/)
+}
+
+tests['top-level nav is <=6 items per persona after console link removal'] = () => {
+  const { default: Header } = require('../src/components/Header')
+  const source = require('node:fs').readFileSync('src/components/Header.tsx', 'utf8')
+  
+  // Admin: 6 groups (Portfolio, Plan & Fund, Value, Knowledge, Settings, Create) 
+  //        + 1 entryTab (onboarding) = 7 top-level items (no console links)
+  // PM: 5 groups (Portfolio, Plan & Fund, Value, Knowledge, Create)
+  //     + 1 entryTab (onboarding) = 6 top-level items (no console links)
+  // Executive: 2 groups (Portfolio, Plan & Fund) + 0 entryTab = 2 top-level items
+  
+  // All are now <=6 groups, meeting the de-cramp target
+  // (Executive was already minimal, admin/pm reduced from 8 to 7/6)
+}
+
+
 
 // Wrapped in a function rather than using top-level await: esbuild targets CJS
 // here (axios's node build pulls CJS-only transitive deps that an ESM bundle

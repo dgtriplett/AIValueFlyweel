@@ -354,25 +354,6 @@ function visibleTabsForPersona(persona: Persona): Set<TabId> {
 }
 
 /** The console is a separate dependency-free page; these are its entry points. */
-const CONSOLE_LINKS = [
-  {
-    key: 'kb-link',
-    href: '/console/#kb',
-    label: 'Knowledge base',
-    title:
-      'Standards, proposals, studies and runbooks — attached to the use cases they explain',
-    marginLeftAuto: true,
-  },
-  {
-    key: 'console-link',
-    href: '/console/',
-    label: '⚙ Set up & discover',
-    title:
-      'Set up, load your data, discover your estate, review coverage, and generate use cases',
-    marginLeftAuto: false,
-  },
-]
-
 const NAV_ITEM =
   'px-4 py-2.5 text-sm font-medium flex items-center gap-2 border-b-2 transition-colors'
 const NAV_INACTIVE = 'border-transparent text-navy-400 hover:text-navy-300'
@@ -633,17 +614,6 @@ export function Header({
               }}
             />
           ) : null}
-
-          {CONSOLE_LINKS.map((link) => (
-            <a
-              key={link.key}
-              href={link.href}
-              title={link.title}
-              className={`${NAV_ITEM} ${NAV_INACTIVE}${link.marginLeftAuto ? ' ml-auto' : ''}`}
-            >
-              {link.label}
-            </a>
-          ))}
         </nav>
       </div>
     </header>
