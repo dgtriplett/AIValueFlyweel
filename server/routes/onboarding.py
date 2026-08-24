@@ -18,11 +18,6 @@ _STATUSES = ("not_started", "scoping", "in_progress", "live", "value_realized")
 _INGEST = ("not_started", "landed", "curated", "governed")
 
 
-async def _use_case_visibility(alias: str = "uc") -> tuple[str, list]:
-    condition, params = await portfolio.portfolio_condition(alias, param_index=1)
-    return f"({alias}.origin = 'catalog' OR {condition})", params
-
-
 @router.get("/export.xlsx")
 async def export_template():
     from openpyxl import Workbook
@@ -105,7 +100,7 @@ async def export_template():
     ws2.append(["id", "title", "domain", "phase", "status", "owner_lob", "priority", "value_base_mm", "notes"])
     style_header(ws2, 9)
     if account_id is not None:
-        use_case_visibility, use_case_params = await _use_case_visibility("uc")
+        use_case_visibility, use_case_params = await portfolio.use_case_visibility("uc")
         ucs = await db.fetch(f"""
             SELECT uc.id, uc.title, l.name AS domain, uc.phase, uc.status, uc.priority_score,
                    (uc.hypothesized_value_json->>'mid_mm')::numeric AS value_mm
@@ -219,7 +214,7 @@ async def _compute_import(parsed):
                                             "field": "ingestion_status", "from": a["ingestion_status"], "to": st})
 
     if account_id is not None:
-        use_case_visibility, use_case_params = await _use_case_visibility("uc")
+        use_case_visibility, use_case_params = await portfolio.use_case_visibility("uc")
         cur_ucs = {u["id"]: u for u in await db.fetch(f"""
             SELECT uc.id, uc.title, uc.status, uc.priority_score
             FROM use_cases uc

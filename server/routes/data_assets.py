@@ -3,7 +3,7 @@ from fastapi import APIRouter, HTTPException, Request
 from pydantic import BaseModel
 
 from ..common import current_user, row_to_dict, rows_to_list, write_audit
-from .. import accounts
+from .. import accounts, portfolio
 from ..db import db
 
 router = APIRouter(prefix="/data-assets", tags=["data_assets"])
@@ -74,7 +74,11 @@ async def get_data_asset(asset_id: int):
     asset = await _attach_benefiting(row_to_dict(row))
 
     # PART B.2(i): enrich with required_by = reverse join to use cases + readiness per UC
-    required_by_rows = await db.fetch("""
+    # Apply use-case visibility to prevent cross-tenant leaks: only show catalog use cases
+    # (shared) and use cases in the current account's portfolio (never another tenant's
+    # custom use cases).
+    visibility_condition, visibility_params = await portfolio.use_case_visibility("uc", param_index=2)
+    required_by_rows = await db.fetch(f"""
         SELECT uc.id AS use_case_id,
                uc.title,
                ura.criticality,
@@ -82,8 +86,9 @@ async def get_data_asset(asset_id: int):
         FROM uc_requires_asset ura
         JOIN use_cases uc ON uc.id = ura.use_case_id
         WHERE ura.data_asset_id = $1
+          AND {visibility_condition}
         ORDER BY uc.title
-    """, asset_id)
+    """, asset_id, *visibility_params)
 
     # Attach per-use-case readiness cheaply via the existing readiness_map
     from ..readiness import readiness_map

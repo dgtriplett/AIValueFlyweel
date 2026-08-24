@@ -82,3 +82,18 @@ async def add_many(use_case_ids: list[int], *, actor: str, source: str = "manual
             created_at=now()
     """, current, ids, source, actor)
     return len(ids)
+
+
+async def use_case_visibility(alias: str = "uc", *, param_index: int = 1) -> tuple[str, list]:
+    """SQL condition for use-case visibility: catalog (shared) OR in this account's portfolio.
+
+    Custom use cases (origin='custom') are account-owned, scoped via account_portfolio_use_cases.
+    Catalog use cases (origin='catalog') are visible to all accounts.
+    This prevents cross-tenant leaks where Tenant A can see Tenant B's private custom use-case
+    titles/data.
+
+    Returns (condition, params) where condition is a SQL predicate and params is a list of
+    bound parameters. The condition is: ({alias}.origin = 'catalog' OR {portfolio_condition}).
+    """
+    condition, params = await portfolio_condition(alias, param_index=param_index)
+    return f"({alias}.origin = 'catalog' OR {condition})", params
