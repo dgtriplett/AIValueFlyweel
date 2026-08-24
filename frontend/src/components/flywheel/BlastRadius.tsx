@@ -486,7 +486,7 @@ export function BlastRadius({
           </div>
         )}
 
-        <div className="absolute bottom-3 right-3 flex flex-col gap-1">
+        <div className="absolute bottom-12 left-3 flex flex-col gap-1">
           <button
             aria-label="Zoom in"
             title="Zoom in"
