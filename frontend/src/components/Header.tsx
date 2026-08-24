@@ -251,11 +251,11 @@ const ALL_NAV_GROUPS: { label: string; ids: TabId[] }[] = [
     ids: ['knowledge', 'glossary', 'taxonomy', 'sourcemapping', 'rules', 'artifacts'],
   },
   { label: 'Settings', ids: ['accounts', 'admin', 'branding'] },
+  { label: 'Create', ids: ['generate', 'roadmap_import', 'proposals'] },
 ]
 
 /** The entry-point surface: outside the groups, always one click away. */
 const ENTRY_TAB: TabId = 'onboarding'
-const TOOL_TABS: TabId[] = ['generate', 'roadmap_import', 'proposals']
 
 /**
  * PHASE 2: PERSONA-AWARE NAVIGATION FILTERING
@@ -284,11 +284,10 @@ const TOOL_TABS: TabId[] = ['generate', 'roadmap_import', 'proposals']
 function filterNavForPersona(persona: Persona): {
   groups: { label: string; ids: TabId[] }[]
   entryTab: TabId | null
-  toolTabs: TabId[]
 } {
   if (persona === 'admin') {
     // Admin sees EVERYTHING — no filtering.
-    return { groups: ALL_NAV_GROUPS, entryTab: ENTRY_TAB, toolTabs: TOOL_TABS }
+    return { groups: ALL_NAV_GROUPS, entryTab: ENTRY_TAB }
   }
 
   if (persona === 'executive') {
@@ -300,7 +299,6 @@ function filterNavForPersona(persona: Persona): {
         { label: 'Plan & Fund', ids: ['roadmap', 'executive'] },
       ],
       entryTab: null,
-      toolTabs: [],
     }
   }
 
@@ -309,7 +307,7 @@ function filterNavForPersona(persona: Persona): {
   //   - Plan & Fund: roadmap, funding (NOT executive)
   //   - Value: both tabs
   //   - Knowledge: read surfaces only (knowledge, glossary, artifacts — NOT curation)
-  //   - All generation tools
+  //   - Create: all generation tools (now grouped)
   //   - Onboarding
   return {
     groups: [
@@ -320,9 +318,9 @@ function filterNavForPersona(persona: Persona): {
       { label: 'Plan & Fund', ids: ['roadmap', 'funding'] },
       { label: 'Value', ids: ['value', 'research'] },
       { label: 'Knowledge', ids: ['knowledge', 'glossary', 'artifacts'] },
+      { label: 'Create', ids: ['generate', 'roadmap_import', 'proposals'] },
     ],
     entryTab: ENTRY_TAB,
-    toolTabs: TOOL_TABS,
   }
 }
 
@@ -352,7 +350,6 @@ function visibleTabsForPersona(persona: Persona): Set<TabId> {
   const filtered = filterNavForPersona(persona)
   const ids = filtered.groups.flatMap((g) => g.ids)
   if (filtered.entryTab) ids.push(filtered.entryTab)
-  ids.push(...filtered.toolTabs)
   return new Set(ids)
 }
 
@@ -534,7 +531,7 @@ export function Header({
   branding?: HeaderBranding | null
 }) {
   const activePersona = usePersona()
-  const { groups: NAV_GROUPS, entryTab, toolTabs } = filterNavForPersona(activePersona)
+  const { groups: NAV_GROUPS, entryTab } = filterNavForPersona(activePersona)
   const [openMenu, setOpenMenu] = useState<string | null>(null)
   const navRef = useRef<HTMLElement | null>(null)
 
@@ -637,30 +634,12 @@ export function Header({
             />
           ) : null}
 
-          <div className="ml-auto flex items-center gap-1">
-            {toolTabs.map((id) => {
-              const item = TABS.find((candidate) => candidate.id === id)
-              if (!item) return null
-              return (
-                <TabButton
-                  key={id}
-                  tab={item}
-                  active={tab === id}
-                  onSelect={() => {
-                    setOpenMenu(null)
-                    setTab(id)
-                  }}
-                />
-              )
-            })}
-          </div>
-
           {CONSOLE_LINKS.map((link) => (
             <a
               key={link.key}
               href={link.href}
               title={link.title}
-              className={`${NAV_ITEM} ${NAV_INACTIVE}`}
+              className={`${NAV_ITEM} ${NAV_INACTIVE}${link.marginLeftAuto ? ' ml-auto' : ''}`}
             >
               {link.label}
             </a>

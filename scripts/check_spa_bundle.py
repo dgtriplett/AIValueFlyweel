@@ -133,7 +133,7 @@ SOURCE_REQUIRED = {
         "const ALL_NAV_GROUPS",
         "TABS.find((candidate) => candidate.id === id)",
         "const activePersona = usePersona()",
-        "const TOOL_TABS: TabId[] = ['generate', 'roadmap_import', 'proposals']",
+        "{ label: 'Create', ids: ['generate', 'roadmap_import', 'proposals'] },",
         "setTab(id)",
         'data-gaGroupedNav="1"',
     ],
