@@ -212,6 +212,23 @@ export const api = {
   deleteUseCase: (id: number) =>
     http.delete<{ deleted: boolean }>(`/use-cases/${id}`).then((r) => r.data),
 
+  // Progression tracking (target go-live dates, status/note history, slippage)
+  getProgression: (id: number) =>
+    http.get<import('./types').Progression>(`/use-cases/${id}/progression`).then((r) => r.data),
+
+  setTargetDate: (id: number, target_go_live_date: string | null, reason?: string) =>
+    http
+      .put<import('./types').Progression>(`/use-cases/${id}/progression/target-date`, {
+        target_go_live_date,
+        reason,
+      })
+      .then((r) => r.data),
+
+  addProgressionNote: (id: number, note: string) =>
+    http
+      .post<import('./types').Progression>(`/use-cases/${id}/progression/note`, { note })
+      .then((r) => r.data),
+
   dataAssets: () => http.get<DataAsset[]>('/data-assets').then((r) => r.data),
 
   dataAsset: (id: number) => http.get<DataAsset>(`/data-assets/${id}`).then((r) => r.data),

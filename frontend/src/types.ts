@@ -140,6 +140,24 @@ export interface ValueRecord {
   confidence?: string | null
 }
 
+export interface ProgressionEvent {
+  id: number
+  event_type: 'date_change' | 'date_set' | 'date_cleared' | 'status_change' | 'note'
+  from_value?: string | null
+  to_value?: string | null
+  note?: string | null
+  created_by?: string | null
+  created_at?: string | null
+}
+
+export interface Progression {
+  target_go_live_date?: string | null
+  updated_at?: string | null
+  updated_by?: string | null
+  at_risk: boolean
+  events: ProgressionEvent[]
+}
+
 export interface UseCaseDetail extends UseCase {
   required_assets?: RequiredAsset[]
   helpful_assets?: RequiredAsset[]
@@ -147,6 +165,7 @@ export interface UseCaseDetail extends UseCase {
   enabled_by?: LinkedUseCase[]
   value_records?: ValueRecord[]
   comments?: Comment[]
+  progression?: Progression
 }
 
 export interface DataAsset {

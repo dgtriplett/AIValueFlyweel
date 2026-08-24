@@ -396,6 +396,33 @@ async def get_use_case_detail(uc_id: int):
                WHERE account_id=$1 AND entity_type='use_case' AND entity_id=$2
                ORDER BY created_at""",
             account_id, uc_id)
+        # Fetch progression data (target go-live date + event history)
+        progress_row = await db.fetchrow(
+            """SELECT target_go_live_date, updated_at, updated_by
+               FROM account_use_case_progress
+               WHERE account_id=$1 AND use_case_id=$2""",
+            account_id, uc_id)
+        events = await db.fetch(
+            """SELECT id, event_type, from_value, to_value, note, created_by, created_at
+               FROM use_case_status_events
+               WHERE account_id=$1 AND use_case_id=$2
+               ORDER BY created_at DESC""",
+            account_id, uc_id)
+        # Compute at_risk flag: target in past and status not live/value_realized
+        at_risk = False
+        if progress_row and progress_row["target_go_live_date"]:
+            from datetime import date
+            target = progress_row["target_go_live_date"]
+            status = uc.get("status")
+            if target < date.today() and status not in {"live", "value_realized"}:
+                at_risk = True
+        progression = {
+            "target_go_live_date": progress_row["target_go_live_date"].isoformat() if progress_row and progress_row["target_go_live_date"] else None,
+            "updated_at": progress_row["updated_at"].isoformat() if progress_row and progress_row["updated_at"] else None,
+            "updated_by": progress_row["updated_by"] if progress_row else None,
+            "at_risk": at_risk,
+            "events": rows_to_list(events),
+        }
     else:
         values = await db.fetch(
             "SELECT * FROM value_records WHERE use_case_id = $1 ORDER BY id", uc_id,
@@ -404,6 +431,7 @@ async def get_use_case_detail(uc_id: int):
             "SELECT * FROM comments WHERE entity_type='use_case' AND entity_id=$1 ORDER BY created_at",
             uc_id,
         )
+        progression = {"target_go_live_date": None, "updated_at": None, "updated_by": None, "at_risk": False, "events": []}
     return {
         **uc,
         "required_assets": required_assets,
@@ -412,6 +440,7 @@ async def get_use_case_detail(uc_id: int):
         "enabled_by": rows_to_list(enabled_by),
         "value_records": rows_to_list(values),
         "comments": rows_to_list(comments),
+        "progression": progression,
     }
 
 
@@ -604,6 +633,153 @@ async def _capture_delivered_assets(uc_id: int, uc_title: str) -> None:
             )
             await write_audit("data_asset", r["id"], "auto_landed", "system",
                               {"reason": note, "from": "not_started", "to": "landed"})
+
+
+class ProgressionTargetDate(BaseModel):
+    target_go_live_date: str | None  # ISO date string or null to clear
+    reason: str | None = None  # Required when moving date later (slippage)
+
+
+class ProgressionNote(BaseModel):
+    note: str
+
+
+@router.get("/{uc_id}/progression")
+async def get_progression(uc_id: int):
+    """Get the progression data for a use case (target date + event history)."""
+    exists = await db.fetchrow("SELECT 1 FROM use_cases WHERE id=$1", uc_id)
+    if exists is None:
+        raise HTTPException(404, "Use case not found")
+
+    account_id = await accounts.current()
+    if account_id is None:
+        return {"target_go_live_date": None, "updated_at": None, "updated_by": None, "at_risk": False, "events": []}
+
+    progress_row = await db.fetchrow(
+        """SELECT target_go_live_date, updated_at, updated_by
+           FROM account_use_case_progress
+           WHERE account_id=$1 AND use_case_id=$2""",
+        account_id, uc_id)
+    events = await db.fetch(
+        """SELECT id, event_type, from_value, to_value, note, created_by, created_at
+           FROM use_case_status_events
+           WHERE account_id=$1 AND use_case_id=$2
+           ORDER BY created_at DESC""",
+        account_id, uc_id)
+
+    # Compute at_risk flag
+    at_risk = False
+    if progress_row and progress_row["target_go_live_date"]:
+        from datetime import date
+        target = progress_row["target_go_live_date"]
+        uc_row = await db.fetchrow("SELECT status FROM use_cases WHERE id=$1", uc_id)
+        status = uc_row["status"] if uc_row else None
+        if target < date.today() and status not in {"live", "value_realized"}:
+            at_risk = True
+
+    return {
+        "target_go_live_date": progress_row["target_go_live_date"].isoformat() if progress_row and progress_row["target_go_live_date"] else None,
+        "updated_at": progress_row["updated_at"].isoformat() if progress_row and progress_row["updated_at"] else None,
+        "updated_by": progress_row["updated_by"] if progress_row else None,
+        "at_risk": at_risk,
+        "events": rows_to_list(events),
+    }
+
+
+@router.put("/{uc_id}/progression/target-date")
+async def set_target_date(uc_id: int, body: ProgressionTargetDate, request: Request):
+    """Set or update the target go-live date for a use case. Records slippage events when date moves later."""
+    exists = await db.fetchrow("SELECT 1 FROM use_cases WHERE id=$1", uc_id)
+    if exists is None:
+        raise HTTPException(404, "Use case not found")
+
+    account_id = await accounts.current()
+    if account_id is None:
+        raise HTTPException(403, "Account required for progression tracking")
+
+    actor = current_user(request)
+
+    # Parse the new target date
+    from datetime import date as date_type
+    new_date: date_type | None = None
+    if body.target_go_live_date:
+        try:
+            new_date = date_type.fromisoformat(body.target_go_live_date)
+        except ValueError:
+            raise HTTPException(422, "Invalid date format; use ISO YYYY-MM-DD")
+
+    # Fetch current progress
+    prev_row = await db.fetchrow(
+        "SELECT target_go_live_date FROM account_use_case_progress WHERE account_id=$1 AND use_case_id=$2",
+        account_id, uc_id)
+    prev_date = prev_row["target_go_live_date"] if prev_row else None
+
+    # Determine event type and validate
+    if prev_date is None and new_date is not None:
+        event_type = "date_set"
+        from_value = None
+        to_value = new_date.isoformat()
+    elif prev_date is not None and new_date is None:
+        event_type = "date_cleared"
+        from_value = prev_date.isoformat()
+        to_value = None
+    elif prev_date is not None and new_date is not None and prev_date != new_date:
+        event_type = "date_change"
+        from_value = prev_date.isoformat()
+        to_value = new_date.isoformat()
+        # SLIPPAGE: when date moves LATER, require a reason
+        if new_date > prev_date and not body.reason:
+            raise HTTPException(422, "Reason required when target date moves later (slippage)")
+    else:
+        # No change
+        return await get_progression(uc_id)
+
+    # Upsert progress row
+    await db.execute(
+        """INSERT INTO account_use_case_progress (account_id, use_case_id, target_go_live_date, updated_at, updated_by)
+           VALUES ($1, $2, $3, now(), $4)
+           ON CONFLICT (account_id, use_case_id)
+           DO UPDATE SET target_go_live_date=$3, updated_at=now(), updated_by=$4""",
+        account_id, uc_id, new_date, actor)
+
+    # Record the event
+    await db.execute(
+        """INSERT INTO use_case_status_events
+           (account_id, use_case_id, event_type, from_value, to_value, note, created_by, created_at)
+           VALUES ($1, $2, $3, $4, $5, $6, $7, now())""",
+        account_id, uc_id, event_type, from_value, to_value, body.reason, actor)
+
+    await write_audit("use_case", uc_id, "progression_date", actor,
+                      {"event_type": event_type, "from": from_value, "to": to_value, "reason": body.reason})
+
+    return await get_progression(uc_id)
+
+
+@router.post("/{uc_id}/progression/note")
+async def add_progression_note(uc_id: int, body: ProgressionNote, request: Request):
+    """Add a free-text note to the progression history."""
+    exists = await db.fetchrow("SELECT 1 FROM use_cases WHERE id=$1", uc_id)
+    if exists is None:
+        raise HTTPException(404, "Use case not found")
+
+    account_id = await accounts.current()
+    if account_id is None:
+        raise HTTPException(403, "Account required for progression tracking")
+
+    actor = current_user(request)
+
+    if not body.note or not body.note.strip():
+        raise HTTPException(422, "Note cannot be empty")
+
+    await db.execute(
+        """INSERT INTO use_case_status_events
+           (account_id, use_case_id, event_type, from_value, to_value, note, created_by, created_at)
+           VALUES ($1, $2, 'note', NULL, NULL, $3, $4, now())""",
+        account_id, uc_id, body.note.strip(), actor)
+
+    await write_audit("use_case", uc_id, "progression_note", actor, {"note": body.note.strip()})
+
+    return await get_progression(uc_id)
 
 
 @router.delete("/{uc_id}")

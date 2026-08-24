@@ -132,6 +132,13 @@ written back to Lakebase, which stays the portfolio's system of record.
   domain edge (`uc_requires_domain.rationale` existed but `uc_requires_asset.rationale`
   did not). Supports the clickable data-asset detail drawer (PART B) and fixes the
   per-account status overlay bug in `get_use_case_detail` (PART A).
+- **Use-case progression tracking** — `017_uc_progression.sql`: adds per-account
+  target go-live dates (`account_use_case_progress`) and an append-only event log
+  (`use_case_status_events`) for status changes, date changes (incl. slippage with
+  reason), and free notes. Enables centralized tracking of "when we may start to
+  realize value" and "what's slipping and why" — the user-approved feature request.
+  Fully account-scoped (no cross-tenant leak). Routes: `GET/PUT /use-cases/{id}/progression/target-date`,
+  `POST /use-cases/{id}/progression/note`. Frontend: Progression section in UseCaseDrawer.
 - **Migration ledger** — `schema_migrations`, created by `server/migrator.py`
   rather than by a numbered migration, since it must exist before the ledger can
   be consulted.
