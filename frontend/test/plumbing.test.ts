@@ -41,6 +41,12 @@ import {
   reasonOf,
 } from '../src/lib/confirm'
 import { NO_RETRY, isRetriable, retryPolicy } from '../src/lib/retry'
+import {
+  AI_RECS_OPEN_KEY,
+  KANBAN_ENABLED_KEY,
+  readBoolPref,
+  writeBoolPref,
+} from '../src/lib/prefs'
 import { articlePath, slugFromLocation } from '../src/lib/kbroute'
 import {
   parseInline,
@@ -1641,3 +1647,124 @@ tests['persona filtering is mutation-worthy: test would fail if pm set is wrong'
     'MUTATION CHECK: executive must NOT see funding — if this fails, the executive set is wrong')
 }
 
+// ---------------------------------------------------------------------------
+// Phase 5 — Portfolio view: Kanban preference + AI-recs de-emphasis
+//
+// Two claims from the user feedback, each invisible until it is wrong in front of
+// a customer:
+//   1. Kanban is ON by default, a preference can turn it off, and turning it off
+//      hides the Kanban option and forces the table (src/lib/prefs.ts + the
+//      PortfolioView wiring that reads it).
+//   2. the AI recommendations are COLLAPSED on the initial landing rather than
+//      rendered inline (src/components/AiRecommendationsPanel.tsx).
+//
+// The pure preference logic is exercised against the real module; the view wiring
+// is asserted on source, the same technique the what-if caps and curation-write
+// checks above use — there is no DOM harness here.
+// ---------------------------------------------------------------------------
+
+/** A general in-memory localStorage that records writes, for the prefs tests. */
+function installKvStore(seed: Record<string, string> = {}, options: { throws?: boolean } = {}) {
+  const store = new Map<string, string>(Object.entries(seed))
+  ;(globalThis as Record<string, unknown>).localStorage = {
+    getItem(key: string) {
+      if (options.throws) throw new Error('storage is blocked')
+      return store.get(key) ?? null
+    },
+    setItem(key: string, next: string) {
+      if (options.throws) throw new Error('storage is blocked')
+      store.set(key, next)
+    },
+    removeItem(key: string) {
+      store.delete(key)
+    },
+  }
+  return store
+}
+
+tests['kanban is enabled by default when the preference is unset'] = () => {
+  // The whole point of feedback item 1: an absent key reads as ON, not OFF. If the
+  // parse ever falls through to `false`, a fresh browser would hide the board the
+  // user asked to keep on by default.
+  installKvStore({})
+  assert.equal(readBoolPref(KANBAN_ENABLED_KEY, true), true)
+}
+
+tests['a stored kanban=false turns the board off, and =true keeps it on'] = () => {
+  installKvStore({ [KANBAN_ENABLED_KEY]: 'false' })
+  assert.equal(readBoolPref(KANBAN_ENABLED_KEY, true), false)
+  installKvStore({ [KANBAN_ENABLED_KEY]: 'true' })
+  assert.equal(readBoolPref(KANBAN_ENABLED_KEY, true), true)
+}
+
+tests['a garbled or foreign preference value resolves to the default, not false'] = () => {
+  // "on unless turned off" only holds if a half-written or foreign value reads as
+  // the DEFAULT. A naive `=== 'true'` parse would silently disable Kanban here.
+  installKvStore({ [KANBAN_ENABLED_KEY]: 'yes' })
+  assert.equal(readBoolPref(KANBAN_ENABLED_KEY, true), true)
+  installKvStore({ [KANBAN_ENABLED_KEY]: '' })
+  assert.equal(readBoolPref(KANBAN_ENABLED_KEY, true), true)
+}
+
+tests['AI recommendations default to collapsed (open pref defaults false)'] = () => {
+  // Feedback item 2: the shelf must be closed on first load. An unset key reads as
+  // the collapsed default rather than expanding the block that "can be a lot".
+  installKvStore({})
+  assert.equal(readBoolPref(AI_RECS_OPEN_KEY, false), false)
+  // A returning user who opened it keeps it open.
+  installKvStore({ [AI_RECS_OPEN_KEY]: 'true' })
+  assert.equal(readBoolPref(AI_RECS_OPEN_KEY, false), true)
+}
+
+tests['writeBoolPref round-trips through the store and reads back'] = () => {
+  const store = installKvStore({})
+  writeBoolPref(KANBAN_ENABLED_KEY, false)
+  assert.equal(store.get(KANBAN_ENABLED_KEY), 'false')
+  assert.equal(readBoolPref(KANBAN_ENABLED_KEY, true), false)
+  writeBoolPref(KANBAN_ENABLED_KEY, true)
+  assert.equal(readBoolPref(KANBAN_ENABLED_KEY, true), true)
+}
+
+tests['a throwing localStorage falls back to the default and does not blow up'] = () => {
+  // Safari private mode / cookie-blocking extensions throw. A cosmetic preference
+  // must never take down a render — read returns the default, write is swallowed.
+  installKvStore({}, { throws: true })
+  assert.equal(readBoolPref(KANBAN_ENABLED_KEY, true), true)
+  assert.equal(readBoolPref(AI_RECS_OPEN_KEY, false), false)
+  writeBoolPref(KANBAN_ENABLED_KEY, false) // must not throw
+}
+
+tests['PortfolioView gates the Kanban option and control on the preference'] = () => {
+  const source = readFileSync('src/views/PortfolioView.tsx', 'utf8')
+  // Reads the preference, default TRUE — Kanban on unless turned off.
+  assert.match(source, /readBoolPref\(KANBAN_ENABLED_KEY, true\)/)
+  // The Kanban toggle button only renders when the preference is on.
+  assert.match(source, /\{kanbanEnabled && \(/)
+  // Disabling forces the table so the user is never stranded on a hidden view.
+  assert.match(source, /if \(!next\) setView\('table'\)/)
+  assert.match(source, /if \(!kanbanEnabled && view === 'kanban'\) setView\('table'\)/)
+  // Even a stale 'kanban' view renders the table when the preference is off.
+  assert.match(source, /view === 'table' \|\| !kanbanEnabled \? \(/)
+  // A discoverable control labelled for the user.
+  assert.match(source, /Show Kanban board/)
+}
+
+tests['PortfolioView collapses AI recommendations behind the shelf on landing'] = () => {
+  const source = readFileSync('src/views/PortfolioView.tsx', 'utf8')
+  // Both AI panels are wrapped in the collapsed shelf rather than rendered inline.
+  assert.match(source, /<AiRecommendationsPanel count=\{2\}>/)
+  assert.match(source, /<RecommendPanel onOpen=\{onOpen\} \/>/)
+  assert.match(source, /<SourceRecommendPanel onOpenUseCase=\{onOpen\} \/>/)
+  // The shelf must not be pre-opened: no defaultOpen / open prop forcing it.
+  assert.doesNotMatch(source, /<AiRecommendationsPanel[^>]*defaultOpen/)
+}
+
+tests['the AI-recs shelf is closed on first load and persists its open choice'] = () => {
+  const source = readFileSync('src/components/AiRecommendationsPanel.tsx', 'utf8')
+  // Initial state comes from the persisted pref, defaulting to collapsed.
+  assert.match(source, /useState\(\(\) => readBoolPref\(AI_RECS_OPEN_KEY, false\)\)/)
+  // Toggling writes the choice back so it survives a reload.
+  assert.match(source, /writeBoolPref\(AI_RECS_OPEN_KEY, next\)/)
+  // The children only mount when open — so the LLM-backed inner queries stay lazy.
+  assert.match(source, /\{open && <div/)
+}
