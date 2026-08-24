@@ -8,6 +8,7 @@ import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import {
   ArrowRight,
   Bot,
+  Calendar,
   Database,
   MessageSquare,
   Pencil,
@@ -85,6 +86,10 @@ export function UseCaseDrawer({
   const [actuals, setActuals] = useState<Record<number, number>>({})
   const [overrideAmount, setOverrideAmount] = useState<number | ''>('')
   const [overrideNote, setOverrideNote] = useState('')
+  const [targetDate, setTargetDate] = useState('')
+  const [slippageReason, setSlippageReason] = useState('')
+  const [progressionNote, setProgressionNote] = useState('')
+  const [showSlippagePrompt, setShowSlippagePrompt] = useState(false)
 
   // Reset the form from the server record whenever it changes — but not while the
   // user is editing, or a background refetch would discard what they have typed.
@@ -113,6 +118,11 @@ export function UseCaseDrawer({
       next[index] = multiplierOf(component)
     })
     setActuals(next)
+    // Reset progression state
+    setTargetDate(detail.progression?.target_go_live_date ?? '')
+    setProgressionNote('')
+    setSlippageReason('')
+    setShowSlippagePrompt(false)
   }, [detail, editing])
 
   const invalidateDetail = () => {
@@ -232,6 +242,25 @@ export function UseCaseDrawer({
       api.createComment({ entity_type: 'use_case', entity_id: ucId, body }),
     onSuccess: () => {
       setComment('')
+      queryClient.invalidateQueries({ queryKey: ['uc-detail', ucId] })
+    },
+  })
+
+  const setTargetDateMutation = useMutation({
+    mutationFn: ({ date, reason }: { date: string | null; reason?: string }) =>
+      api.setTargetDate(ucId, date, reason),
+    onSuccess: () => {
+      setTargetDate('')
+      setSlippageReason('')
+      setShowSlippagePrompt(false)
+      queryClient.invalidateQueries({ queryKey: ['uc-detail', ucId] })
+    },
+  })
+
+  const addProgressionNoteMutation = useMutation({
+    mutationFn: (note: string) => api.addProgressionNote(ucId, note),
+    onSuccess: () => {
+      setProgressionNote('')
       queryClient.invalidateQueries({ queryKey: ['uc-detail', ucId] })
     },
   })
@@ -855,6 +884,207 @@ export function UseCaseDrawer({
                 {(detail.enabled_by ?? []).length === 0 ? (
                   <div className="text-xs text-navy-500">None.</div>
                 ) : null}
+              </div>
+            </section>
+
+            <section>
+              <h3 className="text-sm font-semibold text-navy-300 mb-2 flex items-center gap-1.5">
+                <Calendar className="w-4 h-4 text-lava-300" /> Progression & Timeline
+              </h3>
+              <div className="card p-4 space-y-3">
+                <div className="space-y-2">
+                  <label htmlFor="uc-target-date" className="text-xs text-navy-400 block">
+                    Target go-live date
+                    {detail.progression?.at_risk ? (
+                      <span className="ml-2 text-lava text-[10px] font-semibold">⚠ AT RISK</span>
+                    ) : null}
+                  </label>
+                  <div className="flex items-center gap-2">
+                    <input
+                      id="uc-target-date"
+                      name="uc-target-date"
+                      type="date"
+                      className="input-field flex-1"
+                      value={targetDate}
+                      onChange={(event) => {
+                        const newDate = event.target.value
+                        const current = detail.progression?.target_go_live_date
+                        // Check for slippage: new date > current date
+                        if (current && newDate && newDate > current) {
+                          setTargetDate(newDate)
+                          setShowSlippagePrompt(true)
+                        } else {
+                          setTargetDate(newDate)
+                          setShowSlippagePrompt(false)
+                        }
+                      }}
+                    />
+                    <button
+                      className="btn-secondary text-xs whitespace-nowrap disabled:opacity-40"
+                      disabled={
+                        setTargetDateMutation.isPending ||
+                        targetDate === (detail.progression?.target_go_live_date ?? '')
+                      }
+                      onClick={() => {
+                        if (showSlippagePrompt) {
+                          // Don't submit yet — prompt for reason below
+                          return
+                        }
+                        setTargetDateMutation.mutate({
+                          date: targetDate || null,
+                        })
+                      }}
+                    >
+                      {targetDate ? 'Update' : 'Clear'}
+                    </button>
+                  </div>
+                  {!detail.progression?.target_go_live_date && !targetDate ? (
+                    <div className="text-xs text-navy-500">No target date set.</div>
+                  ) : null}
+                </div>
+
+                {showSlippagePrompt ? (
+                  <div className="border border-warning/30 bg-warning/10 rounded p-3 space-y-2">
+                    <div className="text-xs text-warning font-semibold">
+                      ⚠ Date is moving later — please explain why:
+                    </div>
+                    <textarea
+                      id="uc-slippage-reason"
+                      name="uc-slippage-reason"
+                      className="input-field"
+                      rows={2}
+                      placeholder="Reason for slippage (e.g., 'upstream dependency delayed', 'scope expanded')…"
+                      value={slippageReason}
+                      onChange={(event) => setSlippageReason(event.target.value)}
+                    />
+                    <div className="flex gap-2">
+                      <button
+                        className="btn-primary text-xs disabled:opacity-40"
+                        disabled={
+                          !slippageReason.trim() || setTargetDateMutation.isPending
+                        }
+                        onClick={() => {
+                          setTargetDateMutation.mutate({
+                            date: targetDate,
+                            reason: slippageReason.trim(),
+                          })
+                        }}
+                      >
+                        Confirm slippage
+                      </button>
+                      <button
+                        className="btn-secondary text-xs"
+                        onClick={() => {
+                          setTargetDate(detail.progression?.target_go_live_date ?? '')
+                          setSlippageReason('')
+                          setShowSlippagePrompt(false)
+                        }}
+                      >
+                        Cancel
+                      </button>
+                    </div>
+                  </div>
+                ) : null}
+
+                <div className="border-t border-navy-600 pt-3">
+                  <h4 className="text-xs text-navy-400 mb-2">History</h4>
+                  <div className="space-y-1.5 max-h-60 overflow-y-auto">
+                    {(detail.progression?.events ?? []).map((event) => (
+                      <div
+                        key={event.id}
+                        className="text-xs border-b border-navy-600/40 pb-1.5"
+                      >
+                        <div className="flex items-start justify-between gap-2">
+                          <div className="flex-1 space-y-0.5">
+                            {event.event_type === 'date_set' ? (
+                              <div className="text-navy-300">
+                                <span className="text-info">Target set:</span> {event.to_value}
+                              </div>
+                            ) : event.event_type === 'date_change' ? (
+                              <div className="text-navy-300">
+                                <span
+                                  className={
+                                    event.to_value && event.from_value && event.to_value > event.from_value
+                                      ? 'text-warning'
+                                      : 'text-info'
+                                  }
+                                >
+                                  {event.to_value && event.from_value && event.to_value > event.from_value
+                                    ? '⚠ Slipped:'
+                                    : 'Date changed:'}
+                                </span>{' '}
+                                {event.from_value} → {event.to_value}
+                              </div>
+                            ) : event.event_type === 'date_cleared' ? (
+                              <div className="text-navy-300">
+                                <span className="text-navy-500">Target cleared</span> (was{' '}
+                                {event.from_value})
+                              </div>
+                            ) : event.event_type === 'status_change' ? (
+                              <div className="text-navy-300">
+                                <span className="text-success">Status:</span> {event.from_value} →{' '}
+                                {event.to_value}
+                              </div>
+                            ) : event.event_type === 'note' ? (
+                              <div className="text-navy-300">
+                                <span className="text-lava-300">Note:</span> {event.note}
+                              </div>
+                            ) : null}
+                            {event.note && event.event_type !== 'note' ? (
+                              <div className="text-navy-500 italic text-[11px]">
+                                {event.note}
+                              </div>
+                            ) : null}
+                          </div>
+                          <div className="text-navy-500 text-[10px] shrink-0">
+                            {event.created_at
+                              ? new Date(event.created_at).toLocaleDateString()
+                              : ''}
+                          </div>
+                        </div>
+                        {event.created_by ? (
+                          <div className="text-navy-600 text-[10px] mt-0.5">
+                            {event.created_by}
+                          </div>
+                        ) : null}
+                      </div>
+                    ))}
+                    {(detail.progression?.events ?? []).length === 0 ? (
+                      <div className="text-navy-500">No history yet.</div>
+                    ) : null}
+                  </div>
+                </div>
+
+                <div className="border-t border-navy-600 pt-3">
+                  <h4 className="text-xs text-navy-400 mb-2">Add a note</h4>
+                  <div className="flex gap-2">
+                    <input
+                      id="uc-progression-note"
+                      name="uc-progression-note"
+                      className="input-field text-sm flex-1"
+                      placeholder="Status update, milestone, blocker…"
+                      value={progressionNote}
+                      onChange={(event) => setProgressionNote(event.target.value)}
+                      onKeyDown={(event) => {
+                        if (event.key === 'Enter' && progressionNote.trim()) {
+                          addProgressionNoteMutation.mutate(progressionNote.trim())
+                        }
+                      }}
+                    />
+                    <button
+                      className="btn-primary px-3 text-sm whitespace-nowrap disabled:opacity-40"
+                      disabled={
+                        !progressionNote.trim() || addProgressionNoteMutation.isPending
+                      }
+                      onClick={() =>
+                        progressionNote.trim() &&
+                        addProgressionNoteMutation.mutate(progressionNote.trim())
+                      }
+                    >
+                      Add
+                    </button>
+                  </div>
+                </div>
               </div>
             </section>
 
