@@ -236,7 +236,7 @@ function AppShell() {
 
   return (
     <div className="min-h-screen">
-      <Header env={health.data?.environment} tab={tab} setTab={setTab} branding={branding} />
+      <Header env={health.data?.app_env} tab={tab} setTab={setTab} branding={branding} />
 
       <main className="max-w-[1440px] mx-auto px-6 py-5 space-y-5">
         <TopKpis persona={activePersona} useCases={useCases} />

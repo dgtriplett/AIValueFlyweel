@@ -57,6 +57,18 @@ class TestAppImports(unittest.TestCase):
     def test_health_endpoint_registered(self):
         self.assertIn("/api/health", _paths())
 
+    def test_status_includes_app_env(self):
+        """The /api/status endpoint must include app_env from APP_ENV env var."""
+        from fastapi.testclient import TestClient
+        client = TestClient(app)
+        response = client.get("/api/setup/status")
+        body = response.json()
+        # app_env should be present and match APP_ENV or default to 'DEV'
+        self.assertIn("app_env", body, "status response must include app_env field")
+        expected = os.environ.get("APP_ENV", "DEV")
+        self.assertEqual(body["app_env"], expected,
+                         f"app_env should be {expected} but got {body.get('app_env')}")
+
 
 class TestPortfolioRoutesSurvivedTheFork(unittest.TestCase):
     """The fork must not have dropped any pre-existing capability."""
