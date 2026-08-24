@@ -7,9 +7,7 @@
 
 import { lazy, Suspense, useEffect, useState } from 'react'
 import { useQuery } from '@tanstack/react-query'
-import { Database, Layers, TrendingUp, Zap } from 'lucide-react'
 import { api } from './api'
-import { fmtMoney } from './constants'
 import { FilterProvider } from './context/FilterContext'
 import { RoleProvider, useRole } from './context/RoleContext'
 import { EulaGate } from './components/EulaGate'
@@ -21,7 +19,7 @@ import { visibleTabsForPersona } from './components/Header'
 import { NewUseCaseModal } from './components/NewUseCaseModal'
 import { slugFromLocation } from './lib/kbroute'
 import type { UseCaseView } from './components/ScopeSwitch'
-import { StatCard } from './components/StatCard'
+import { TopKpis } from './components/TopKpis'
 import { ToastProvider } from './components/Toasts'
 import { UseCaseDrawer } from './components/UseCaseDrawer'
 import { DataAssetDrawer } from './components/DataAssetDrawer'
@@ -144,23 +142,10 @@ function AppShell() {
   const brandingQuery = useQuery({ queryKey: ['branding'], queryFn: api.branding })
   const lobsQuery = useQuery({ queryKey: ['lobs'], queryFn: api.lobs })
   const useCasesQuery = useQuery({ queryKey: ['use-cases'], queryFn: () => api.useCases() })
-  const assetsQuery = useQuery({ queryKey: ['data-assets'], queryFn: api.dataAssets })
 
   const lobs = lobsQuery.data ?? []
   const useCases = useCasesQuery.data ?? []
-  const assets = assetsQuery.data ?? []
   const branding = brandingQuery.data ?? null
-
-  const totalValue = useCases.reduce((sum, uc) => sum + (uc.computed_value ?? 0), 0)
-  // "Buildable" excludes blocked work: a number that includes value you cannot
-  // start on is the one customers quote back and then cannot deliver.
-  const buildableValue = useCases.reduce(
-    (sum, uc) => sum + (uc.readiness !== 'blocked' ? (uc.computed_value ?? 0) : 0),
-    0,
-  )
-  const realizedValue = useCases.reduce((sum, uc) => sum + (uc.realized?.value ?? 0), 0)
-  const shovelReady = useCases.filter((uc) => uc.readiness === 'shovel_ready').length
-  const governed = assets.filter((asset) => asset.ingestion_status === 'governed').length
 
   const renderActiveView = () => {
     switch (tab) {
@@ -247,41 +232,7 @@ function AppShell() {
       <Header env={health.data?.environment} tab={tab} setTab={setTab} branding={branding} />
 
       <main className="max-w-[1440px] mx-auto px-6 py-5 space-y-5">
-        <div className="grid grid-cols-2 md:grid-cols-5 gap-4">
-          <StatCard
-            icon={<Layers className="w-5 h-5" />}
-            label="Use Cases"
-            value={useCases.length}
-            accent="#FF3621"
-          />
-          <StatCard
-            icon={<Database className="w-5 h-5" />}
-            label="Data Sources"
-            value={assets.length}
-            sub={`${governed} governed`}
-            accent="#2272B4"
-          />
-          <StatCard
-            icon={<Zap className="w-5 h-5" />}
-            label="Shovel-ready"
-            value={shovelReady}
-            accent="#00A972"
-          />
-          <StatCard
-            icon={<TrendingUp className="w-5 h-5" />}
-            label="Buildable value/yr"
-            value={fmtMoney(buildableValue)}
-            sub={`of ${fmtMoney(totalValue)} total potential`}
-            muted
-            accent="#FFAB00"
-          />
-          <StatCard
-            icon={<TrendingUp className="w-5 h-5" />}
-            label="Realized/yr"
-            value={fmtMoney(realizedValue)}
-            accent="#42BA91"
-          />
-        </div>
+        <TopKpis persona={activePersona} useCases={useCases} />
 
         {tab === 'portfolio' || tab === 'registry' ? (
           <FilterBar lobs={lobs} showIngestion={tab === 'registry'} />
