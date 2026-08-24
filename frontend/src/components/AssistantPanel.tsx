@@ -21,7 +21,7 @@
 // into the next request but never rendered — keeping it out of state avoids a
 // re-render on every reply for a value nothing displays.
 
-import { useRef, useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import { useMutation, useQueryClient } from '@tanstack/react-query'
 import { Bot, Send, Sparkles, X } from 'lucide-react'
 
@@ -51,13 +51,26 @@ const SEED: Message = {
     'cross-LOB opportunities. I can also propose changes, which you approve before they apply.',
 }
 
-export function AssistantPanel() {
+interface AssistantPanelProps {
+  /** Hide the FAB and panel when a use-case detail overlay is open. */
+  hidden?: boolean
+}
+
+export function AssistantPanel({ hidden = false }: AssistantPanelProps) {
   const [open, setOpen] = useState(false)
   const [messages, setMessages] = useState<Message[]>([SEED])
   const [question, setQuestion] = useState('')
   const conversationId = useRef<string | undefined>(undefined)
   const toastError = useApiErrorToast()
   const queryClient = useQueryClient()
+
+  // Close the panel when hidden becomes true (e.g., a use-case detail opens).
+  // This ensures the panel doesn't linger over the drawer/page overlay.
+  useEffect(() => {
+    if (hidden && open) {
+      setOpen(false)
+    }
+  }, [hidden, open])
 
   // A confirmed chat write can touch anything the assistant's tools reach, and the
   // panel cannot know which. Invalidating the broad portfolio keys is the same
@@ -111,6 +124,9 @@ export function AssistantPanel() {
     setQuestion('')
     send.mutate(trimmed)
   }
+
+  // Don't render anything when hidden (e.g., a use-case detail overlay is open).
+  if (hidden) return null
 
   return (
     <>
