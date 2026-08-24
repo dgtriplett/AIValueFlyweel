@@ -13,7 +13,7 @@
 // `loading` and `error` arrive as props; the two mutations that write a row live
 // here because only this view offers them.
 
-import { Suspense, lazy, useMemo, useState } from 'react'
+import { Suspense, lazy, useEffect, useMemo, useState } from 'react'
 import type { ReactNode } from 'react'
 import { useMutation, useQueryClient } from '@tanstack/react-query'
 import { ArrowDownUp, BookOpen, Plus, SquareKanban, Table, Trash2 } from 'lucide-react'
@@ -35,6 +35,8 @@ import { RecommendPanel } from '../components/RecommendPanel'
 import { ScopeSwitch } from '../components/ScopeSwitch'
 import type { UseCaseView } from '../components/ScopeSwitch'
 import { SourceRecommendPanel } from '../components/SourceRecommendPanel'
+import { AiRecommendationsPanel } from '../components/AiRecommendationsPanel'
+import { KANBAN_ENABLED_KEY, readBoolPref, writeBoolPref } from '../lib/prefs'
 import { matchesUseCase, useFilters } from '../context/FilterContext'
 import type { Lob, Readiness, Status, UseCase } from '../types'
 
@@ -90,6 +92,9 @@ export function PortfolioView({
   const queryClient = useQueryClient()
   const { filters } = useFilters()
   const [view, setView] = useState<'table' | 'kanban'>('table')
+  // Kanban is offered by default; a local preference can turn it off. When it
+  // is off the toggle hides the Kanban option and the view is forced to 'table'.
+  const [kanbanEnabled, setKanbanEnabled] = useState(() => readBoolPref(KANBAN_ENABLED_KEY, true))
   const [grouping, setGrouping] = useState<'status' | 'phase'>('status')
   const [sort, setSort] = useState<{ key: SortKey; dir: number }>({
     key: 'computed_value',
@@ -110,6 +115,18 @@ export function PortfolioView({
       queryClient.invalidateQueries({ queryKey: ['data-assets'] })
     },
   })
+
+  // Disabling Kanban while the board is on screen must not strand the user on a
+  // view they can no longer switch away from — fall back to the table.
+  useEffect(() => {
+    if (!kanbanEnabled && view === 'kanban') setView('table')
+  }, [kanbanEnabled, view])
+
+  const setKanbanPref = (next: boolean) => {
+    setKanbanEnabled(next)
+    writeBoolPref(KANBAN_ENABLED_KEY, next)
+    if (!next) setView('table')
+  }
 
   const lobName = (lobId?: number | null) =>
     lobId != null ? (lobs.find((lob) => lob.id === lobId)?.name ?? '—') : '—'
@@ -196,8 +213,13 @@ export function PortfolioView({
   return (
     <div className="space-y-4">
       {switcher}
-      <RecommendPanel onOpen={onOpen} />
-      <SourceRecommendPanel onOpenUseCase={onOpen} />
+      {/* AI recommendations are collapsed on landing so they don't dominate the
+          view — the user flagged them as "a lot for the initial landing view".
+          The feature is one click away; the choice to keep it open persists. */}
+      <AiRecommendationsPanel count={2}>
+        <RecommendPanel onOpen={onOpen} />
+        <SourceRecommendPanel onOpenUseCase={onOpen} />
+      </AiRecommendationsPanel>
 
       <div className="flex items-center justify-between flex-wrap gap-2">
         <div className="flex items-center gap-2">
@@ -210,16 +232,21 @@ export function PortfolioView({
             >
               <Table className="w-4 h-4" /> Table
             </button>
-            <button
-              className={`px-3 py-1.5 rounded text-sm flex items-center gap-1.5 ${
-                view === 'kanban' ? 'bg-lava/20 text-lava-300' : 'text-navy-400'
-              }`}
-              onClick={() => setView('kanban')}
-            >
-              <SquareKanban className="w-4 h-4" /> Kanban
-            </button>
+            {/* The Kanban option only appears when the preference has it on.
+                When it is off, the toggle is a single (table) state, which is
+                clearer than a disabled-looking second button. */}
+            {kanbanEnabled && (
+              <button
+                className={`px-3 py-1.5 rounded text-sm flex items-center gap-1.5 ${
+                  view === 'kanban' ? 'bg-lava/20 text-lava-300' : 'text-navy-400'
+                }`}
+                onClick={() => setView('kanban')}
+              >
+                <SquareKanban className="w-4 h-4" /> Kanban
+              </button>
+            )}
           </div>
-          {view === 'kanban' && (
+          {kanbanEnabled && view === 'kanban' && (
             <div className="bg-navy-700 border border-navy-600 rounded p-0.5 flex text-xs">
               <button
                 className={`px-2.5 py-1.5 rounded ${
@@ -240,6 +267,18 @@ export function PortfolioView({
             </div>
           )}
           <span className="text-sm text-navy-500">{visible.length} use cases</span>
+          {/* A small, discoverable control to turn the Kanban board on or off.
+              Kept in the options row rather than an admin panel — this is a
+              per-browser preference (gridatlas.kanbanEnabled), not an org setting. */}
+          <label className="flex items-center gap-1.5 text-xs text-navy-400 cursor-pointer select-none">
+            <input
+              type="checkbox"
+              className="accent-lava"
+              checked={kanbanEnabled}
+              onChange={(event) => setKanbanPref(event.target.checked)}
+            />
+            Show Kanban board
+          </label>
         </div>
         <button className="btn-primary text-sm" onClick={() => onNew?.()}>
           <Plus className="w-4 h-4" /> New Use Case
@@ -283,7 +322,7 @@ export function PortfolioView({
           </div>
         ))}
 
-      {view === 'table' ? (
+      {view === 'table' || !kanbanEnabled ? (
         <div className="card p-0 overflow-x-auto">
           <table className="w-full text-sm min-w-[960px]">
             <thead className="text-xs uppercase text-navy-500 border-b border-navy-600">
