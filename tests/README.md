@@ -6,8 +6,8 @@ Run everything:
 python3 -m unittest discover -s tests -v
 ```
 
-Or run every gate CI runs — tests, lint, secret scan, console-bundle syntax, and a
-clean import of `app.py` against the real (unstubbed) dependencies:
+Or run every gate CI runs — tests, lint, secret scan, and a clean import of
+`app.py` against the real (unstubbed) dependencies:
 
 ```bash
 python3 scripts/check.py
@@ -39,7 +39,6 @@ that has never talked to Databricks.
 | `test_ci.py` | The workflow references files that exist, tests the deployed Python version and the declared floor, and no gate has been silently dropped from `check.py`. |
 | `test_limits.py` | Rate limits are per-actor and per-class, the limiter fails open, query budgets stay isolated across concurrent requests, and every expensive endpoint declares a limit. |
 | `test_docs.py` | Docs make no claim the code contradicts: links resolve, documented flags exist, every setting the code reads is documented, and nothing still says migrations apply on startup. |
-| `test_console_nav.py` | Every menu item routes somewhere real, no view is orphaned, menus carry the right ARIA roles, and the two CSS invariants that made the dropdowns invisible (nav clipping, header z-index) stay fixed. |
 | `test_knowledge.py` | KB slugs (reserved-word and collision handling), folder paths (subtree matching, LIKE escaping, circular moves), **attachment validation against forged MIME types and path traversal**, the search SQL's parameter binding across all 32 filter combinations, and the two new migrations' DDL. |
 | `test_whatif.py` | The what-if simulator and account scoping, which share `ready_assets()`: overrides win over stored state, the simulator reuses the real readiness logic instead of reimplementing it, it writes nothing, and concurrent requests never share an account. |
 | `test_snapshots.py` | The trend: snapshots store computed FIGURES not foreign keys (a view would rewrite history when an assumption is recalibrated), they de-duplicate per minute, automatic triggers use `capture_quietly` so a charting failure never reports a successful change as failed, and the status WRITE path is account-scoped. |

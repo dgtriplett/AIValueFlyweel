@@ -6,10 +6,10 @@
 WHAT REPLACED WHAT, AND WHY
 ---------------------------
 `frontend/src/` used to be absent, so the only way to change the SPA was to
-regex-patch the minified bundle. Four scripts did that (`patch_spa_nav.py`,
-`patch_spa_grouped_nav.py`, `patch_spa_proposal_button.py`,
-`patch_spa_customer_visibility.py`) plus `rebrand_bundle.py`, and CI gated three of
-them by running `--check` and asserting the patch was still applied.
+regex-patch the minified bundle. Four scripts did that (patch_spa_nav.py,
+patch_spa_grouped_nav.py, patch_spa_proposal_button.py,
+patch_spa_customer_visibility.py, now deleted) plus `rebrand_bundle.py`, and CI
+gated three of them by running `--check` and asserting the patch was still applied.
 
 The source now exists and the bundle is built from it, so those gates cannot work
 as written: they assert against MINIFIED IDENTIFIERS (`Dg.find(x=>x.id===`,
@@ -20,9 +20,9 @@ opposite of building from source.
 So the checks moved rather than disappeared, and split by what they can honestly
 prove:
 
-  - BEHAVIOUR the customer sees — the grouped nav, the two console links, the
-    drawer's proposal action, the current product name, no customer-visible phase
-    text — is still asserted against the BUILT BUNDLE, because that is what ships.
+  - BEHAVIOUR the customer sees — the grouped nav, the drawer's proposal action,
+    the current product name, no customer-visible phase text — is still asserted
+    against the BUILT BUNDLE, because that is what ships.
     Those assertions are here, keyed on stable content (marker attributes, hrefs,
     user-visible strings) rather than on minified variable names.
 
@@ -34,7 +34,7 @@ prove:
 
 WHY THIS IS A SCRIPT AND NOT ONLY A TEST
 ----------------------------------------
-Same reason as the patch scripts it replaces: the failure mode worth catching is a
+Same reason as the patch scripts it replaced: the failure mode worth catching is a
 bundle that was rebuilt from stale source, or not rebuilt at all, and the person
 who needs to know is whoever is about to commit. `scripts/check.py` calls this, so
 it runs on a laptop and in CI identically.
@@ -88,9 +88,6 @@ REQUIRED = [
      "destination can only show one of its two scopes"),
     ("Your portfolio",
      "the scope switch lost the portfolio scope's label"),
-    ("/console/#kb",
-     "nothing links to the knowledge base, so the feature is invisible from the "
-     "app's front door"),
     ("Write a proposal",
      "the in-SPA proposal agent is not reachable from the header"),
     ("Generate use cases",
@@ -100,8 +97,7 @@ REQUIRED = [
     ("data-ga-menu",
      "the nav dropdowns are missing, so the grouped items cannot be reached"),
     ("gaProposalBtn",
-     "the use-case drawer has no Write proposal action; the proposal agent is "
-     "only reachable by typing an id into the console"),
+     "the use-case drawer has no Write proposal action"),
     ("AI Value Flywheel",
      "the bundle does not carry the current product name"),
     ('label:"Value Flywheel"',
@@ -116,8 +112,6 @@ REQUIRED = [
 ]
 
 FORBIDDEN = [
-    ("Get Started & Discovery",
-     "a console tab that no longer exists under that name"),
     ("Grid Atlas",
      "the superseded product name is back"),
     ('children:"Phase"',
@@ -128,8 +122,6 @@ FORBIDDEN = [
      "the phase filter is back; phase is derived and not a customer concept"),
     ("All phases",
      "the phase filter is back"),
-    ("/console/#proposals",
-     "the old console proposal cross-link is back"),
     ("Phase updates automatically",
      "superseded drawer copy naming phase is back"),
     ("Derived from prerequisite depth",
@@ -141,7 +133,6 @@ SOURCE_REQUIRED = {
         "const NAV_GROUPS",
         "TABS.find((candidate) => candidate.id === id)",
         "NAV_GROUPS.map((group) =>",
-        "href: '/console/#kb'",
         "const TOOL_TABS: TabId[] = ['generate', 'roadmap_import', 'proposals']",
         "setTab(id)",
         'data-gaGroupedNav="1"',

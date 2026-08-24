@@ -2,16 +2,14 @@
 
 ## Overview
 
-A single Databricks App: FastAPI serving a pre-built React SPA plus a
-dependency-free operator console, backed by **Lakebase** (portfolio state) and
-**Unity Catalog** (discovery state), with the **Foundation Model API** behind the
-agents.
+A single Databricks App: FastAPI serving a pre-built React SPA, backed by
+**Lakebase** (portfolio state) and **Unity Catalog** (discovery state), with the
+**Foundation Model API** behind the agents.
 
 ```
 ┌──────────────────── Databricks App (grid-atlas) ────────────────────┐
 │  FastAPI (app.py)                                                    │
 │   ├─ /api/*   REST                                                   │
-│   ├─ /console static operator console                                │
 │   └─ /        static SPA (frontend/dist)                             │
 │  Auth: dual-mode — service principal in-app, CLI profile locally     │
 └──────┬─────────────────┬──────────────────────┬─────────────────────┘
@@ -48,8 +46,7 @@ written back to Lakebase, which stays the portfolio's system of record.
 
 - **Frontend** — React 18 + TS + Vite + Tailwind (Blueprint dark tokens),
   TanStack Query, React Flow (graph/blast radius), Recharts. Heavy views are
-  lazy-loaded. The `/console` page is plain HTML/JS with no build step; see the
-  README's note on the frontend source for why.
+  lazy-loaded. See the README's note on the frontend source.
 - **Backend** — FastAPI + `asyncpg` pool with an OAuth-token password and ~45-min
   refresh; dual-mode auth (`server/config.py`). Lakebase SQL is parameterized
   (`$n` placeholders, no interpolation of user input).

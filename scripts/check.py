@@ -48,26 +48,6 @@ def run(name: str, args: list[str], *, cwd: Path = ROOT,
     return Result(name, "PASS")
 
 
-def check_console_bundle() -> Result:
-    """The operator console is hand-written JS served as-is — no build step.
-
-    That means a syntax error ships and the page renders blank with the error only
-    in the browser console. There is no bundler to catch it, so this is the only
-    gate between a typo and a customer seeing an empty tab.
-    """
-    console = ROOT / "frontend" / "console" / "console.js"
-    if not console.exists():
-        return Result("console bundle syntax", "FAIL", "console.js missing")
-    if shutil.which("node") is None:
-        return Result("console bundle syntax", "SKIP", "node not installed")
-    completed = subprocess.run(["node", "--check", str(console)],
-                               capture_output=True, text=True)
-    if completed.returncode != 0:
-        print(completed.stderr.strip()[:1500])
-        return Result("console bundle syntax", "FAIL", "console.js does not parse")
-    return Result("console bundle syntax", "PASS")
-
-
 def check_app_imports() -> Result:
     """Import app.py in a clean interpreter, against the REAL dependencies.
 
@@ -159,7 +139,6 @@ def main() -> int:
     if not args.fast:
         results.append(run("lint (ruff)", ["ruff", "check", "."],
                            optional_tool="ruff"))
-        results.append(check_console_bundle())
         # frontend/dist is committed and serves the app's front door, and it is now
         # BUILT from frontend/src rather than patched in place. The failure this
         # catches is a stale dist: source says one thing, the bundle a customer
@@ -170,12 +149,9 @@ def main() -> int:
         #
         # This replaces the historical patch_spa_grouped_nav.py,
         # patch_spa_proposal_button.py, and patch_spa_customer_visibility.py
-        # `--check` gates. Those asserted
-        # minified identifiers (`Dg.find(x=>x.id===`) that a minifier reassigns on
-        # every build, so they could only ever pass for one historical bundle.
-        # The structural half of what they guarded moved to
-        # tests/test_console_nav.py::TestSpaSourceIsTheSourceOfTruth, which checks
-        # the source and is a stronger claim than a substring of minified output.
+        # `--check` gates (now deleted). Those asserted minified identifiers
+        # (`Dg.find(x=>x.id===`) that a minifier reassigns on every build, so they
+        # could only ever pass for one historical bundle.
         results.append(run("SPA bundle carries the source's behaviour",
                            [sys.executable, str(ROOT / "scripts"
                                                 / "check_spa_bundle.py")]))

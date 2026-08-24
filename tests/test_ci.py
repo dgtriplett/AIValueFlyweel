@@ -111,19 +111,13 @@ class TestGatesAreNotSilentlyDropped(unittest.TestCase):
     def test_it_lints(self):
         self.assertIn("ruff", self.source)
 
-    def test_it_checks_the_console_bundle(self):
-        # The console is hand-written JS with no build step, so a syntax error
-        # ships and renders a blank page. This is the only gate before that.
-        self.assertIn("--check", self.source)
-        self.assertIn("console.js", self.source)
-
     def test_it_checks_the_spa_bundle_matches_its_source(self):
         """The SPA gate must survive the move from patching to building.
 
         It used to run `patch_spa_customer_visibility.py --check` (plus two sibling
-        patch scripts) against the committed bundle, because frontend/src did not
-        exist and a regex patch was the only way to change the SPA. Now the source
-        is committed and dist is built from it, so the gate is
+        patch scripts, now deleted) against the committed bundle, because
+        frontend/src did not exist and a regex patch was the only way to change the
+        SPA. Now the source is committed and dist is built from it, so the gate is
         `check_spa_bundle.py`, which asserts the same customer-visible behaviour on
         the chunk index.html actually loads.
 
