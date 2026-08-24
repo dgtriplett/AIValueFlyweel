@@ -53,12 +53,14 @@ export function UseCaseDrawer({
   lobs,
   onClose,
   onOpenUseCase,
+  onOpenDataAsset,
   onWriteProposal,
 }: {
   ucId: number
   lobs: Lob[]
   onClose: () => void
   onOpenUseCase: (id: number) => void
+  onOpenDataAsset: (id: number) => void
   onWriteProposal: (id: number) => void
 }) {
   const queryClient = useQueryClient()
@@ -646,16 +648,14 @@ export function UseCaseDrawer({
               </h3>
               <div className="space-y-1">
                 {(detail.required_assets ?? []).map((asset) => (
-                  <div
+                  <button
                     key={asset.id}
-                    className="flex items-center justify-between text-sm border-b border-navy-600 py-1.5"
+                    className="w-full flex items-center justify-between text-sm border-b border-navy-600 py-1.5 hover:bg-navy-700/50 px-1 rounded text-left"
+                    onClick={() => onOpenDataAsset(asset.id)}
                   >
                     <span className="text-navy-300">
                       <span className="text-lava-300">{asset.source_system}</span> ·{' '}
                       {asset.module}
-                      {asset.criticality === 'helpful' ? (
-                        <span className="text-navy-500 text-xs"> (helpful)</span>
-                      ) : null}
                     </span>
                     <div className="flex items-center gap-2">
                       <IngestionBadge status={asset.ingestion_status} />
@@ -665,13 +665,16 @@ export function UseCaseDrawer({
                           title="Remove this required module"
                           className="text-navy-500 hover:text-lava disabled:opacity-40"
                           disabled={removeRequired.isPending}
-                          onClick={() => removeRequired.mutate(asset.id)}
+                          onClick={(e) => {
+                            e.stopPropagation()
+                            removeRequired.mutate(asset.id)
+                          }}
                         >
                           <X className="w-3.5 h-3.5" />
                         </button>
                       ) : null}
                     </div>
-                  </div>
+                  </button>
                 ))}
                 {(detail.required_assets ?? []).length === 0 ? (
                   <div className="text-xs text-navy-500">No required modules.</div>
@@ -696,6 +699,9 @@ export function UseCaseDrawer({
                           (asset) =>
                             !(detail.required_assets ?? []).some(
                               (required) => required.id === asset.id,
+                            ) &&
+                            !(detail.helpful_assets ?? []).some(
+                              (helpful) => helpful.id === asset.id,
                             ),
                         )
                         .map((asset) => (
@@ -719,6 +725,47 @@ export function UseCaseDrawer({
                 </>
               ) : null}
             </section>
+
+            {(detail.helpful_assets ?? []).length > 0 ? (
+              <section>
+                <h3 className="text-sm font-semibold text-navy-300 mb-2 flex items-center gap-1.5">
+                  <Database className="w-4 h-4 text-navy-500" /> Helpful data assets (
+                  {(detail.helpful_assets ?? []).length})
+                </h3>
+                <div className="space-y-1">
+                  {(detail.helpful_assets ?? []).map((asset) => (
+                    <button
+                      key={asset.id}
+                      className="w-full flex items-center justify-between text-sm border-b border-navy-600 py-1.5 hover:bg-navy-700/50 px-1 rounded text-left"
+                      onClick={() => onOpenDataAsset(asset.id)}
+                    >
+                      <span className="text-navy-400">
+                        <span className="text-navy-500">{asset.source_system}</span> ·{' '}
+                        {asset.module}
+                        <span className="text-navy-500 text-xs ml-1">(helpful)</span>
+                      </span>
+                      <div className="flex items-center gap-2">
+                        <IngestionBadge status={asset.ingestion_status} />
+                        {editing ? (
+                          <button
+                            aria-label={`Remove helpful module ${asset.module}`}
+                            title="Remove this helpful module"
+                            className="text-navy-500 hover:text-lava disabled:opacity-40"
+                            disabled={removeRequired.isPending}
+                            onClick={(e) => {
+                              e.stopPropagation()
+                              removeRequired.mutate(asset.id)
+                            }}
+                          >
+                            <X className="w-3.5 h-3.5" />
+                          </button>
+                        ) : null}
+                      </div>
+                    </button>
+                  ))}
+                </div>
+              </section>
+            ) : null}
 
             <section className="grid grid-cols-1 gap-3">
               <div>

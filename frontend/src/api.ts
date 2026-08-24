@@ -214,6 +214,8 @@ export const api = {
 
   dataAssets: () => http.get<DataAsset[]>('/data-assets').then((r) => r.data),
 
+  dataAsset: (id: number) => http.get<DataAsset>(`/data-assets/${id}`).then((r) => r.data),
+
   createDataAsset: (body: Partial<DataAsset>) =>
     http.post<DataAsset>('/data-assets', body).then((r) => r.data),
 

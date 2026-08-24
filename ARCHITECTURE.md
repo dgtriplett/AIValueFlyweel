@@ -126,6 +126,12 @@ written back to Lakebase, which stays the portfolio's system of record.
   `funding_requests.delivery_cost` for user-entered labor/people cost, replacing
   the auto-assumed estimate with an editable field. The auto-calculated
   `delivery_cost_mid` now serves only as a prefilled suggestion.
+- **Asset detail enrichment** — `016_asset_detail.sql`: adds four descriptive
+  fields to `data_assets` (provides, refresh_cadence, steward, source_of_record) and
+  `rationale` to `uc_requires_asset`, making the module edge symmetric with the
+  domain edge (`uc_requires_domain.rationale` existed but `uc_requires_asset.rationale`
+  did not). Supports the clickable data-asset detail drawer (PART B) and fixes the
+  per-account status overlay bug in `get_use_case_detail` (PART A).
 - **Migration ledger** — `schema_migrations`, created by `server/migrator.py`
   rather than by a numbered migration, since it must exist before the ledger can
   be consulted.

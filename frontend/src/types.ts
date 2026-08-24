@@ -106,6 +106,7 @@ export interface UseCase {
 
 export interface RequiredAsset extends DataAsset {
   criticality?: Criticality | null
+  rationale?: string | null
 }
 
 export interface LinkedUseCase {
@@ -141,6 +142,7 @@ export interface ValueRecord {
 
 export interface UseCaseDetail extends UseCase {
   required_assets?: RequiredAsset[]
+  helpful_assets?: RequiredAsset[]
   enables?: LinkedUseCase[]
   enabled_by?: LinkedUseCase[]
   value_records?: ValueRecord[]
@@ -167,6 +169,19 @@ export interface DataAsset {
   auto_note?: string | null
   status_user_edited?: boolean | null
   benefiting_lob_ids?: number[] | null
+  // PART B: new detail fields
+  provides?: string | null
+  refresh_cadence?: string | null
+  steward?: string | null
+  source_of_record?: string | null
+  // PART B.2(i): enriched on single-asset GET
+  required_by?: {
+    use_case_id: number
+    title: string
+    criticality?: Criticality | null
+    rationale?: string | null
+    readiness?: Readiness | null
+  }[]
 }
 
 export interface RequiresEdge {

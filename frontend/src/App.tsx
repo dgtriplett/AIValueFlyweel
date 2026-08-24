@@ -22,6 +22,7 @@ import type { UseCaseView } from './components/ScopeSwitch'
 import { StatCard } from './components/StatCard'
 import { ToastProvider } from './components/Toasts'
 import { UseCaseDrawer } from './components/UseCaseDrawer'
+import { DataAssetDrawer } from './components/DataAssetDrawer'
 import { PortfolioView } from './views/PortfolioView'
 import { RegistryView } from './views/RegistryView'
 
@@ -89,6 +90,7 @@ function AppShell() {
   // the portfolio when you were reading the catalog.
   const [ucScope, setUcScope] = useState<UseCaseView>('portfolio')
   const [drawerUcId, setDrawerUcId] = useState<number | null>(null)
+  const [drawerAssetId, setDrawerAssetId] = useState<number | null>(null)
   const [focusUcId, setFocusUcId] = useState<number | null>(null)
   const [creating, setCreating] = useState(false)
   const [proposalUcId, setProposalUcId] = useState<number | null>(null)
@@ -262,10 +264,26 @@ function AppShell() {
           lobs={lobs}
           onClose={() => setDrawerUcId(null)}
           onOpenUseCase={setDrawerUcId}
+          onOpenDataAsset={(id) => {
+            setDrawerAssetId(id)
+            setDrawerUcId(null)
+          }}
           onWriteProposal={(id) => {
             setProposalUcId(id)
             setDrawerUcId(null)
             setTab('proposals')
+          }}
+        />
+      ) : null}
+
+      {drawerAssetId != null ? (
+        <DataAssetDrawer
+          assetId={drawerAssetId}
+          lobs={lobs}
+          onClose={() => setDrawerAssetId(null)}
+          onOpenUseCase={(id) => {
+            setDrawerUcId(id)
+            setDrawerAssetId(null)
           }}
         />
       ) : null}

@@ -353,13 +353,21 @@ async def get_use_case_detail(uc_id: int):
     uc["computed_value"] = rng["mid"] if rng else None
     uc["realized"] = compute_realized(uc, assumptions)
 
+    account_id = await accounts.current()
+    # FIX PART A: Overlay per-account status (not the shared catalog status), and
+    # include the new rationale field. Matches the pattern in data_assets.py line 47.
     required = await db.fetch(
-        """SELECT da.*, ura.criticality
+        """SELECT da.*,
+                  COALESCE(acs.ingestion_status, da.ingestion_status) AS ingestion_status,
+                  ura.criticality,
+                  ura.rationale
            FROM uc_requires_asset ura
            JOIN data_assets da ON da.id = ura.data_asset_id
+           LEFT JOIN account_asset_status acs
+                  ON acs.data_asset_id = da.id AND acs.account_id = $2
            WHERE ura.use_case_id = $1
            ORDER BY ura.criticality, da.source_system, da.module""",
-        uc_id,
+        uc_id, account_id,
     )
     enables = await db.fetch(
         """SELECT uc.id, uc.title, uc.stage, uc.phase, uc.status, e.rationale, e.detected_by_agent
@@ -373,7 +381,12 @@ async def get_use_case_detail(uc_id: int):
            WHERE e.to_use_case_id = $1 ORDER BY uc.title""",
         uc_id,
     )
-    account_id = await accounts.current()
+    # FIX PART A.2: Split required vs helpful assets server-side so the count reflects
+    # only truly required ones.
+    required_list = rows_to_list(required)
+    required_assets = [a for a in required_list if a.get("criticality") == "required"]
+    helpful_assets = [a for a in required_list if a.get("criticality") == "helpful"]
+
     if account_id is not None:
         values = await db.fetch(
             "SELECT * FROM value_records WHERE account_id=$1 AND use_case_id = $2 ORDER BY id",
@@ -393,7 +406,8 @@ async def get_use_case_detail(uc_id: int):
         )
     return {
         **uc,
-        "required_assets": rows_to_list(required),
+        "required_assets": required_assets,
+        "helpful_assets": helpful_assets,
         "enables": rows_to_list(enables),
         "enabled_by": rows_to_list(enabled_by),
         "value_records": rows_to_list(values),
