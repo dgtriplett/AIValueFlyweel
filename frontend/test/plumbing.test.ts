@@ -67,6 +67,8 @@ import { generationConfirmation } from '../src/views/GenerateView'
 import { proposalGenerationConfirmation } from '../src/views/ProposalsView'
 import { parseRoadmapPackage, roadmapImportConfirmation } from '../src/views/RoadmapImportView'
 import { ASSUMPTION_INVALIDATION_KEYS } from '../src/hooks/useAssumptionInvalidation'
+import { kpiDataFromUseCases, kpisForPersona } from '../src/components/TopKpis'
+import type { UseCase } from '../src/types'
 import type { ConfirmCardData } from '../src/types'
 
 // ---------------------------------------------------------------------------
@@ -1503,6 +1505,121 @@ tests['the branding logo rejection matches the server cap and type list'] = () =
   assert.match(source, /MAX_LOGO_BYTES = 2 \* 1024 \* 1024/)
   assert.match(source, /<FileDrop/)
   assert.match(source, /validate=\{logoRejection\}/)
+}
+
+// ---------------------------------------------------------------------------
+// 7. P6 — persona-aware KPI reduction
+//
+// The headline KPI strip at the top of the app used to render one fixed row of
+// five StatCards for everyone. `kpisForPersona` is the reduction's linchpin: the
+// SET it returns DIFFERS by persona — a minimal value-focused three for an
+// executive, the operational four a PM (and an admin) act on. These assertions
+// pin the exact set each persona sees, driven directly against the pure function
+// with no DOM, which is the whole reason it was extracted.
+// ---------------------------------------------------------------------------
+
+function uc(overrides: Partial<UseCase>): UseCase {
+  // Only the fields the KPI reduction reads matter; the rest of UseCase is left
+  // off deliberately so the fixture states exactly what each case contributes.
+  return { id: 0, title: 'x', ...overrides } as UseCase
+}
+
+// A small portfolio exercising every branch the reduction reads: two live
+// (one via value_realized), one in-progress, one blocked (excluded from
+// buildable), one shovel-ready.
+const KPI_PORTFOLIO: UseCase[] = [
+  uc({ id: 1, status: 'live', readiness: 'shovel_ready', computed_value: 10, realized: { mode: 'calculated', value: 4, note: null } }),
+  uc({ id: 2, status: 'value_realized', readiness: 'nearly_ready', computed_value: 20, realized: { mode: 'override', value: 6, note: null } }),
+  uc({ id: 3, status: 'in_progress', readiness: 'nearly_ready', computed_value: 5 }),
+  uc({ id: 4, status: 'scoping', readiness: 'blocked', computed_value: 100 }),
+  uc({ id: 5, status: 'not_started', readiness: 'shovel_ready', computed_value: 3 }),
+]
+
+tests['kpiDataFromUseCases derives every fact off the loaded use-case list'] = () => {
+  const data = kpiDataFromUseCases(KPI_PORTFOLIO)
+  assert.equal(data.total, 5)
+  assert.equal(data.inProgress, 1)
+  assert.equal(data.blocked, 1)
+  assert.equal(data.shovelReady, 2)
+  // live counts both live AND value_realized — both are in production.
+  assert.equal(data.live, 2)
+  assert.equal(data.realizedValue, 10) // 4 + 6
+  assert.equal(data.totalValue, 138) // 10+20+5+100+3
+  // Buildable EXCLUDES the blocked $100 use case — the value you can deliver on.
+  assert.equal(data.buildableValue, 38) // 10+20+5+3
+}
+
+tests['kpiDataFromUseCases treats missing value and readiness as zero-safe'] = () => {
+  const data = kpiDataFromUseCases([uc({ id: 9 })])
+  assert.equal(data.total, 1)
+  assert.equal(data.blocked, 0)
+  assert.equal(data.realizedValue, 0)
+  assert.equal(data.totalValue, 0)
+  // A use case with no readiness is not blocked, so its (absent) value is buildable.
+  assert.equal(data.buildableValue, 0)
+}
+
+tests['executive gets a minimal, value-focused set of exactly three cards'] = () => {
+  const kpis = kpisForPersona('executive', kpiDataFromUseCases(KPI_PORTFOLIO))
+  // FEWER, value-focused: three cards, no operational clutter (no total / blocked
+  // / in-progress cards as their own headline numbers).
+  assert.deepEqual(
+    kpis.map((k) => k.key),
+    ['realized_value', 'projected_value', 'live'],
+  )
+  assert.equal(kpis.length, 3)
+  // The value cards read off the derived scalars.
+  assert.equal(kpis[0].label, 'Value realized to date')
+  assert.equal(kpis[0].value, '$10.0M')
+  assert.equal(kpis[1].label, 'Projected annual value')
+  assert.equal(kpis[1].value, '$38.0M')
+  // Total potential is the caveat sub, and the blocked pile rides the live card as
+  // the exec-altitude "needs attention" signal rather than its own KPI.
+  assert.match(kpis[1].sub ?? '', /of \$138\.0M total potential/)
+  assert.equal(kpis[2].value, '2')
+  assert.match(kpis[2].sub ?? '', /1 at risk \/ blocked/)
+}
+
+tests['pm gets the operational set of exactly four cards'] = () => {
+  const kpis = kpisForPersona('pm', kpiDataFromUseCases(KPI_PORTFOLIO))
+  assert.deepEqual(
+    kpis.map((k) => k.key),
+    ['total', 'in_progress', 'blocked', 'shovel_ready'],
+  )
+  assert.equal(kpis.length, 4)
+  assert.equal(kpis[0].value, '5')
+  assert.equal(kpis[1].value, '1')
+  assert.equal(kpis[2].value, '1')
+  assert.equal(kpis[3].value, '2')
+}
+
+tests['admin reads the same clean operational set as pm — not a longer row'] = () => {
+  const data = kpiDataFromUseCases(KPI_PORTFOLIO)
+  const adminKeys = kpisForPersona('admin', data).map((k) => k.key)
+  const pmKeys = kpisForPersona('pm', data).map((k) => k.key)
+  assert.deepEqual(adminKeys, pmKeys)
+  // The point of the reduction: no persona sees more than four headline cards.
+  for (const persona of ['executive', 'pm', 'admin'] as const) {
+    assert.ok(kpisForPersona(persona, data).length <= 4, `${persona} set is not reduced`)
+  }
+}
+
+tests['the executive and pm sets are genuinely DIFFERENT, not the same row relabelled'] = () => {
+  const data = kpiDataFromUseCases(KPI_PORTFOLIO)
+  const exec = new Set(kpisForPersona('executive', data).map((k) => k.key))
+  const pm = new Set(kpisForPersona('pm', data).map((k) => k.key))
+  // No key is shared — the whole premise is a different set per persona, not one
+  // superset row shown to everyone.
+  for (const key of exec) assert.ok(!pm.has(key), `exec key ${key} leaked into pm set`)
+}
+
+tests['App renders the persona-aware TopKpis, not the old fixed five-card row'] = () => {
+  const source = readFileSync('src/App.tsx', 'utf8')
+  // The headline strip is the persona-aware component, wired to the active persona.
+  assert.match(source, /<TopKpis persona=\{activePersona\} useCases=\{useCases\} \/>/)
+  // The old fixed row is gone: no five-wide grid, no per-card StatCard in the shell.
+  assert.doesNotMatch(source, /md:grid-cols-5/)
+  assert.doesNotMatch(source, /<StatCard/)
 }
 
 // ---------------------------------------------------------------------------
