@@ -42,6 +42,9 @@ class UseCaseIn(BaseModel):
     realized_override_enabled: bool = False
     realized_override_amount: float | None = None
     realized_override_note: str | None = None
+    hypothesized_override_enabled: bool = False
+    hypothesized_override_amount: float | None = None
+    hypothesized_override_note: str | None = None
     status_source: str = "manual"
 
 
