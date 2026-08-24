@@ -139,6 +139,13 @@ written back to Lakebase, which stays the portfolio's system of record.
   realize value" and "what's slipping and why" — the user-approved feature request.
   Fully account-scoped (no cross-tenant leak). Routes: `GET/PUT /use-cases/{id}/progression/target-date`,
   `POST /use-cases/{id}/progression/note`. Frontend: Progression section in UseCaseDrawer.
+- **Asset detail content population** — `018_asset_detail_content.sql`: populates
+  the four descriptive columns added in migration 016 (provides, steward, source_of_record,
+  refresh_cadence) for all 146 catalog data assets, deriving confident values from existing
+  metadata (source_system, module, owning_lob, source_category). Idempotent and
+  non-destructive — only updates NULL/empty values so user edits are preserved. Uses
+  natural-key matching (source_system, module) to work across environments. Complements
+  the inline-edit UI added to DataAssetDrawer (pencil icon → editable fields → Save/Cancel).
 - **Migration ledger** — `schema_migrations`, created by `server/migrator.py`
   rather than by a numbered migration, since it must exist before the ledger can
   be consulted.
