@@ -226,6 +226,29 @@ function JointCaseDetail({
 
   const totalPledged = Object.values(costShare).reduce((sum, value) => sum + (value || 0), 0)
 
+  // Recompute build cost from user-entered delivery cost (or fall back to server's auto-estimate)
+  const effectiveDeliveryCost = deliveryCost ?? jointCase.delivery_cost_mid ?? 0
+  const effectiveBuildCost = Math.round((jointCase.ingest_cost_mid ?? 0) + effectiveDeliveryCost)
+  
+  // Recompute annual run cost (30% of build cost, matching server calculation)
+  const effectiveAnnualRun = Math.round(effectiveBuildCost * 0.30)
+  
+  // Recompute ROI and payback using updated build cost (matching server calculation)
+  const combinedAbs = (jointCase.combined_value_mm ?? 0) * 1_000_000
+  const YR1_FACTOR = 0.35
+  const yr1Net = combinedAbs * YR1_FACTOR - effectiveAnnualRun
+  let effectivePaybackMonths = 
+    yr1Net > 0 ? Math.round((effectiveBuildCost / (yr1Net / 12)) * 10) / 10 : null
+  if (effectivePaybackMonths !== null && effectivePaybackMonths < 1) {
+    effectivePaybackMonths = 
+      effectiveBuildCost <= 0 
+        ? null 
+        : Math.max(effectivePaybackMonths, Math.round((effectiveBuildCost / (combinedAbs / 12)) * 10) / 10)
+  }
+  const cum3yrValue = combinedAbs * (YR1_FACTOR + 0.70 + 1.0)
+  const tco3yr = effectiveBuildCost + 3 * effectiveAnnualRun
+  const effectiveROI = tco3yr ? Math.round((cum3yrValue - tco3yr) / tco3yr * 100) : null
+
   return (
     <div className="space-y-4">
       <button className="btn-secondary text-sm" onClick={onBack}>
@@ -275,16 +298,16 @@ function JointCaseDetail({
         />
         <CaseStat
           label="Cost"
-          value={fmtDollarsExact(jointCase.build_cost)}
+          value={fmtDollarsExact(effectiveBuildCost)}
           accent="#2272B4"
-          sub={`build + ${fmtDollarsExact(jointCase.annual_run)}/yr run`}
+          sub={`build + ${fmtDollarsExact(effectiveAnnualRun)}/yr run`}
         />
         <CaseStat
           label="ROI (3-yr TCO)"
-          value={jointCase.roi_pct != null ? `${jointCase.roi_pct}%` : '—'}
+          value={effectiveROI != null ? `${effectiveROI}%` : '—'}
           accent="#00A972"
           sub={
-            jointCase.payback_months != null ? `payback ${jointCase.payback_months} mo` : undefined
+            effectivePaybackMonths != null ? `payback ${effectivePaybackMonths} mo` : undefined
           }
         />
         <CaseStat
