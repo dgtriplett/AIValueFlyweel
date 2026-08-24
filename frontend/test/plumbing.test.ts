@@ -2083,3 +2083,65 @@ tests['the AI-recs shelf is closed on first load and persists its open choice'] 
   // The children only mount when open — so the LLM-backed inner queries stay lazy.
   assert.match(source, /\{open && <div/)
 }
+
+// ---------------------------------------------------------------------------
+// Phase 3: Executive read-only experience
+// ---------------------------------------------------------------------------
+
+tests['readOnlyForPersona returns true for executive, false otherwise'] = async () => {
+  const { readOnlyForPersona } = await import('../src/context/RoleContext')
+  assert.equal(readOnlyForPersona('executive'), true)
+  assert.equal(readOnlyForPersona('pm'), false)
+  assert.equal(readOnlyForPersona('admin'), false)
+}
+
+tests['PortfolioView imports useReadOnly and hides mutating controls'] = () => {
+  const source = readFileSync('src/views/PortfolioView.tsx', 'utf8')
+  // Hook is imported and used
+  assert.match(source, /import { useReadOnly } from/)
+  assert.match(source, /const readOnly = useReadOnly\(\)/)
+  // New Use Case button is gated
+  assert.match(source, /\{!readOnly && \(/)
+  assert.match(source, /New Use Case/)
+  // Delete buttons are gated
+  assert.match(source, /<Trash2/)
+  // Status dropdown is made read-only for executives (shows span instead of select)
+  assert.match(source, /\{readOnly \? \(/)
+}
+
+tests['CatalogView hides Add buttons and checkboxes for executives'] = () => {
+  const source = readFileSync('src/views/CatalogView.tsx', 'utf8')
+  // Hook is imported and used
+  assert.match(source, /import { useReadOnly } from/)
+  assert.match(source, /const readOnly = useReadOnly\(\)/)
+  // Bulk add button is gated
+  assert.match(source, /\{!readOnly && pending\.length > 0/)
+  // Individual add buttons are gated
+  assert.match(source, /<Plus className="w-3\.5 h-3\.5" \/> Add/)
+  // Checkboxes and "In portfolio" toggles handled for read-only
+  assert.match(source, /\{readOnly \?/)
+}
+
+tests['RoadmapView disables drag and hides mutation buttons for executives'] = () => {
+  const source = readFileSync('src/views/RoadmapView.tsx', 'utf8')
+  // Hook is imported and used
+  assert.match(source, /import { useReadOnly } from/)
+  assert.match(source, /const readOnly = useReadOnly\(\)/)
+  // Action buttons (Regenerate, Confirm & save) are gated
+  assert.match(source, /\{!readOnly && \(/)
+  assert.match(source, /Confirm &amp; save/)
+  // Drag is disabled (draggable prop conditional)
+  assert.match(source, /draggable=\{!readOnly\}/)
+}
+
+tests['DashboardsView and ExecutiveView remain read-only (no mutating controls)'] = () => {
+  const dashSource = readFileSync('src/views/DashboardsView.tsx', 'utf8')
+  const execSource = readFileSync('src/views/ExecutiveView.tsx', 'utf8')
+  // DashboardsView has no create/edit/delete buttons (charts only)
+  assert.doesNotMatch(dashSource, /<Plus/)
+  assert.doesNotMatch(dashSource, /<Trash/)
+  // ExecutiveView has download button only (no mutations)
+  assert.match(execSource, /<Download/)
+  assert.doesNotMatch(execSource, /<Plus/)
+  assert.doesNotMatch(execSource, /<Trash/)
+}

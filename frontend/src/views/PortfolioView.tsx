@@ -38,6 +38,7 @@ import { SourceRecommendPanel } from '../components/SourceRecommendPanel'
 import { AiRecommendationsPanel } from '../components/AiRecommendationsPanel'
 import { KANBAN_ENABLED_KEY, readBoolPref, writeBoolPref } from '../lib/prefs'
 import { matchesUseCase, useFilters } from '../context/FilterContext'
+import { useReadOnly } from '../context/RoleContext'
 import type { Lob, Readiness, Status, UseCase } from '../types'
 
 // The catalog panel carries its own recommender query and table, and most
@@ -91,6 +92,7 @@ export function PortfolioView({
 }) {
   const queryClient = useQueryClient()
   const { filters } = useFilters()
+  const readOnly = useReadOnly()
   const [view, setView] = useState<'table' | 'kanban'>('table')
   // Kanban is offered by default; a local preference can turn it off. When it
   // is off the toggle hides the Kanban option and the view is forced to 'table'.
@@ -280,9 +282,11 @@ export function PortfolioView({
             Show Kanban board
           </label>
         </div>
-        <button className="btn-primary text-sm" onClick={() => onNew?.()}>
-          <Plus className="w-4 h-4" /> New Use Case
-        </button>
+        {!readOnly && (
+          <button className="btn-primary text-sm" onClick={() => onNew?.()}>
+            <Plus className="w-4 h-4" /> New Use Case
+          </button>
+        )}
       </div>
 
       {loading && <div className="text-navy-400">Loading…</div>}
@@ -336,7 +340,7 @@ export function PortfolioView({
                   Hyp. value
                 </SortableHeader>
                 <th className="text-left px-3 py-2.5 font-medium">Realized</th>
-                <th className="px-3 py-2.5" />
+                {!readOnly && <th className="px-3 py-2.5" />}
               </tr>
             </thead>
             <tbody>
@@ -359,31 +363,43 @@ export function PortfolioView({
                     </span>
                   </td>
                   <td className="px-3 py-2.5" onClick={(event) => event.stopPropagation()}>
-                    <select
-                      id={`status-${useCase.id}`}
-                      name={`status-${useCase.id}`}
-                      aria-label={`Status for ${useCase.title}`}
-                      value={useCase.status ?? 'not_started'}
-                      disabled={setStatus.isPending}
-                      onChange={(event) =>
-                        setStatus.mutate({ id: useCase.id, status: event.target.value })
-                      }
-                      className="text-xs font-semibold rounded-full px-2 py-1 border bg-navy-800 cursor-pointer focus:outline-none focus:ring-1 focus:ring-info"
-                      style={{
-                        color: STATUS_COLORS[useCase.status ?? 'not_started'],
-                        borderColor: `${STATUS_COLORS[useCase.status ?? 'not_started']}66`,
-                      }}
-                    >
-                      {STATUSES.map((status) => (
-                        <option
-                          key={status}
-                          value={status}
-                          style={{ color: '#E6EDF3', background: '#0B2026' }}
-                        >
-                          {STATUS_LABELS[status]}
-                        </option>
-                      ))}
-                    </select>
+                    {readOnly ? (
+                      <span
+                        className="text-xs font-semibold rounded-full px-2 py-1 border"
+                        style={{
+                          color: STATUS_COLORS[useCase.status ?? 'not_started'],
+                          borderColor: `${STATUS_COLORS[useCase.status ?? 'not_started']}66`,
+                        }}
+                      >
+                        {STATUS_LABELS[useCase.status ?? 'not_started']}
+                      </span>
+                    ) : (
+                      <select
+                        id={`status-${useCase.id}`}
+                        name={`status-${useCase.id}`}
+                        aria-label={`Status for ${useCase.title}`}
+                        value={useCase.status ?? 'not_started'}
+                        disabled={setStatus.isPending}
+                        onChange={(event) =>
+                          setStatus.mutate({ id: useCase.id, status: event.target.value })
+                        }
+                        className="text-xs font-semibold rounded-full px-2 py-1 border bg-navy-800 cursor-pointer focus:outline-none focus:ring-1 focus:ring-info"
+                        style={{
+                          color: STATUS_COLORS[useCase.status ?? 'not_started'],
+                          borderColor: `${STATUS_COLORS[useCase.status ?? 'not_started']}66`,
+                        }}
+                      >
+                        {STATUSES.map((status) => (
+                          <option
+                            key={status}
+                            value={status}
+                            style={{ color: '#E6EDF3', background: '#0B2026' }}
+                          >
+                            {STATUS_LABELS[status]}
+                          </option>
+                        ))}
+                      </select>
+                    )}
                   </td>
                   <td className="px-3 py-2.5">
                     <ReadinessBadge
@@ -400,18 +416,20 @@ export function PortfolioView({
                       ? fmtMoney(useCase.realized.value)
                       : '—'}
                   </td>
-                  <td className="px-3 py-2.5">
-                    <button
-                      aria-label={`Delete ${useCase.title}`}
-                      className="text-navy-600 hover:text-lava"
-                      onClick={(event) => {
-                        event.stopPropagation()
-                        if (confirm(`Delete "${useCase.title}"?`)) remove.mutate(useCase.id)
-                      }}
-                    >
-                      <Trash2 className="w-4 h-4" />
-                    </button>
-                  </td>
+                  {!readOnly && (
+                    <td className="px-3 py-2.5">
+                      <button
+                        aria-label={`Delete ${useCase.title}`}
+                        className="text-navy-600 hover:text-lava"
+                        onClick={(event) => {
+                          event.stopPropagation()
+                          if (confirm(`Delete "${useCase.title}"?`)) remove.mutate(useCase.id)
+                        }}
+                      >
+                        <Trash2 className="w-4 h-4" />
+                      </button>
+                    </td>
+                  )}
                 </tr>
               ))}
             </tbody>

@@ -13,6 +13,7 @@ import { api } from '../api'
 import { LOB_COLORS, fmtMoney, subVerticalLabel } from '../constants'
 import { ReadinessBadge } from '../components/Badges'
 import { matchesUseCase, useFilters } from '../context/FilterContext'
+import { useReadOnly } from '../context/RoleContext'
 import type { Lob } from '../types'
 
 export default function CatalogView({
@@ -24,6 +25,7 @@ export default function CatalogView({
 }) {
   const queryClient = useQueryClient()
   const { filters } = useFilters()
+  const readOnly = useReadOnly()
   const [selected, setSelected] = useState<Set<number>>(new Set())
 
   const catalog = useQuery({
@@ -134,13 +136,15 @@ export default function CatalogView({
                     </div>
                     <div className="text-xs text-navy-300 mt-1">{rec.rationale}</div>
                   </button>
-                  <button
-                    className="btn-primary text-xs whitespace-nowrap flex items-center gap-1 disabled:opacity-50"
-                    disabled={toggleOne.isPending}
-                    onClick={() => toggleOne.mutate({ id: rec.id, inp: true })}
-                  >
-                    <Plus className="w-3.5 h-3.5" /> Add
-                  </button>
+                  {!readOnly && (
+                    <button
+                      className="btn-primary text-xs whitespace-nowrap flex items-center gap-1 disabled:opacity-50"
+                      disabled={toggleOne.isPending}
+                      onClick={() => toggleOne.mutate({ id: rec.id, inp: true })}
+                    >
+                      <Plus className="w-3.5 h-3.5" /> Add
+                    </button>
+                  )}
                 </div>
               ))}
             </div>
@@ -154,7 +158,7 @@ export default function CatalogView({
           catalog use cases · <span className="text-success font-medium">{inPortfolioCount}</span> in
           your portfolio
         </div>
-        {pending.length > 0 && (
+        {!readOnly && pending.length > 0 && (
           <button
             className="btn-primary text-sm flex items-center gap-1.5 disabled:opacity-50"
             disabled={addMany.isPending}
@@ -175,7 +179,7 @@ export default function CatalogView({
           <table data-gaCustomerVisibility="1" className="w-full text-sm min-w-[900px]">
             <thead className="text-xs uppercase text-navy-500 border-b border-navy-600">
               <tr>
-                <th className="w-10 px-3 py-2.5" />
+                {!readOnly && <th className="w-10 px-3 py-2.5" />}
                 <th className="text-left px-3 py-2.5 font-medium">Use case</th>
                 <th className="text-left px-3 py-2.5 font-medium">Domain</th>
                 <th className="text-left px-3 py-2.5 font-medium">Focus</th>
@@ -191,20 +195,22 @@ export default function CatalogView({
                   className="border-b border-navy-600 hover:bg-lava/5 cursor-pointer"
                   onClick={() => onOpen?.(useCase.id)}
                 >
-                  <td className="px-3 py-2.5" onClick={(event) => event.stopPropagation()}>
-                    <input
-                      type="checkbox"
-                      aria-label={`Select ${useCase.title}`}
-                      checked={selected.has(useCase.id)}
-                      disabled={useCase.in_portfolio ?? false}
-                      onChange={(event) => {
-                        const next = new Set(selected)
-                        if (event.target.checked) next.add(useCase.id)
-                        else next.delete(useCase.id)
-                        setSelected(next)
-                      }}
-                    />
-                  </td>
+                  {!readOnly && (
+                    <td className="px-3 py-2.5" onClick={(event) => event.stopPropagation()}>
+                      <input
+                        type="checkbox"
+                        aria-label={`Select ${useCase.title}`}
+                        checked={selected.has(useCase.id)}
+                        disabled={useCase.in_portfolio ?? false}
+                        onChange={(event) => {
+                          const next = new Set(selected)
+                          if (event.target.checked) next.add(useCase.id)
+                          else next.delete(useCase.id)
+                          setSelected(next)
+                        }}
+                      />
+                    </td>
+                  )}
                   <td className="px-3 py-2.5 font-medium text-white">{useCase.title}</td>
                   <td className="px-3 py-2.5">
                     <span className="inline-flex items-center gap-1.5 text-navy-300">
@@ -228,7 +234,15 @@ export default function CatalogView({
                     {fmtMoney(useCase.computed_value)}
                   </td>
                   <td className="px-3 py-2.5 text-right" onClick={(event) => event.stopPropagation()}>
-                    {useCase.in_portfolio ? (
+                    {readOnly ? (
+                      useCase.in_portfolio ? (
+                        <span className="badge-muted inline-flex items-center gap-1 text-success">
+                          <CircleCheck className="w-3.5 h-3.5" /> In portfolio
+                        </span>
+                      ) : (
+                        <span className="text-xs text-navy-500">—</span>
+                      )
+                    ) : useCase.in_portfolio ? (
                       <button
                         className="badge-muted inline-flex items-center gap-1 text-success hover:text-lava-300 disabled:opacity-50"
                         disabled={toggleOne.isPending}
@@ -246,7 +260,7 @@ export default function CatalogView({
                       >
                         <Plus className="w-3.5 h-3.5" /> Add
                       </button>
-                    )}
+                    ))}
                   </td>
                 </tr>
               ))}
