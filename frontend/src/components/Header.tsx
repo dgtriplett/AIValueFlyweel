@@ -26,7 +26,7 @@ import {
   Users,
 } from 'lucide-react'
 import type { ReactNode } from 'react'
-import { useRole, type Persona } from '../context/RoleContext'
+import { useRole, usePersona, type Persona } from '../context/RoleContext'
 
 export type TabId =
   | 'portfolio'
@@ -239,7 +239,7 @@ export const TABS: Tab[] = [
  * find it without opening a menu. It was previously in neither TABS nor a group,
  * which left OnboardingView reachable only by editing state by hand.
  */
-const NAV_GROUPS: { label: string; ids: TabId[] }[] = [
+const ALL_NAV_GROUPS: { label: string; ids: TabId[] }[] = [
   {
     label: 'Portfolio',
     ids: ['portfolio', 'flywheel', 'registry', 'dashboards', 'coverage', 'whatif', 'trend'],
@@ -256,6 +256,85 @@ const NAV_GROUPS: { label: string; ids: TabId[] }[] = [
 /** The entry-point surface: outside the groups, always one click away. */
 const ENTRY_TAB: TabId = 'onboarding'
 const TOOL_TABS: TabId[] = ['generate', 'roadmap_import', 'proposals']
+
+/**
+ * PHASE 2: PERSONA-AWARE NAVIGATION FILTERING
+ *
+ * Returns the subset of nav groups + tabs visible to the given persona.
+ *
+ * ADMIN sees EVERYTHING (no filtering).
+ *
+ * PM (portfolio manager) sees:
+ *   - Portfolio group: all tabs including 'registry' (data asset management)
+ *   - Plan & Fund: roadmap, funding (NOT executive — that's for executives)
+ *   - Value: both tabs
+ *   - Knowledge: knowledge, glossary, artifacts (READ surfaces only — NOT
+ *     sourcemapping, taxonomy, rules, which are admin-only CURATION)
+ *   - Generation tools: generate, proposals, roadmap_import
+ *   - Onboarding
+ *   - NO Settings
+ *
+ * EXECUTIVE sees MINIMAL read-only set:
+ *   - dashboards (from Portfolio)
+ *   - executive (from Plan & Fund)
+ *   - roadmap (from Plan & Fund)
+ *   - portfolio (from Portfolio, read-only)
+ *   - NOTHING else
+ */
+function filterNavForPersona(persona: Persona): {
+  groups: { label: string; ids: TabId[] }[]
+  entryTab: TabId | null
+  toolTabs: TabId[]
+} {
+  if (persona === 'admin') {
+    // Admin sees EVERYTHING — no filtering.
+    return { groups: ALL_NAV_GROUPS, entryTab: ENTRY_TAB, toolTabs: TOOL_TABS }
+  }
+
+  if (persona === 'executive') {
+    // Executive sees MINIMAL read-only set: dashboards, executive, roadmap, portfolio.
+    // Presented as two groups for clarity.
+    return {
+      groups: [
+        { label: 'Portfolio', ids: ['portfolio', 'dashboards'] },
+        { label: 'Plan & Fund', ids: ['roadmap', 'executive'] },
+      ],
+      entryTab: null,
+      toolTabs: [],
+    }
+  }
+
+  // PM sees:
+  //   - Full Portfolio group (all tabs including registry)
+  //   - Plan & Fund: roadmap, funding (NOT executive)
+  //   - Value: both tabs
+  //   - Knowledge: read surfaces only (knowledge, glossary, artifacts — NOT curation)
+  //   - All generation tools
+  //   - Onboarding
+  return {
+    groups: [
+      {
+        label: 'Portfolio',
+        ids: ['portfolio', 'flywheel', 'registry', 'dashboards', 'coverage', 'whatif', 'trend'],
+      },
+      { label: 'Plan & Fund', ids: ['roadmap', 'funding'] },
+      { label: 'Value', ids: ['value', 'research'] },
+      { label: 'Knowledge', ids: ['knowledge', 'glossary', 'artifacts'] },
+    ],
+    entryTab: ENTRY_TAB,
+    toolTabs: TOOL_TABS,
+  }
+}
+
+/** Collect all TabIds that are visible to a persona, for fallback logic. */
+export
+function visibleTabsForPersona(persona: Persona): Set<TabId> {
+  const filtered = filterNavForPersona(persona)
+  const ids = filtered.groups.flatMap((g) => g.ids)
+  if (filtered.entryTab) ids.push(filtered.entryTab)
+  ids.push(...filtered.toolTabs)
+  return new Set(ids)
+}
 
 /** The console is a separate dependency-free page; these are its entry points. */
 const CONSOLE_LINKS = [
@@ -434,6 +513,8 @@ export function Header({
   setTab: (id: TabId) => void
   branding?: HeaderBranding | null
 }) {
+  const activePersona = usePersona()
+  const { groups: NAV_GROUPS, entryTab, toolTabs } = filterNavForPersona(activePersona)
   const [openMenu, setOpenMenu] = useState<string | null>(null)
   const navRef = useRef<HTMLElement | null>(null)
 
@@ -457,7 +538,7 @@ export function Header({
     }
   }, [openMenu])
 
-  const entry = TABS.find((candidate) => candidate.id === ENTRY_TAB)
+  const entry = entryTab ? TABS.find((candidate) => candidate.id === entryTab) : null
 
   // Use branding when available, fall back to defaults
   const displayName = branding?.display_name ?? 'AI Value Flywheel'
@@ -537,7 +618,7 @@ export function Header({
           ) : null}
 
           <div className="ml-auto flex items-center gap-1">
-            {TOOL_TABS.map((id) => {
+            {toolTabs.map((id) => {
               const item = TABS.find((candidate) => candidate.id === id)
               if (!item) return null
               return (
@@ -581,6 +662,8 @@ function PersonaSwitcher() {
   const { activePersona, setPersona, isExecLocked, loading } = useRole()
 
   if (loading) return null
+  // Phase 2: hide switcher for exec-locked users (they cannot switch anyway)
+  if (isExecLocked) return null
 
   const personas: Array<{ value: Persona; label: string }> = [
     { value: 'admin', label: 'Admin' },

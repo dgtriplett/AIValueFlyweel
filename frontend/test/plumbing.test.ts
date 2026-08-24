@@ -1526,3 +1526,118 @@ async function main(): Promise<void> {
 }
 
 void main()
+
+// ---------------------------------------------------------------------------
+// Phase 2 — persona-aware navigation filtering
+// ---------------------------------------------------------------------------
+
+tests['admin persona sees all nav groups and all tabs'] = () => {
+  // Import the Header module to access the visibleTabsForPersona function
+  const { visibleTabsForPersona } = require('../src/components/Header')
+  
+  const adminTabs = visibleTabsForPersona('admin')
+  
+  // Admin should see ALL tabs (the full superset)
+  const allExpected = [
+    'portfolio', 'flywheel', 'registry', 'dashboards', 'coverage', 'whatif', 'trend',
+    'roadmap', 'funding', 'executive',
+    'value', 'research',
+    'knowledge', 'glossary', 'taxonomy', 'sourcemapping', 'rules', 'artifacts',
+    'accounts', 'admin', 'branding',
+    'onboarding',
+    'generate', 'roadmap_import', 'proposals',
+  ]
+  
+  for (const tab of allExpected) {
+    assert.ok(adminTabs.has(tab as any), `admin should see ${tab}`)
+  }
+}
+
+tests['pm persona sees registry but NOT admin-only curation or settings'] = () => {
+  const { visibleTabsForPersona } = require('../src/components/Header')
+  
+  const pmTabs = visibleTabsForPersona('pm')
+  
+  // PM SHOULD see:
+  const pmExpected = [
+    'portfolio', 'flywheel', 'registry', 'dashboards', 'coverage', 'whatif', 'trend',
+    'roadmap', 'funding', // NOT executive
+    'value', 'research',
+    'knowledge', 'glossary', 'artifacts', // NOT sourcemapping, taxonomy, rules
+    'onboarding',
+    'generate', 'roadmap_import', 'proposals',
+  ]
+  
+  for (const tab of pmExpected) {
+    assert.ok(pmTabs.has(tab as any), `pm should see ${tab}`)
+  }
+  
+  // PM should NOT see admin-only tabs
+  const pmForbidden = ['sourcemapping', 'taxonomy', 'rules', 'accounts', 'admin', 'branding', 'executive']
+  
+  for (const tab of pmForbidden) {
+    assert.ok(!pmTabs.has(tab as any), `pm should NOT see ${tab}`)
+  }
+  
+  // CRITICAL: pm MUST see 'registry' (data asset management is a PM job)
+  assert.ok(pmTabs.has('registry'), 'pm must see registry (data asset management)')
+}
+
+tests['executive persona sees only the minimal read-only set'] = () => {
+  const { visibleTabsForPersona } = require('../src/components/Header')
+  
+  const execTabs = visibleTabsForPersona('executive')
+  
+  // Executive sees ONLY: portfolio, dashboards, roadmap, executive
+  const execExpected = ['portfolio', 'dashboards', 'roadmap', 'executive']
+  
+  assert.equal(execTabs.size, execExpected.length, 
+    `executive should see exactly ${execExpected.length} tabs, got ${execTabs.size}`)
+  
+  for (const tab of execExpected) {
+    assert.ok(execTabs.has(tab as any), `executive should see ${tab}`)
+  }
+  
+  // Executive should NOT see anything else
+  const execForbidden = [
+    'flywheel', 'registry', 'coverage', 'whatif', 'trend',
+    'funding', 'value', 'research',
+    'knowledge', 'glossary', 'taxonomy', 'sourcemapping', 'rules', 'artifacts',
+    'accounts', 'admin', 'branding',
+    'onboarding',
+    'generate', 'roadmap_import', 'proposals',
+  ]
+  
+  for (const tab of execForbidden) {
+    assert.ok(!execTabs.has(tab as any), `executive should NOT see ${tab}`)
+  }
+}
+
+tests['persona filtering is mutation-worthy: test would fail if pm set is wrong'] = () => {
+  const { visibleTabsForPersona } = require('../src/components/Header')
+  
+  const pmTabs = visibleTabsForPersona('pm')
+  
+  // This test explicitly checks the BOUNDARY cases that make it mutation-worthy:
+  // 1. PM MUST see 'registry' (not admin-only)
+  assert.ok(pmTabs.has('registry'), 
+    'MUTATION CHECK: pm must see registry — if this fails, the PM set is wrong')
+  
+  // 2. PM must NOT see 'accounts' (that IS admin-only)
+  assert.ok(!pmTabs.has('accounts'), 
+    'MUTATION CHECK: pm must NOT see accounts — if this fails, the PM set is wrong')
+  
+  // 3. PM must NOT see 'rules' (curation is admin-only)
+  assert.ok(!pmTabs.has('rules'), 
+    'MUTATION CHECK: pm must NOT see rules — if this fails, the PM set is wrong')
+  
+  // 4. PM must NOT see 'executive' (that's for executives)
+  assert.ok(!pmTabs.has('executive'), 
+    'MUTATION CHECK: pm must NOT see executive — if this fails, the PM set is wrong')
+  
+  // 5. Executive must NOT see 'funding' (only PM and admin see that)
+  const execTabs = visibleTabsForPersona('executive')
+  assert.ok(!execTabs.has('funding'), 
+    'MUTATION CHECK: executive must NOT see funding — if this fails, the executive set is wrong')
+}
+
