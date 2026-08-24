@@ -575,11 +575,11 @@ export function Header({
           <div className="flex items-center gap-3">
             {env ? (
               <span
-                className="badge-muted inline-flex items-center gap-1"
+                className={env.toUpperCase() === 'PROD' ? 'badge-high inline-flex items-center gap-1' : 'badge-muted inline-flex items-center gap-1'}
                 title="Deployment environment"
               >
                 <Activity className="w-3 h-3" />
-                {env}
+                {env.toUpperCase()}
               </span>
             ) : null}
             <PersonaSwitcher />
