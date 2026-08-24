@@ -146,6 +146,15 @@ written back to Lakebase, which stays the portfolio's system of record.
   non-destructive — only updates NULL/empty values so user edits are preserved. Uses
   natural-key matching (source_system, module) to work across environments. Complements
   the inline-edit UI added to DataAssetDrawer (pencil icon → editable fields → Save/Cancel).
+- **Asset detail content FIX** — `019_asset_detail_content_fix.sql`: corrects migration
+  018, which used the WRONG natural key (source_system, module) instead of the CORRECT
+  canonical key (source_category, module) documented in `scripts/seed_lib.py`. As a result,
+  only 41 of 146 assets were populated; 105 remained NULL. This migration fills those 105
+  assets using the correct key, matching the tone and confidence-derivation approach of 018.
+  Also populates uc_requires_asset.rationale for 734 edges with concise, category-derived
+  rationale (e.g., "Provides X data from Y category required for this use case"). Idempotent
+  and non-destructive — only updates NULL/empty values. Creates helper function
+  `update_asset_detail_by_category` keyed on (source_category, module).
 - **Migration ledger** — `schema_migrations`, created by `server/migrator.py`
   rather than by a numbered migration, since it must exist before the ledger can
   be consulted.
