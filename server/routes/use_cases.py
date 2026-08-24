@@ -387,6 +387,84 @@ async def get_use_case_detail(uc_id: int):
     required_assets = [a for a in required_list if a.get("criticality") == "required"]
     helpful_assets = [a for a in required_list if a.get("criticality") == "helpful"]
 
+    # BUG 2 FIX: Include domain-path requirements (uc_requires_domain) so the detail
+    # pane matches the readiness badge. A required domain is satisfied when ANY serving
+    # asset is curated/governed, mirroring readiness.py's logic. For domains with no
+    # serving assets, surface the domain itself as a required item.
+    domain_reqs = await db.fetch(
+        """SELECT urd.domain_id, urd.necessity, dd.name AS domain_name, dd.label AS domain_label,
+                  urd.rationale
+           FROM uc_requires_domain urd
+           JOIN data_domains dd ON dd.id = urd.domain_id
+           WHERE urd.use_case_id = $1
+             AND COALESCE(dd.is_active, true) = true
+           ORDER BY urd.necessity, dd.label""",
+        uc_id,
+    )
+
+    # For each domain requirement, resolve its serving assets
+    for domain_req in domain_reqs:
+        domain_id = domain_req["domain_id"]
+        necessity = domain_req["necessity"]
+        domain_name = domain_req["domain_name"]
+        domain_label = domain_req["domain_label"]
+        rationale = domain_req["rationale"] or f"Required domain: {domain_label}"
+
+        # Find all assets that serve this domain, with per-account status overlay
+        serving_assets = await db.fetch(
+            """SELECT da.*,
+                      COALESCE(acs.ingestion_status, da.ingestion_status) AS ingestion_status
+               FROM asset_serves_domain asd
+               JOIN data_assets da ON da.id = asd.data_asset_id
+               LEFT JOIN account_asset_status acs
+                      ON acs.data_asset_id = da.id AND acs.account_id = $2
+               WHERE asd.domain_id = $1
+               ORDER BY da.source_system, da.module""",
+            domain_id, account_id,
+        )
+
+        if serving_assets:
+            # Add each serving asset to the appropriate list (required/helpful)
+            for asset_row in serving_assets:
+                asset_dict = dict(asset_row)
+                asset_dict["criticality"] = necessity
+                asset_dict["rationale"] = rationale
+                asset_dict["via_domain"] = True  # Mark as coming from domain path
+                asset_dict["domain_name"] = domain_name
+                asset_dict["domain_label"] = domain_label
+
+                # Check if this asset is already in the list (from module path)
+                asset_id = asset_dict["id"]
+                already_present = any(a.get("id") == asset_id for a in (required_list if necessity == "required" else []))
+                already_present = already_present or any(a.get("id") == asset_id for a in (helpful_assets if necessity == "helpful" else []))
+
+                if not already_present:
+                    if necessity == "required":
+                        required_assets.append(asset_dict)
+                    else:
+                        helpful_assets.append(asset_dict)
+        else:
+            # No serving assets for this domain — surface the DOMAIN itself as a requirement
+            # so the user sees WHAT is required rather than an empty list
+            domain_item = {
+                "id": None,  # No asset id
+                "domain_id": domain_id,
+                "domain_name": domain_name,
+                "domain_label": domain_label,
+                "source_system": None,
+                "module": f"[Domain] {domain_label}",
+                "description": "Required data domain with no serving assets yet",
+                "criticality": necessity,
+                "rationale": rationale,
+                "ingestion_status": "not_started",
+                "is_domain_placeholder": True,  # Flag to help frontend render differently
+            }
+            if necessity == "required":
+                required_assets.append(domain_item)
+            else:
+                helpful_assets.append(domain_item)
+
+
     if account_id is not None:
         values = await db.fetch(
             "SELECT * FROM value_records WHERE account_id=$1 AND use_case_id = $2 ORDER BY id",
