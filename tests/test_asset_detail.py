@@ -150,5 +150,89 @@ class TestDataAssetDetailRequiredBy(unittest.TestCase):
         self.assertEqual(result["required_by"][1]["readiness"], "nearly_ready")
 
 
+class TestDataAssetDescriptiveFieldsRoundtrip(unittest.TestCase):
+    """PART B.3: PUT /data-assets/{id} must persist the four new descriptive fields."""
+
+    def test_put_roundtrips_descriptive_fields(self):
+        """Updating an asset with provides/steward/source_of_record/refresh_cadence must persist all four."""
+        db = FakeDB()
+
+        # Mock the UPDATE query returning the updated row
+        updated_row = Row(
+            id=10,
+            source_system="ERP",
+            module="Plant Maintenance",
+            source_category="ERP",
+            description="Maintenance tracking",
+            ingestion_status="landed",
+            provides="Work orders and equipment records",
+            steward="Corporate Services team",
+            source_of_record="SAP ERP PM",
+            refresh_cadence="Daily batch",
+            sub_vertical="cross",
+            uc_catalog="gridvalue",
+            uc_schema="erp",
+            owning_lob_id=1,
+            origin="catalog",
+            vendor=None,
+            auto_captured=False,
+            status_user_edited=False,
+        )
+
+        db.on("UPDATE data_assets SET", [updated_row])
+        db.on("INSERT INTO account_asset_status", None)
+        db.on("SELECT lob_id FROM data_asset_lobs", [])
+        db.on("DELETE FROM data_asset_lobs", None)
+        db.on("INSERT INTO data_asset_lobs", None)
+        db.on("INSERT INTO audit_log", None)
+
+        body = {
+            "source_category": "ERP",
+            "vendor": None,
+            "module": "Plant Maintenance",
+            "description": "Maintenance tracking",
+            "sub_vertical": "cross",
+            "ingestion_status": "landed",
+            "uc_catalog": "gridvalue",
+            "uc_schema": "erp",
+            "owning_lob_id": 1,
+            "benefiting_lob_ids": [],
+            "provides": "Work orders and equipment records",
+            "steward": "Corporate Services team",
+            "source_of_record": "SAP ERP PM",
+            "refresh_cadence": "Daily batch",
+        }
+
+        from server.routes.data_assets import DataAssetIn
+        from fastapi import Request
+        from unittest.mock import MagicMock
+
+        with patch("server.routes.data_assets.db", db), \
+             patch("server.routes.data_assets.accounts") as mock_accounts, \
+             patch("server.routes.data_assets.current_user") as mock_user, \
+             patch("server.routes.data_assets.write_audit", new_callable=AsyncMock):
+            mock_accounts.current = AsyncMock(return_value=123)
+            mock_user.return_value = "test_user"
+
+            request = MagicMock(spec=Request)
+            result = run(data_assets.update_data_asset(10, DataAssetIn(**body), request))
+
+        # Verify all four descriptive fields are in the result
+        self.assertEqual(result["provides"], "Work orders and equipment records")
+        self.assertEqual(result["steward"], "Corporate Services team")
+        self.assertEqual(result["source_of_record"], "SAP ERP PM")
+        self.assertEqual(result["refresh_cadence"], "Daily batch")
+
+        # Verify the UPDATE query was executed (it should be in db.queries)
+        update_queries = [q for q in db.queries if "UPDATE data_assets SET" in q]
+        self.assertTrue(len(update_queries) > 0, "UPDATE query should have been called")
+        update_query = update_queries[0]
+        # Check that the query includes the four new fields as parameters
+        self.assertIn("provides=", update_query)
+        self.assertIn("refresh_cadence=", update_query)
+        self.assertIn("steward=", update_query)
+        self.assertIn("source_of_record=", update_query)
+
+
 if __name__ == "__main__":
     unittest.main()
