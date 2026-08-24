@@ -11,6 +11,7 @@ import { Database, Layers, TrendingUp, Zap } from 'lucide-react'
 import { api } from './api'
 import { fmtMoney } from './constants'
 import { FilterProvider } from './context/FilterContext'
+import { RoleProvider } from './context/RoleContext'
 import { EulaGate } from './components/EulaGate'
 import { FilterBar } from './components/FilterBar'
 import { AssistantPanel } from './components/AssistantPanel'
@@ -312,10 +313,15 @@ export default function App() {
     // if it happened while filter state was being torn down, and so the fixed
     // viewport it renders is a sibling of the shell rather than inside <main>'s
     // stacking context — a toast that loses a z-index fight is a toast nobody sees.
+    //
+    // RoleProvider wraps everything so identity + persona are available everywhere,
+    // and loads ONCE on app mount (no remount on navigation).
     <ToastProvider>
-      <FilterProvider>
-        <AppShell />
-      </FilterProvider>
+      <RoleProvider>
+        <FilterProvider>
+          <AppShell />
+        </FilterProvider>
+      </RoleProvider>
     </ToastProvider>
   )
 }

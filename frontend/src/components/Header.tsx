@@ -26,6 +26,7 @@ import {
   Users,
 } from 'lucide-react'
 import type { ReactNode } from 'react'
+import { useRole, type Persona } from '../context/RoleContext'
 
 export type TabId =
   | 'portfolio'
@@ -502,6 +503,7 @@ export function Header({
                 {env}
               </span>
             ) : null}
+            <PersonaSwitcher />
           </div>
         </div>
 
@@ -565,5 +567,43 @@ export function Header({
         </nav>
       </div>
     </header>
+  )
+}
+
+/**
+ * Minimal persona switcher for Phase 1. Lets users self-select their persona
+ * ('admin' | 'pm' | 'executive') unless they're exec-locked.
+ *
+ * Phase 1: establishes the switcher; the UI does NOT yet react to persona.
+ * Phase 2+: nav/views adapt based on activePersona.
+ */
+function PersonaSwitcher() {
+  const { activePersona, setPersona, isExecLocked, loading } = useRole()
+
+  if (loading) return null
+
+  const personas: Array<{ value: Persona; label: string }> = [
+    { value: 'admin', label: 'Admin' },
+    { value: 'pm', label: 'PM' },
+    { value: 'executive', label: 'Executive' },
+  ]
+
+  return (
+    <div className="flex items-center gap-2">
+      <span className="text-xs text-navy-400">Persona:</span>
+      <select
+        value={activePersona}
+        onChange={(e) => setPersona(e.target.value as Persona)}
+        disabled={isExecLocked}
+        className="text-xs bg-navy-700 text-navy-200 border border-navy-600 rounded px-2 py-1 disabled:opacity-50 disabled:cursor-not-allowed"
+        title={isExecLocked ? 'Persona is locked by admin' : 'Switch persona'}
+      >
+        {personas.map((p) => (
+          <option key={p.value} value={p.value}>
+            {p.label}
+          </option>
+        ))}
+      </select>
+    </div>
   )
 }
