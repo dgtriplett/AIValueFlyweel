@@ -301,7 +301,13 @@ export function PortfolioView({
             <div className="text-white font-medium">Your portfolio is empty</div>
             <div className="text-navy-400 text-sm mt-1 max-w-md mx-auto">
               Switch to the <span className="text-lava-300">Catalog</span> to bring in predefined
-              ideas, or add your own with <span className="text-lava-300">New use case</span>.
+              ideas
+              {!readOnly && (
+                <>
+                  , or add your own with <span className="text-lava-300">New use case</span>
+                </>
+              )}
+              .
             </div>
             <div className="flex items-center justify-center gap-2 mt-4">
               {onScope && (
@@ -312,12 +318,14 @@ export function PortfolioView({
                   <BookOpen className="w-4 h-4" /> Browse the catalog
                 </button>
               )}
-              <button
-                className="btn-secondary text-sm flex items-center gap-1.5"
-                onClick={() => onNew?.()}
-              >
-                <Plus className="w-4 h-4" /> Add your own
-              </button>
+              {!readOnly && (
+                <button
+                  className="btn-secondary text-sm flex items-center gap-1.5"
+                  onClick={() => onNew?.()}
+                >
+                  <Plus className="w-4 h-4" /> Add your own
+                </button>
+              )}
             </div>
           </div>
         ) : (

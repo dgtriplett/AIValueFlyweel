@@ -260,7 +260,7 @@ export default function CatalogView({
                       >
                         <Plus className="w-3.5 h-3.5" /> Add
                       </button>
-                    ))}
+                    )}
                   </td>
                 </tr>
               ))}
