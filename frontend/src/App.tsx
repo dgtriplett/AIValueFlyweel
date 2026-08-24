@@ -335,7 +335,7 @@ function AppShell() {
         />
       ) : null}
 
-      <AssistantPanel />
+      <AssistantPanel hidden={drawerUcId != null || pageUcId != null} />
       <EulaGate />
     </div>
   )

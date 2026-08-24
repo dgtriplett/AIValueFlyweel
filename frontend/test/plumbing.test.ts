@@ -1249,7 +1249,7 @@ tests['there is exactly one assistant panel — the Genie duplicate is gone'] = 
   assert.ok(components.includes('AssistantPanel.tsx'), 'the consolidated AssistantPanel must exist')
   assert.ok(!components.includes('GeniePanel.tsx'), 'the redundant GeniePanel must be removed')
   const app = readFileSync('src/App.tsx', 'utf8')
-  assert.match(app, /<AssistantPanel\s*\/>/, 'App mounts the one AssistantPanel')
+  assert.match(app, /<AssistantPanel\b/, 'App mounts the one AssistantPanel')
   assert.doesNotMatch(app, /GeniePanel/, 'App no longer references the removed GeniePanel')
 }
 
@@ -2242,4 +2242,63 @@ tests['DashboardsView and ExecutiveView remain read-only (no mutating controls)'
   assert.match(execSource, /<Download/)
   assert.doesNotMatch(execSource, /<Plus/)
   assert.doesNotMatch(execSource, /<Trash/)
+}
+
+// ---------------------------------------------------------------------------
+// FAB FIX — AssistantPanel hides when use-case detail overlay is open
+//
+// The bug: the floating FAB (fixed bottom-5 right-5 z-40) sits atop the
+// use-case detail's own bottom-right controls (comments Add button, Save).
+// The fix: App.tsx passes `hidden={drawerUcId != null || pageUcId != null}`
+// to AssistantPanel, which returns null (renders nothing) when hidden is true.
+// This pins three claims:
+//   1. AssistantPanel accepts a `hidden` prop and renders null when it's true.
+//   2. App.tsx wires the prop to the detail-open state (either drawer or page).
+//   3. The FAB no longer fights the drawer's z-index — it's not there at all
+//      when the drawer/page is open.
+// ---------------------------------------------------------------------------
+
+tests['AssistantPanel accepts a hidden prop and renders nothing when hidden is true'] = () => {
+  const source = readFileSync('src/components/AssistantPanel.tsx', 'utf8')
+  // The component must accept a hidden prop in its props interface.
+  assert.match(source, /interface AssistantPanelProps \{[\s\S]*?hidden\?:\s*boolean/)
+  // The component must return null (render nothing) when hidden is true.
+  assert.match(source, /if \(hidden\) return null/)
+  // The default value is false (not hidden), so omitting the prop renders the FAB.
+  assert.match(source, /hidden = false/)
+}
+
+tests['App.tsx wires AssistantPanel.hidden to the detail-open state'] = () => {
+  const source = readFileSync('src/App.tsx', 'utf8')
+  // App tracks which use-case detail is open: drawerUcId and pageUcId.
+  assert.match(source, /const \[drawerUcId, setDrawerUcId\] = useState<number \| null>\(null\)/)
+  assert.match(source, /const \[pageUcId, setPageUcId\] = useState<number \| null>\(null\)/)
+  // AssistantPanel is passed `hidden={drawerUcId != null || pageUcId != null}`.
+  assert.match(
+    source,
+    /<AssistantPanel hidden=\{drawerUcId != null \|\| pageUcId != null\} \/>/,
+    'AssistantPanel must be hidden when any use-case detail overlay is open',
+  )
+}
+
+tests['the FAB no longer overlaps the drawer by hiding entirely when detail is open'] = () => {
+  const assistantSource = readFileSync('src/components/AssistantPanel.tsx', 'utf8')
+  const appSource = readFileSync('src/App.tsx', 'utf8')
+  // The FAB was at `fixed bottom-5 right-5 z-40` — the same z-index as the drawer.
+  // The fix is to hide the FAB entirely (return null) when a detail is open, so
+  // there's no overlap: the FAB is not rendered at all. This is cleanest because:
+  //   - toasts own bottom-left (z-50)
+  //   - the header owns top-right (z-30)
+  //   - the detail drawer/page owns the whole screen (z-40) with controls at bottom-right
+  //   - moving the FAB to a different corner would collide with toasts or the header
+  // Hiding it when the detail is open avoids all collisions.
+  assert.match(assistantSource, /if \(hidden\) return null/)
+  // The FAB is still bottom-right when it renders (nothing moved).
+  assert.match(assistantSource, /fixed bottom-5 right-5 z-40/)
+  // App conditionally hides it based on drawer/page open state.
+  assert.match(appSource, /<AssistantPanel hidden=\{drawerUcId != null \|\| pageUcId != null\}/)
+  // MUTATION CHECK: the drawer/page are still z-40 and inset-0 (covering the screen).
+  // If they moved z-index, this fix might be wrong. This pins that they stayed put.
+  const drawerSource = readFileSync('src/components/UseCaseDrawer.tsx', 'utf8')
+  assert.match(drawerSource, /fixed inset-0 z-40/)
 }
