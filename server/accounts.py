@@ -560,15 +560,15 @@ async def scope_clause_at(param_index: int, alias: str = "") -> tuple[str, list]
 # ---------------------------------------------------------------------------
 async def resolve_role(email: str | None, request) -> str:
     """Resolve a user's role (one of 'admin'|'pm'|'executive').
-    
+
     Resolution order (fail-closed):
       1. If email is on GRID_ATLAS_ADMINS allowlist -> 'admin' ALWAYS
          (bootstrap, lockout-proof).
       2. Else look up app_users.role for that email; if a row exists, return it.
       3. Else default 'pm' (authenticated user with no explicit role).
-      
+
     email=None (unauthenticated) -> 'pm' (read-only default), is_admin=False.
-    
+
     FAIL-CLOSED: any DB error resolving role must NOT grant admin; fall back to
     non-admin 'pm'.
     """
