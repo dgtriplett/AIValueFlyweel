@@ -82,6 +82,106 @@ function multiplierOf(component: ValueComponent): number {
   return typeof component.multiplier === 'number' ? component.multiplier : 1
 }
 
+/** A resolved value assumption: its number plus the label/unit used to render it. */
+interface AssumptionMeta {
+  value: number
+  label: string
+  unit: string | null
+}
+
+/**
+ * Format a single assumption operand for the explicit formula, e.g. `$120k`,
+ * `4,000 MW`, `5 LOBs`, `2.5%`. Money-unit assumptions ($M / $/hr / $/yr …) get
+ * a currency prefix; everything else renders the number with its unit as a suffix.
+ */
+function formatAssumptionOperand(meta: AssumptionMeta): string {
+  const { value, unit } = meta
+  const abbrev = (n: number): string => {
+    const abs = Math.abs(n)
+    if (abs >= 1e9) return `${(n / 1e9).toFixed(2)}B`
+    if (abs >= 1e6) return `${(n / 1e6).toFixed(2)}M`
+    if (abs >= 1e3) return `${(n / 1e3).toFixed(0)}k`
+    if (abs > 0 && abs < 1) return n.toPrecision(3)
+    return `${n}`
+  }
+  const u = unit ?? ''
+  if (u === '$M') return `$${abbrev(value * 1e6)}`
+  if (u.startsWith('$')) return `$${abbrev(value)} ${u}`.trim()
+  if (u === '%') return `${value}%`
+  if (u === 'count' || u === '') return abbrev(value)
+  return `${abbrev(value)} ${u}`
+}
+
+/**
+ * The one shared piece of value math, made explicit: a component's annual value
+ * ($M) is the entered multiplier times the product of every assumption it
+ * references. Returned as the subtotal PLUS the resolved operands, so the same
+ * computation drives both the running total and the per-line formula the user
+ * reads. If an operand is missing we treat it as 0 (matching the total math).
+ */
+function computeComponentValue(
+  component: ValueComponent,
+  multiplier: number,
+  assumptions: Record<string, AssumptionMeta>,
+): { subtotal: number; operands: AssumptionMeta[] } {
+  const operands: AssumptionMeta[] = []
+  let subtotal = multiplier
+  for (const key of component.assumptionKeys ?? []) {
+    const meta = assumptions[key] ?? { value: 0, label: key, unit: null }
+    operands.push(meta)
+    subtotal *= meta.value
+  }
+  return { subtotal, operands }
+}
+
+/**
+ * The explicit, dynamic per-component formula line. Reads:
+ *   `Labor savings = 3.0 (multiplier) × $120k (avg loaded cost) × 5 (LOBs) = $1.8M`
+ * The base label is the component's stored `calculationDisplay`; the operands and
+ * subtotal are resolved LIVE from the multiplier the user is editing, so the line
+ * recomputes as they type. Rendered identically for the hypothesized and realized
+ * editors — only the driving multiplier differs.
+ */
+function ComponentFormula({
+  component,
+  multiplier,
+  assumptions,
+  tone,
+}: {
+  component: ValueComponent
+  multiplier: number
+  assumptions: Record<string, AssumptionMeta>
+  tone: 'lava' | 'success'
+}): JSX.Element {
+  const { subtotal, operands } = computeComponentValue(component, multiplier, assumptions)
+  const subtotalClass = tone === 'success' ? 'text-success' : 'text-lava-300'
+  return (
+    <div data-uc-formula className="mt-1 text-[11px] leading-relaxed text-navy-500">
+      {component.calculationDisplay ? (
+        <span className="block text-navy-500">{component.calculationDisplay}</span>
+      ) : null}
+      <span className="font-mono">
+        <span className="text-navy-300">= </span>
+        <span className="text-navy-200" data-uc-formula-multiplier>
+          {multiplier}
+        </span>
+        <span className="text-navy-500"> (multiplier)</span>
+        {operands.map((operand, opIndex) => (
+          <span key={opIndex}>
+            <span className="text-navy-500"> × </span>
+            <span className="text-navy-200">{formatAssumptionOperand(operand)}</span>
+            <span className="text-navy-500"> ({operand.label})</span>
+          </span>
+        ))}
+        <span className="text-navy-300"> = </span>
+        <span className={`font-semibold ${subtotalClass}`} data-uc-formula-subtotal>
+          {fmtMoney(subtotal)}
+        </span>
+      </span>
+    </div>
+  )
+}
+
 /** Which chrome wraps the shared detail body. */
 type DetailLayout = 'drawer' | 'page'
 
@@ -405,28 +505,46 @@ function UseCaseDetail({
   const lobName = (id?: number | null) =>
     id != null ? (lobs.find((lob) => lob.id === id)?.name ?? '—') : '—'
 
-  const assumptionValues: Record<string, number> = {}
+  // Resolve every shared assumption to its number PLUS the label/unit the formula
+  // renders — so the per-component formula lines can name the operand they multiply
+  // (e.g. `$120k (avg loaded cost)`) instead of just showing a bare number.
+  const assumptionMeta: Record<string, AssumptionMeta> = {}
   ;(assumptionsQuery.data ?? []).forEach((assumption) => {
-    assumptionValues[assumption.key] = assumption.value
+    assumptionMeta[assumption.key] = {
+      value: assumption.value,
+      label: assumption.label ?? assumption.key,
+      unit: assumption.unit ?? null,
+    }
   })
 
   const components = detail?.hypothesized_value_json?.components ?? []
 
-  // Realized value is recomputed from the SHARED assumptions rather than stored,
-  // so editing a global assumption re-quantifies every use case at once.
-  const calculatedRealized = components.reduce((total, component, index) => {
-    let value = actuals[index] ?? multiplierOf(component)
-    for (const key of component.assumptionKeys ?? []) value *= assumptionValues[key] ?? 0
-    return total + value
-  }, 0)
+  // Both totals sum the SAME per-component math (`computeComponentValue`) that the
+  // explicit formula lines render, so the number the user reads on each line adds
+  // up to the running total exactly. Realized/hypothesized differ only in which
+  // edited multiplier map drives them (actuals vs hypActuals) — recomputed live
+  // from the shared assumptions, so a global assumption edit re-quantifies both.
+  const calculatedRealized = components.reduce(
+    (total, component, index) =>
+      total +
+      computeComponentValue(
+        component,
+        actuals[index] ?? multiplierOf(component),
+        assumptionMeta,
+      ).subtotal,
+    0,
+  )
 
-  // Live hypothesized total — same math as calculatedRealized but driven by the
-  // hypothesized multiplier edits (hypActuals). Recomputed from shared assumptions.
-  const calculatedHypothesized = components.reduce((total, component, index) => {
-    let value = hypActuals[index] ?? multiplierOf(component)
-    for (const key of component.assumptionKeys ?? []) value *= assumptionValues[key] ?? 0
-    return total + value
-  }, 0)
+  const calculatedHypothesized = components.reduce(
+    (total, component, index) =>
+      total +
+      computeComponentValue(
+        component,
+        hypActuals[index] ?? multiplierOf(component),
+        assumptionMeta,
+      ).subtotal,
+    0,
+  )
 
   // Milestone / stage indicator (feedback item A.3b): a clearer read of where this
   // use case sits in its lifecycle, built from the EXISTING status field and the
@@ -885,39 +1003,60 @@ function UseCaseDetail({
               {hypMode === 'calculated' ? (
                 <div className="space-y-2">
                   <p className="text-xs text-navy-500">
-                    Enter the hypothesized multiplier per component. Uses the shared
-                    assumptions, so changing a global assumption re-quantifies this too.
+                    Enter the <span className="text-navy-300">hypothesized multiplier</span>{' '}
+                    per component — the one number you set. Each line multiplies it by the
+                    shared assumption value(s) below to produce that component&apos;s subtotal;
+                    the formula and subtotal recompute live as you edit. Changing a global
+                    assumption re-quantifies this too.
                   </p>
-                  {components.map((component, index) => (
-                    <div
-                      key={index}
-                      className="flex items-center justify-between gap-2 text-xs"
-                    >
-                      <span className="flex-1 text-navy-300">
-                        {component.name}
-                        <span className="block text-navy-500">
-                          {component.calculationDisplay}
-                        </span>
-                      </span>
-                      <input
-                        id={`uc-hyp-actual-${index}`}
-                        name={`uc-hyp-actual-${index}`}
-                        aria-label={`Hypothesized multiplier for ${component.name}`}
-                        type="number"
-                        step="any"
-                        className="input-field w-32 text-right"
-                        value={hypActuals[index] ?? multiplierOf(component)}
-                        onChange={(event) =>
-                          setHypActuals((current) => ({
-                            ...current,
-                            [index]: Number(event.target.value),
-                          }))
-                        }
-                      />
-                    </div>
-                  ))}
+                  {components.map((component, index) => {
+                    const multiplier = hypActuals[index] ?? multiplierOf(component)
+                    return (
+                      <div
+                        key={index}
+                        data-uc-component-row
+                        className="rounded border border-navy-600/60 bg-navy-800/40 p-2 text-xs"
+                      >
+                        <div className="flex items-center justify-between gap-2">
+                          <span className="flex-1 text-navy-300 font-medium">
+                            {component.name}
+                          </span>
+                          <label
+                            htmlFor={`uc-hyp-actual-${index}`}
+                            className="text-navy-500 whitespace-nowrap"
+                          >
+                            Hypothesized multiplier
+                          </label>
+                          <input
+                            id={`uc-hyp-actual-${index}`}
+                            name={`uc-hyp-actual-${index}`}
+                            aria-label={`Hypothesized multiplier for ${component.name}`}
+                            type="number"
+                            step="any"
+                            className="input-field w-28 text-right"
+                            value={multiplier}
+                            onChange={(event) =>
+                              setHypActuals((current) => ({
+                                ...current,
+                                [index]: Number(event.target.value),
+                              }))
+                            }
+                          />
+                        </div>
+                        <ComponentFormula
+                          component={component}
+                          multiplier={multiplier}
+                          assumptions={assumptionMeta}
+                          tone="lava"
+                        />
+                      </div>
+                    )
+                  })}
                   <div className="pt-2 border-t border-navy-600 flex justify-between text-sm">
-                    <span className="text-navy-400">Calculated hypothesized / yr</span>
+                    <span className="text-navy-400">
+                      Calculated hypothesized / yr{' '}
+                      <span className="text-navy-500">(sum of component subtotals)</span>
+                    </span>
                     <span className="text-lava-300 font-bold">
                       {fmtMoney(calculatedHypothesized)}
                     </span>
@@ -1007,35 +1146,61 @@ function UseCaseDetail({
               {realizedMode === 'calculated' ? (
                 <div className="space-y-2">
                   <p className="text-xs text-navy-500">
-                    Enter the actual achieved multiplier per component (defaults to
-                    hypothesized). Uses the shared assumptions, so changing a global
-                    assumption re-quantifies this too.
+                    Enter the{' '}
+                    <span className="text-navy-300">achieved multiplier per component</span>{' '}
+                    (defaults to the hypothesized one) — the one number you set. Each line
+                    multiplies it by the shared assumption value(s) below to produce that
+                    component&apos;s subtotal; the formula and subtotal recompute live as you
+                    edit. Changing a global assumption re-quantifies this too.
                   </p>
-                  {components.map((component, index) => (
-                    <div
-                      key={index}
-                      className="flex items-center justify-between gap-2 text-xs"
-                    >
-                      <span className="flex-1 text-navy-300">{component.name}</span>
-                      <input
-                        id={`uc-actual-${index}`}
-                        name={`uc-actual-${index}`}
-                        aria-label={`Actual multiplier for ${component.name}`}
-                        type="number"
-                        step="any"
-                        className="input-field w-32 text-right"
-                        value={actuals[index] ?? multiplierOf(component)}
-                        onChange={(event) =>
-                          setActuals((current) => ({
-                            ...current,
-                            [index]: Number(event.target.value),
-                          }))
-                        }
-                      />
-                    </div>
-                  ))}
+                  {components.map((component, index) => {
+                    const multiplier = actuals[index] ?? multiplierOf(component)
+                    return (
+                      <div
+                        key={index}
+                        data-uc-component-row
+                        className="rounded border border-navy-600/60 bg-navy-800/40 p-2 text-xs"
+                      >
+                        <div className="flex items-center justify-between gap-2">
+                          <span className="flex-1 text-navy-300 font-medium">
+                            {component.name}
+                          </span>
+                          <label
+                            htmlFor={`uc-actual-${index}`}
+                            className="text-navy-500 whitespace-nowrap"
+                          >
+                            Achieved multiplier
+                          </label>
+                          <input
+                            id={`uc-actual-${index}`}
+                            name={`uc-actual-${index}`}
+                            aria-label={`Actual multiplier for ${component.name}`}
+                            type="number"
+                            step="any"
+                            className="input-field w-28 text-right"
+                            value={multiplier}
+                            onChange={(event) =>
+                              setActuals((current) => ({
+                                ...current,
+                                [index]: Number(event.target.value),
+                              }))
+                            }
+                          />
+                        </div>
+                        <ComponentFormula
+                          component={component}
+                          multiplier={multiplier}
+                          assumptions={assumptionMeta}
+                          tone="success"
+                        />
+                      </div>
+                    )
+                  })}
                   <div className="pt-2 border-t border-navy-600 flex justify-between text-sm">
-                    <span className="text-navy-400">Calculated realized / yr</span>
+                    <span className="text-navy-400">
+                      Calculated realized / yr{' '}
+                      <span className="text-navy-500">(sum of component subtotals)</span>
+                    </span>
                     <span className="text-success font-bold">
                       {fmtMoney(calculatedRealized)}
                     </span>
