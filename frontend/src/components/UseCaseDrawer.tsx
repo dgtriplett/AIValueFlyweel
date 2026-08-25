@@ -708,7 +708,7 @@ function UseCaseDetail({
                 </span>
               </div>
               <div className="text-xs text-navy-400">
-                {detail.required_ready}/{detail.required_total} required assets ready
+                {detail.required_ready}/{detail.required_total} required {detail.requirement_model === 'domain' ? 'data domains satisfied' : 'assets ready'}
               </div>
             </div>
 
@@ -746,6 +746,31 @@ function UseCaseDetail({
                 </div>
               </div>
 
+              {components.length === 0 ? (
+                // No value model yet - show estimate button
+                <div className="space-y-3 py-4">
+                  <p className="text-sm text-navy-400">
+                    No value model yet. Generate an initial estimate to unlock the
+                    Calculate and Override features.
+                  </p>
+                  <button
+                    className="btn-primary text-sm"
+                    onClick={async () => {
+                      if (!detail?.id) return
+                      try {
+                        await api.estimateUseCaseValue(detail.id)
+                        // Invalidate the detail query to refetch with new hypothesized_value_json
+                        queryClient.invalidateQueries({ queryKey: ['use-case-detail', detail.id] })
+                      } catch (err) {
+                        console.error('Failed to estimate value:', err)
+                      }
+                    }}
+                  >
+                    Estimate value
+                  </button>
+                </div>
+              ) : (
+                <>
               {detail.value_range ? (
                 <div className="text-sm text-navy-300 mb-2">
                   <span className="text-lava-300 font-bold text-lg">
@@ -856,6 +881,8 @@ function UseCaseDetail({
                   Save hypothesized
                 </button>
               </div>
+              </>
+              )}
             </section>
 
             <section className="card p-4">
@@ -989,33 +1016,72 @@ function UseCaseDetail({
                 ) : null}
               </h3>
               <div className="space-y-1">
-                {(detail.required_assets ?? []).map((asset) => (
-                  <button
-                    key={asset.id}
-                    className="w-full flex items-center justify-between text-sm border-b border-navy-600 py-1.5 hover:bg-navy-700/50 px-1 rounded text-left"
-                    onClick={() => onOpenDataAsset(asset.id)}
-                  >
-                    <span className="text-navy-300">
-                      <span className="text-lava-300">{asset.source_system}</span> ·{' '}
-                      {asset.module}
-                    </span>
-                    <div className="flex items-center gap-2">
-                      <IngestionBadge status={asset.ingestion_status} />
-                      {editing ? (
-                        <button
-                          aria-label={`Remove required module ${asset.module}`}
-                          title="Remove this required module"
-                          className="text-navy-500 hover:text-lava disabled:opacity-40"
-                          disabled={removeRequired.isPending}
-                          onClick={(e) => {
-                            e.stopPropagation()
-                            removeRequired.mutate(asset.id)
-                          }}
+                {detail.requirement_model === 'domain' && detail.required_domains?.length ? (
+                  // Domain-path: group serving assets by domain
+                  detail.required_domains.map((domain) => (
+                    <div key={domain.domain_id} className="space-y-0.5">
+                      <div className="text-xs font-semibold text-navy-400 px-1 py-0.5 flex items-center gap-2">
+                        <span>{domain.domain_name}</span>
+                        <span
+                          className={`badge-${domain.satisfied ? 'high' : 'muted'} text-[10px]`}
                         >
-                          <X className="w-3.5 h-3.5" />
+                          {domain.satisfied ? 'covered' : 'pending'}
+                        </span>
+                      </div>
+                      {domain.serving_assets.map((asset) => (
+                        <button
+                          key={asset.id}
+                          className="w-full flex items-center justify-between text-sm border-b border-navy-600 py-1.5 hover:bg-navy-700/50 px-1 rounded text-left ml-3"
+                          onClick={() => onOpenDataAsset(asset.id)}
+                        >
+                          <span className="text-navy-300 text-xs">
+                            <span className="text-lava-300">{asset.source_system}</span> ·{" "}
+                            {asset.module}
+                            {domain.satisfied && asset.ingestion_status !== 'governed' && asset.ingestion_status !== 'curated' ? (
+                              <span className="ml-2 text-[10px] text-navy-500">(domain covered)</span>
+                            ) : null}
+                          </span>
+                          <IngestionBadge status={asset.ingestion_status} />
                         </button>
-                      ) : null}
+                      ))}
                     </div>
+                  ))
+                ) : (
+                  // Module-path or fallback: flat list (existing behavior)
+                  (detail.required_assets ?? []).map((asset) => (
+                    <button
+                      key={asset.id}
+                      className="w-full flex items-center justify-between text-sm border-b border-navy-600 py-1.5 hover:bg-navy-700/50 px-1 rounded text-left"
+                      onClick={() => onOpenDataAsset(asset.id)}
+                    >
+                      <span className="text-navy-300">
+                        <span className="text-lava-300">{asset.source_system}</span> ·{" "}
+                        {asset.module}
+                      </span>
+                      <div className="flex items-center gap-2">
+                        <IngestionBadge status={asset.ingestion_status} />
+                        {editing ? (
+                          <button
+                            aria-label={`Remove required module ${asset.module}`}
+                            title="Remove this required module"
+                            className="text-navy-500 hover:text-lava disabled:opacity-40"
+                            disabled={removeRequired.isPending}
+                            onClick={(e) => {
+                              e.stopPropagation()
+                              removeRequired.mutate(asset.id)
+                            }}
+                          >
+                            <X className="w-3.5 h-3.5" />
+                          </button>
+                        ) : null}
+                      </div>
+                    </button>
+                  ))
+                )}
+                {(detail.required_assets ?? []).length === 0 ? (
+                  <div className="text-xs text-navy-500">No required modules.</div>
+                ) : null}
+              </div>
                   </button>
                 ))}
                 {(detail.required_assets ?? []).length === 0 ? (
