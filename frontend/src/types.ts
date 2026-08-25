@@ -180,6 +180,28 @@ export interface AtRiskResponse {
   total: number
 }
 
+/** One quarter on the value-realization timeline
+ *  (GET /api/use-cases/portfolio/value-timeline). Projected annual value landing
+ *  in this quarter and the running cumulative through it. */
+export interface ValueTimelineBucket {
+  quarter: string
+  use_case_count: number
+  value_landing: number
+  cumulative_value: number
+}
+
+/** Use cases with no target go-live date for this account: counted, but off the
+ *  curve because there is no quarter to plot them in. */
+export interface ValueTimelineUnscheduled {
+  use_case_count: number
+  value_landing: number
+}
+
+export interface ValueTimelineResponse {
+  series: ValueTimelineBucket[]
+  unscheduled: ValueTimelineUnscheduled
+}
+
 export interface RequiredDomain {
   domain_id: number
   domain_name: string

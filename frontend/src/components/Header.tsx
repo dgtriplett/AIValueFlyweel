@@ -24,6 +24,7 @@ import {
   Shield,
   SlidersVertical,
   Tags,
+  TrendingUp,
   Users,
 } from 'lucide-react'
 import type { ReactNode } from 'react'
@@ -39,6 +40,7 @@ export type TabId =
   | 'value'
   | 'coverage'
   | 'atrisk'
+  | 'timeline'
   | 'whatif'
   | 'trend'
   | 'glossary'
@@ -128,6 +130,12 @@ export const TABS: Tab[] = [
     label: 'At Risk',
     icon: <AlertTriangle className="w-4 h-4" />,
     hint: 'Use cases slipping or overdue, why, and how often',
+  },
+  {
+    id: 'timeline',
+    label: 'Value Timeline',
+    icon: <TrendingUp className="w-4 h-4" />,
+    hint: 'When projected value is expected to land, by quarter',
   },
   {
     id: 'whatif',
@@ -251,7 +259,7 @@ export const TABS: Tab[] = [
 const ALL_NAV_GROUPS: { label: string; ids: TabId[] }[] = [
   {
     label: 'Portfolio',
-    ids: ['portfolio', 'flywheel', 'registry', 'dashboards', 'coverage', 'atrisk', 'whatif', 'trend'],
+    ids: ['portfolio', 'flywheel', 'registry', 'dashboards', 'coverage', 'atrisk', 'timeline', 'whatif', 'trend'],
   },
   { label: 'Plan & Fund', ids: ['roadmap', 'funding', 'executive'] },
   { label: 'Value', ids: ['value', 'research'] },
@@ -309,7 +317,7 @@ function filterNavForPersona(persona: Persona): {
     // Presented as two groups for clarity.
     return {
       groups: [
-        { label: 'Portfolio', ids: ['portfolio', 'dashboards', 'atrisk'] },
+        { label: 'Portfolio', ids: ['portfolio', 'dashboards', 'atrisk', 'timeline'] },
         { label: 'Plan & Fund', ids: ['roadmap', 'executive'] },
       ],
       entryTab: null,
@@ -327,7 +335,7 @@ function filterNavForPersona(persona: Persona): {
     groups: [
       {
         label: 'Portfolio',
-        ids: ['portfolio', 'flywheel', 'registry', 'dashboards', 'coverage', 'atrisk', 'whatif', 'trend'],
+        ids: ['portfolio', 'flywheel', 'registry', 'dashboards', 'coverage', 'atrisk', 'timeline', 'whatif', 'trend'],
       },
       { label: 'Plan & Fund', ids: ['roadmap', 'funding'] },
       { label: 'Value', ids: ['value', 'research'] },

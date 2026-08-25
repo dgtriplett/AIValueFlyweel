@@ -257,6 +257,125 @@ async def at_risk_use_cases():
     return {"items": items, "total": len(items)}
 
 
+def _quarter_of(target) -> str:
+    """Render a date as its calendar quarter label, e.g. '2026-Q1'.
+
+    The bucket key is the quarter the target go-live falls in, so a use case
+    landing on 2026-02-14 lands the whole portfolio in 2026-Q1's column. Kept as a
+    tiny pure helper so the bucketing has one definition and the test can pin it.
+    """
+    quarter = (target.month - 1) // 3 + 1
+    return f"{target.year}-Q{quarter}"
+
+
+@router.get("/portfolio/value-timeline")
+async def value_timeline():
+    """The value-realization timeline: WHEN projected value is expected to land.
+
+    For the caller's portfolio, bucket each use case by the QUARTER of its target
+    go-live date (`account_use_case_progress.target_go_live_date`) and sum the
+    projected annual value landing in each quarter. The series is ordered by
+    quarter and carries a running cumulative so the Executive can read "how much
+    value is live/expected by end of Q3" straight off the curve. Value is REALIZED
+    where present, else HYPOTHESIZED - the same "actuals win" rule the rest of the
+    app uses - computed through the parameterized value engine so it reacts to the
+    account's calibrated assumptions.
+
+    SCOPING - this is the whole point, and the failure mode is a cross-tenant leak.
+    There is NO `use_cases.account_id` column; ownership of a non-catalog use case
+    is membership in `account_portfolio_use_cases`. So the working set is
+    `portfolio.use_case_visibility` (catalog OR in this account's portfolio),
+    exactly like the at-risk and detail routes. The progression tables are
+    account-scoped (`account_use_case_progress.account_id`), so we LEFT JOIN them
+    bound to the current account - a use case's target date is only THIS account's.
+    A use case with no target date for this account lands in the 'unscheduled'
+    bucket, reported separately rather than plotted on the curve.
+
+    Fail closed: with no resolvable account we cannot scope, so we return an empty
+    series rather than spanning every tenant's roadmap.
+    """
+    account_id = await accounts.current()
+    if account_id is None:
+        # No account resolved: refuse to answer rather than span tenants.
+        return {"series": [], "unscheduled": {"use_case_count": 0, "value_landing": 0.0}}
+
+    assumptions = await load_assumptions()
+
+    # $1 = account_id (portfolio membership + progression scope). The visibility
+    # predicate binds it again; both reference $1 so the account travels once.
+    visibility, _params = await portfolio.use_case_visibility(
+        "use_cases", param_index=1)
+
+    # LEFT JOIN progression so use cases with no target date for THIS account still
+    # come back - they belong in the unscheduled bucket, not dropped. Every visible
+    # use case counts toward the curve (or the unscheduled bucket); the value
+    # engine decides realized-vs-hypothesized per row.
+    sql = f"""
+        SELECT use_cases.id,
+               use_cases.status,
+               use_cases.hypothesized_value_json,
+               use_cases.realized_value_json,
+               use_cases.realized_override_enabled,
+               use_cases.realized_override_amount,
+               use_cases.realized_override_note,
+               p.target_go_live_date AS target_go_live_date
+          FROM use_cases
+          LEFT JOIN account_use_case_progress p
+            ON p.use_case_id = use_cases.id AND p.account_id = $1
+         WHERE {visibility}
+         ORDER BY use_cases.id
+    """
+    rows = await db.fetch(sql, account_id)
+
+    buckets: dict[str, dict] = {}
+    unscheduled_count = 0
+    unscheduled_value = 0.0
+
+    for r in rows:
+        uc = dict(r)
+        # Realized where present, else hypothesized - actuals win, same as the
+        # dashboards. compute_realized returns {"value": None} when there is none.
+        realized = compute_realized(uc, assumptions) or {}
+        value = realized.get("value")
+        if value is None:
+            rng = compute_value_range(uc.get("hypothesized_value_json"), assumptions)
+            value = rng["mid"] if rng else 0.0
+        value = float(value or 0.0)
+
+        target = uc.get("target_go_live_date")
+        if target is None:
+            unscheduled_count += 1
+            unscheduled_value += value
+            continue
+
+        quarter = _quarter_of(target)
+        bucket = buckets.setdefault(
+            quarter, {"quarter": quarter, "use_case_count": 0, "value_landing": 0.0})
+        bucket["use_case_count"] += 1
+        bucket["value_landing"] += value
+
+    # Order the curve chronologically and thread the running cumulative through it.
+    series = []
+    cumulative = 0.0
+    for quarter in sorted(buckets):
+        bucket = buckets[quarter]
+        cumulative += bucket["value_landing"]
+        series.append({
+            "quarter": quarter,
+            "use_case_count": bucket["use_case_count"],
+            "value_landing": round(bucket["value_landing"], 2),
+            "cumulative_value": round(cumulative, 2),
+        })
+
+    return {
+        "series": series,
+        "unscheduled": {
+            "use_case_count": unscheduled_count,
+            "value_landing": round(unscheduled_value, 2),
+        },
+    }
+
+
 @router.get("/{uc_id}")
 async def get_use_case(uc_id: int):
     row = await db.fetchrow("SELECT * FROM use_cases WHERE id = $1", uc_id)
