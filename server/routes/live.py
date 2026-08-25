@@ -1,7 +1,7 @@
 """Live Databricks integration endpoints."""
 from fastapi import APIRouter, Depends, Request
 
-from ..common import current_user
+from ..common import current_user, write_audit
 from ..lineage import system_tables_available
 from ..limits import limiter
 from ..live import mirror_to_uc, reconcile
@@ -32,6 +32,12 @@ async def sync(request: Request, apply: bool = True):
         await snap.capture_quietly(
             snap.REASON_SOURCE, actor=actor,
             detail=f"live sync advanced {changed} record(s) from system tables")
+        # A live sync that changed records is a sensitive, source-of-truth
+        # mutation from external system tables — record who ran it and what moved.
+        await write_audit("live_sync", None, "sync", actor, {
+            "asset_changes": len(result.get("asset_changes") or []),
+            "uc_changes": len(result.get("uc_changes") or []),
+        })
     return result
 
 

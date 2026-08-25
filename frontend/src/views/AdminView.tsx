@@ -31,7 +31,7 @@
 
 import { useState } from 'react'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
-import { Cloud, Database, Sparkles, Trash2, Users, UserPlus, Wand2, X } from 'lucide-react'
+import { Cloud, Database, Download, ScrollText, Search, Sparkles, Trash2, Users, UserPlus, Wand2, X } from 'lucide-react'
 
 import { api } from '../api'
 import { useRole } from '../context/RoleContext'
@@ -43,6 +43,8 @@ import { isApiError } from '../lib/errors'
 import { NO_RETRY } from '../lib/retry'
 import type {
   AppUser,
+  AuditLogEntry,
+  AuditLogFilters,
   ConfirmCardData,
   DemoStatusResponse,
   GenieProvisionResponse,
@@ -228,6 +230,9 @@ export function AdminView(): JSX.Element {
 
       {/* ---- Users ------------------------------------------------------------ */}
       {isAdmin ? <UsersSection /> : null}
+
+      {/* ---- Audit log -------------------------------------------------------- */}
+      {isAdmin ? <AuditSection /> : null}
 
       {/* ---- This instance ---------------------------------------------------- */}
       <div className="card space-y-2">
@@ -708,6 +713,210 @@ function UsersSection(): JSX.Element {
       ) : null}
     </div>
   )
+}
+
+/**
+ * Audit Log — the record of who changed what, admin-only (mirrors UsersSection).
+ *
+ * GET /api/audit is admin-gated and fails closed (403 for non-admins), so this
+ * section is only rendered for admins AND the query surfaces a plain "you may not
+ * be an administrator" banner if the server refuses. The table is newest-first and
+ * filterable by entity type / action / actor plus a free-text search over the diff.
+ * 'Export CSV' downloads the SAME filtered set through the shared `http` client (a
+ * blob GET, not an anchor href) so the error normalization applies and a 403 is a
+ * clean toast rather than a broken download.
+ */
+function AuditSection(): JSX.Element {
+  const reportError = useApiErrorToast()
+
+  // The live filter inputs. `applied` is what the query actually runs with, so the
+  // table does not refetch on every keystroke — the search box commits on submit.
+  const [entityType, setEntityType] = useState('')
+  const [action, setAction] = useState('')
+  const [actor, setActor] = useState('')
+  const [search, setSearch] = useState('')
+  const [applied, setApplied] = useState<AuditLogFilters>({})
+  const [exporting, setExporting] = useState(false)
+
+  const auditQuery = useQuery({
+    queryKey: ['audit', applied],
+    queryFn: () => api.getAuditLog({ ...applied, limit: 200 }),
+  })
+
+  const rows: AuditLogEntry[] = auditQuery.data ?? []
+
+  const runFilters = () => {
+    const next: AuditLogFilters = {}
+    if (entityType.trim()) next.entity_type = entityType.trim()
+    if (action.trim()) next.action = action.trim()
+    if (actor.trim()) next.actor = actor.trim()
+    if (search.trim()) next.search = search.trim()
+    setApplied(next)
+  }
+
+  const clearFilters = () => {
+    setEntityType('')
+    setAction('')
+    setActor('')
+    setSearch('')
+    setApplied({})
+  }
+
+  const exportCsv = async () => {
+    setExporting(true)
+    try {
+      const blob = await api.auditExportCsv(applied)
+      const url = URL.createObjectURL(blob)
+      const link = document.createElement('a')
+      link.href = url
+      link.download = 'audit_log.csv'
+      document.body.appendChild(link)
+      link.click()
+      link.remove()
+      URL.revokeObjectURL(url)
+    } catch (error) {
+      reportError(error, 'Could not export the audit log.')
+    } finally {
+      setExporting(false)
+    }
+  }
+
+  return (
+    <div className="card space-y-3">
+      <div className="flex items-center justify-between gap-2">
+        <div className="flex items-center gap-2">
+          <ScrollText className="w-4 h-4 text-navy-300" />
+          <h3 className="font-semibold text-white">Audit log</h3>
+        </div>
+        <button
+          className="btn-secondary text-sm inline-flex items-center gap-1"
+          disabled={exporting}
+          onClick={exportCsv}
+        >
+          <Download className="w-4 h-4" />
+          {exporting ? 'Exporting…' : 'Export CSV'}
+        </button>
+      </div>
+      <p className="text-sm text-navy-400 max-w-[78ch]">
+        Every sensitive change on this instance — role grants, demo loads/resets, Genie
+        provisioning, live syncs, value overrides and generated use cases — is recorded here
+        with who did it and when. Newest first. Viewing and exporting are admin-gated on the
+        server.
+      </p>
+
+      {/* Filters */}
+      <div className="flex flex-wrap items-end gap-2">
+        <div>
+          <label className="block text-xs text-navy-500 mb-1">Entity type</label>
+          <input
+            className="bg-navy-900 border border-navy-700 rounded px-2 py-1 text-white text-sm w-40"
+            placeholder="e.g. use_case"
+            value={entityType}
+            onChange={(event) => setEntityType(event.target.value)}
+            onKeyDown={(event) => event.key === 'Enter' && runFilters()}
+          />
+        </div>
+        <div>
+          <label className="block text-xs text-navy-500 mb-1">Action</label>
+          <input
+            className="bg-navy-900 border border-navy-700 rounded px-2 py-1 text-white text-sm w-40"
+            placeholder="e.g. value_override"
+            value={action}
+            onChange={(event) => setAction(event.target.value)}
+            onKeyDown={(event) => event.key === 'Enter' && runFilters()}
+          />
+        </div>
+        <div>
+          <label className="block text-xs text-navy-500 mb-1">Actor</label>
+          <input
+            className="bg-navy-900 border border-navy-700 rounded px-2 py-1 text-white text-sm w-48"
+            placeholder="person@utility.com"
+            value={actor}
+            onChange={(event) => setActor(event.target.value)}
+            onKeyDown={(event) => event.key === 'Enter' && runFilters()}
+          />
+        </div>
+        <div className="flex-1 min-w-[12rem]">
+          <label className="block text-xs text-navy-500 mb-1">Search diff</label>
+          <input
+            className="w-full bg-navy-900 border border-navy-700 rounded px-2 py-1 text-white text-sm"
+            placeholder="substring of the recorded diff"
+            value={search}
+            onChange={(event) => setSearch(event.target.value)}
+            onKeyDown={(event) => event.key === 'Enter' && runFilters()}
+          />
+        </div>
+        <button
+          className="btn-primary text-sm inline-flex items-center gap-1"
+          onClick={runFilters}
+        >
+          <Search className="w-4 h-4" />
+          Filter
+        </button>
+        <button className="btn-secondary text-sm" onClick={clearFilters}>
+          Clear
+        </button>
+      </div>
+
+      {auditQuery.isLoading ? (
+        <p className="text-sm text-navy-400">Loading audit log…</p>
+      ) : auditQuery.isError ? (
+        <Banner kind="err">Could not load the audit log. You may not be an administrator.</Banner>
+      ) : (
+        <div className="overflow-x-auto">
+          <table className="w-full text-sm">
+            <thead>
+              <tr className="text-left text-navy-500 border-b border-navy-800">
+                <th className="py-2 pr-3 font-medium">When</th>
+                <th className="py-2 pr-3 font-medium">Actor</th>
+                <th className="py-2 pr-3 font-medium">Entity</th>
+                <th className="py-2 pr-3 font-medium">Action</th>
+                <th className="py-2 font-medium">Diff</th>
+              </tr>
+            </thead>
+            <tbody>
+              {rows.length === 0 ? (
+                <tr>
+                  <td colSpan={5} className="py-3 text-navy-500">
+                    No audit entries match these filters.
+                  </td>
+                </tr>
+              ) : (
+                rows.map((row) => (
+                  <tr key={row.id} className="border-b border-navy-900 align-top">
+                    <td className="py-2 pr-3 text-navy-400 whitespace-nowrap">
+                      {row.created_at ? row.created_at.replace('T', ' ').slice(0, 19) : '—'}
+                    </td>
+                    <td className="py-2 pr-3 text-white whitespace-nowrap">{row.actor ?? '—'}</td>
+                    <td className="py-2 pr-3 text-navy-300 whitespace-nowrap">
+                      {row.entity_type}
+                      {row.entity_id != null ? <span className="text-navy-500">#{row.entity_id}</span> : null}
+                    </td>
+                    <td className="py-2 pr-3 text-navy-300 whitespace-nowrap">{row.action}</td>
+                    <td className="py-2 text-navy-400 font-mono text-xs max-w-[32rem] truncate" title={formatDiff(row.diff_json)}>
+                      {formatDiff(row.diff_json)}
+                    </td>
+                  </tr>
+                ))
+              )}
+            </tbody>
+          </table>
+        </div>
+      )}
+    </div>
+  )
+}
+
+/** Render a compact one-line view of a diff_json payload for the table cell. */
+function formatDiff(diff: unknown): string {
+  if (diff == null) return '—'
+  if (typeof diff === 'string') return diff
+  try {
+    const json = JSON.stringify(diff)
+    return json === '{}' ? '—' : json
+  } catch {
+    return String(diff)
+  }
 }
 
 export default AdminView

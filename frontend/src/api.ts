@@ -24,6 +24,8 @@ import type {
   CanonicalizeResponse,
   CleanupResponse,
   AppUser,
+  AuditLogEntry,
+  AuditLogFilters,
   CatalogRecommendResponse,
   ChatResponse,
   ClassificationRule,
@@ -1020,6 +1022,47 @@ export const api = {
         `/users/${encodeURIComponent(email)}`,
       )
       .then((r) => r.data),
+
+  // ---- Audit log (admin-only, Phase D) -------------------------------------
+
+  /**
+   * List recent audit-log rows, newest-first. ADMIN-GATED server-side (403 for
+   * non-admins). Filters (entity_type / action / actor / search) and `limit`
+   * (default 100, capped 500 server-side) are optional query params.
+   */
+  getAuditLog: (filters: AuditLogFilters = {}) =>
+    http
+      .get<{ audit_log: AuditLogEntry[] }>('/audit', { params: filters })
+      .then((r) => r.data.audit_log),
+
+  /**
+   * Relative URL of the CSV export for the given filters. ADMIN-GATED server-side.
+   * The audit log is account-agnostic, so no account header is required for
+   * correctness; the view downloads via `http` (a blob GET) so the shared error
+   * normalization still applies and a 403 surfaces as an ApiError rather than a
+   * broken download.
+   */
+  auditExportUrl: (filters: AuditLogFilters = {}) => {
+    const params = new URLSearchParams()
+    if (filters.entity_type) params.set('entity_type', filters.entity_type)
+    if (filters.action) params.set('action', filters.action)
+    if (filters.actor) params.set('actor', filters.actor)
+    if (filters.search) params.set('search', filters.search)
+    const qs = params.toString()
+    return `/api/audit/export.csv${qs ? `?${qs}` : ''}`
+  },
+
+  /** Download the filtered audit log as a CSV Blob (admin-gated). */
+  auditExportCsv: (filters: AuditLogFilters = {}) => {
+    const params: Record<string, string> = {}
+    if (filters.entity_type) params.entity_type = filters.entity_type
+    if (filters.action) params.action = filters.action
+    if (filters.actor) params.actor = filters.actor
+    if (filters.search) params.search = filters.search
+    return http
+      .get<Blob>('/audit/export.csv', { params, responseType: 'blob' })
+      .then((r) => r.data)
+  },
 
   // ---- Branding ------------------------------------------------------------
 
