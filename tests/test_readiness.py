@@ -220,6 +220,37 @@ class TestDualPath(unittest.TestCase):
             self.assertIn(key, out)
 
 
+    def test_domain_path_counts_assets_not_domains(self):
+        """CRITICAL FIX: domain path must count ASSETS (modules/datasets) not domains.
+
+        Before: domain path counted domains (e.g., 2 domains satisfied = 2/4).
+        After: domain path counts distinct serving assets (e.g., 4 governed assets
+        of 7 total = 4/7).
+
+        This test verifies the fix: a use case with 2 required domains serving 7
+        distinct assets (4 governed) should report required_total=7, required_ready=4,
+        NOT required_total=2, required_ready=2.
+
+        The old domain-count behavior would make this test FAIL.
+        """
+        # Use case 1 has 2 required domains:
+        #  - domain A serves 3 assets (asset IDs 101, 102, 103)
+        #  - domain B serves 4 assets (asset IDs 201, 202, 203, 204)
+        # Ready assets: [101, 102, 201, 202] = 4 governed of 7 total
+        # Old behavior: required_total=2 (domains), required_ready=2 (both satisfied)
+        # New behavior: required_total=7 (assets), required_ready=4 (governed assets)
+        fake = (FakeDB()
+                .on(MODULE_Q, [_module_row(1, 0, 0)])  # No module-path reqs
+                .on(DOMAIN_Q, [_domain_row(1, 7, 4)])  # 7 assets, 4 ready
+                .on(PREREQ_Q, []))
+        out = self._map(fake)[1]
+        self.assertEqual(out["requirement_model"], "domain")
+        self.assertEqual(out["required_total"], 7, "should count distinct assets, not domains")
+        self.assertEqual(out["required_ready"], 4, "should count governed assets")
+        # 4/7 = 0.571 >= 0.5 => nearly_ready (not shovel_ready)
+        self.assertEqual(out["readiness"], "nearly_ready")
+
+
 class TestSingleSourceOfTruth(unittest.TestCase):
     """The readiness rule must be defined exactly once.
 
