@@ -42,6 +42,7 @@ const OnboardingView = lazy(() => import('./views/OnboardingView'))
 // than weight in the entry bundle every visitor pays for.
 const CoverageView = lazy(() => import('./views/CoverageView'))
 const AtRiskView = lazy(() => import('./views/AtRiskView'))
+const ValueTimelineView = lazy(() => import('./views/ValueTimelineView'))
 const WhatIfView = lazy(() => import('./views/WhatIfView'))
 const TrendView = lazy(() => import('./views/TrendView'))
 const GlossaryView = lazy(() => import('./views/GlossaryView'))
@@ -243,6 +244,8 @@ function AppShell() {
         return <CoverageView />
       case 'atrisk':
         return <AtRiskView />
+      case 'timeline':
+        return <ValueTimelineView />
       case 'whatif':
         return <WhatIfView />
       case 'trend':
