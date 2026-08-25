@@ -162,6 +162,23 @@ export interface Progression {
   events: ProgressionEvent[]
 }
 
+/** One row of the at-risk rollup (GET /api/use-cases/at-risk). Slipping / overdue
+ *  use cases in the caller's portfolio, with WHY and how often they slipped. */
+export interface AtRiskUseCase {
+  id: number
+  title: string
+  status: Status
+  target_go_live_date?: string | null
+  days_overdue: number
+  times_slipped: number
+  latest_slippage_reason?: string | null
+}
+
+export interface AtRiskResponse {
+  items: AtRiskUseCase[]
+  total: number
+}
+
 export interface RequiredDomain {
   domain_id: number
   domain_name: string

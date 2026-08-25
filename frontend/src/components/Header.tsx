@@ -3,6 +3,7 @@
 import { useEffect, useRef, useState } from 'react'
 import {
   Activity,
+  AlertTriangle,
   Archive,
   BarChart3,
   BookOpen,
@@ -37,6 +38,7 @@ export type TabId =
   | 'funding'
   | 'value'
   | 'coverage'
+  | 'atrisk'
   | 'whatif'
   | 'trend'
   | 'glossary'
@@ -120,6 +122,12 @@ export const TABS: Tab[] = [
     label: 'Coverage',
     icon: <BarChart3 className="w-4 h-4" />,
     hint: 'Where the portfolio is covered, exposed or blocked',
+  },
+  {
+    id: 'atrisk',
+    label: 'At Risk',
+    icon: <AlertTriangle className="w-4 h-4" />,
+    hint: 'Use cases slipping or overdue, why, and how often',
   },
   {
     id: 'whatif',
@@ -243,7 +251,7 @@ export const TABS: Tab[] = [
 const ALL_NAV_GROUPS: { label: string; ids: TabId[] }[] = [
   {
     label: 'Portfolio',
-    ids: ['portfolio', 'flywheel', 'registry', 'dashboards', 'coverage', 'whatif', 'trend'],
+    ids: ['portfolio', 'flywheel', 'registry', 'dashboards', 'coverage', 'atrisk', 'whatif', 'trend'],
   },
   { label: 'Plan & Fund', ids: ['roadmap', 'funding', 'executive'] },
   { label: 'Value', ids: ['value', 'research'] },
@@ -301,7 +309,7 @@ function filterNavForPersona(persona: Persona): {
     // Presented as two groups for clarity.
     return {
       groups: [
-        { label: 'Portfolio', ids: ['portfolio', 'dashboards'] },
+        { label: 'Portfolio', ids: ['portfolio', 'dashboards', 'atrisk'] },
         { label: 'Plan & Fund', ids: ['roadmap', 'executive'] },
       ],
       entryTab: null,
@@ -319,7 +327,7 @@ function filterNavForPersona(persona: Persona): {
     groups: [
       {
         label: 'Portfolio',
-        ids: ['portfolio', 'flywheel', 'registry', 'dashboards', 'coverage', 'whatif', 'trend'],
+        ids: ['portfolio', 'flywheel', 'registry', 'dashboards', 'coverage', 'atrisk', 'whatif', 'trend'],
       },
       { label: 'Plan & Fund', ids: ['roadmap', 'funding'] },
       { label: 'Value', ids: ['value', 'research'] },

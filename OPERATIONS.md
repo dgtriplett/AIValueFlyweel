@@ -203,6 +203,12 @@ them:
 The identity is taken from the `X-Forwarded-Email` header the Databricks Apps proxy
 injects, which the browser cannot forge. Matching is case-insensitive.
 
+**`scripts/deploy.py` sets this for you.** Every deploy writes the deploying user's
+Databricks email into `GRID_ATLAS_ADMINS`, so the operator who installs the app is an
+admin by default — no separate bootstrap step. Pass `--admins a@x.com,b@x.com` to set
+a different allowlist instead; the flag wins over the resolved deployer email. The
+shipped `app.yaml` template keeps this empty (fail-closed) — deploy fills it per-deploy.
+
 **Unset means nobody is an admin** and these operations return 403. That is the
 intended default: hard-deleting an account cascades away a customer's calibrated
 assumptions, research and proposals, so it fails closed rather than being available

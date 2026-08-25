@@ -8,7 +8,7 @@ from .. import accounts
 from ..common import current_user, row_to_dict, rows_to_list, write_audit
 from ..db import db
 from .. import portfolio
-from ..readiness import readiness_map, readiness_for, domain_satisfaction_for, asset_status_map
+from ..readiness import readiness_map, readiness_for, domain_satisfaction_for, asset_status_map, BUILT_SQL_LIST
 from ..value_engine import (
     compute_realized,
     compute_value_range,
@@ -164,6 +164,96 @@ async def list_use_cases(
 async def all_readiness():
     """Map of use_case_id -> readiness info (used for graph coloring/filters)."""
     return await readiness_map()
+
+
+@router.get("/at-risk")
+async def at_risk_use_cases():
+    """The at-risk rollup: use cases in the caller's portfolio that are slipping.
+
+    A use case is AT RISK when either
+      * its progression `at_risk` flag would be true — target_go_live_date is in the
+        past AND status is not {live, value_realized}, OR
+      * it has slipped at least once (a `date_change` event that moved the target
+        LATER), which is the executive's "why is this still not done" signal even
+        when the current target has not yet lapsed.
+
+    SCOPING — this is the whole point of the feature, and the failure mode is a
+    cross-tenant leak. There is NO `use_cases.account_id` column; ownership of a
+    non-catalog use case is membership in `account_portfolio_use_cases`. So the
+    working set is `portfolio.use_case_visibility` (catalog OR in-this-account's
+    portfolio), exactly like the list route. The progression tables are themselves
+    account-scoped (`account_use_case_progress`, `use_case_status_events` both carry
+    account_id), so we bind the current account into their joins too — a use case is
+    only at risk relative to THIS account's target dates and slippage history.
+
+    Fail closed: with no resolvable account we cannot scope, so we return an empty
+    rollup rather than every tenant's slipping work.
+    """
+    account_id = await accounts.current()
+    if account_id is None:
+        # No account resolved: refuse to answer rather than span tenants.
+        return {"items": [], "total": 0}
+
+    # $1 = account_id (portfolio membership + progression scope). The visibility
+    # predicate binds it again; both reference $1 so the account travels once.
+    visibility, _params = await portfolio.use_case_visibility(
+        "use_cases", param_index=1)
+
+    # Per-account slippage aggregation: a `date_change` event whose target moved
+    # LATER (to_value > from_value on ISO YYYY-MM-DD, which sorts lexically) is a
+    # slip. We count them and keep the most recent one's reason.
+    sql = f"""
+        WITH slips AS (
+            SELECT use_case_id,
+                   count(*) AS times_slipped,
+                   (array_agg(note ORDER BY created_at DESC))[1] AS latest_reason
+              FROM use_case_status_events
+             WHERE account_id = $1
+               AND event_type = 'date_change'
+               AND from_value IS NOT NULL
+               AND to_value IS NOT NULL
+               AND to_value > from_value
+             GROUP BY use_case_id
+        )
+        SELECT use_cases.id,
+               use_cases.title,
+               use_cases.status,
+               p.target_go_live_date AS target_go_live_date,
+               COALESCE(s.times_slipped, 0) AS times_slipped,
+               s.latest_reason AS latest_slippage_reason
+          FROM use_cases
+          JOIN account_use_case_progress p
+            ON p.use_case_id = use_cases.id AND p.account_id = $1
+          LEFT JOIN slips s
+            ON s.use_case_id = use_cases.id
+         WHERE {visibility}
+           AND use_cases.status NOT IN ({BUILT_SQL_LIST})
+           AND (
+                 (p.target_go_live_date IS NOT NULL AND p.target_go_live_date < CURRENT_DATE)
+                 OR COALESCE(s.times_slipped, 0) > 0
+               )
+         ORDER BY p.target_go_live_date NULLS LAST, use_cases.id
+    """
+    rows = await db.fetch(sql, account_id)
+
+    from datetime import date as _date
+    today = _date.today()
+    items = []
+    for r in rows:
+        target = r["target_go_live_date"]
+        days_overdue = 0
+        if target is not None and target < today:
+            days_overdue = (today - target).days
+        items.append({
+            "id": r["id"],
+            "title": r["title"],
+            "status": r["status"],
+            "target_go_live_date": target.isoformat() if target else None,
+            "days_overdue": days_overdue,
+            "times_slipped": int(r["times_slipped"] or 0),
+            "latest_slippage_reason": r["latest_slippage_reason"],
+        })
+    return {"items": items, "total": len(items)}
 
 
 @router.get("/{uc_id}")
