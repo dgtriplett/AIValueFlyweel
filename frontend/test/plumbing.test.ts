@@ -1819,7 +1819,6 @@ async function main(): Promise<void> {
   if (failed > 0) process.exit(1)
 }
 
-void main()
 
 // ---------------------------------------------------------------------------
 // Phase 2 — persona-aware navigation filtering
@@ -1997,8 +1996,11 @@ tests['the persona switcher only OFFERS admin to a trusted admin'] = () => {
   assert.match(source, /\{ value: 'executive', label: 'Executive' \}/)
   // MUTATION CHECK: the switcher must READ isAdmin from the role context, or the
   // guard above is dead. Without this, a rename of the destructured field passes
-  // the regex above while never actually gating.
-  assert.match(source, /const \{ activePersona, setPersona, isAdmin, isExecLocked, loading \} = useRole\(\)/)
+  // the regex above while never actually gating. (Phase C also pulls isPreviewing
+  // for the "Viewing as X" badge — assert the destructure names both.)
+  assert.match(source, /const \{[^}]*\bisAdmin\b[^}]*\} = useRole\(\)/)
+  assert.match(source, /const \{[^}]*\bisExecLocked\b[^}]*\} = useRole\(\)/)
+  assert.match(source, /const \{[^}]*\bisPreviewing\b[^}]*\} = useRole\(\)/)
 }
 
 tests['ADMIN_ONLY_TABS names exactly the six admin surfaces — registry is NOT one'] = () => {
@@ -2302,3 +2304,69 @@ tests['the FAB no longer overlaps the drawer by hiding entirely when detail is o
   const drawerSource = readFileSync('src/components/UseCaseDrawer.tsx', 'utf8')
   assert.match(drawerSource, /fixed inset-0 z-40/)
 }
+
+// ---------------------------------------------------------------------------
+// Phase C — "View as persona" testing switcher
+// ---------------------------------------------------------------------------
+
+tests['Header shows "View as:" for admins and "Role:" for non-admins'] = () => {
+  // PHASE C: The admin persona switcher is now explicitly labeled as a TESTING
+  // affordance ("View as:") rather than a privilege control, and non-admins see
+  // a static "Role:" indicator with no dropdown.
+  const source = readFileSync('src/components/Header.tsx', 'utf8')
+
+  // Admins must see "View as:" label (the testing affordance)
+  assert.match(source, /View as:/)
+  assert.match(source, /Preview the app as another persona — for testing/)
+
+  // Non-admins must see "Role:" label (static indicator, no dropdown)
+  assert.match(source, /Role:/)
+
+  // The switcher must check isPreviewing to show a preview badge
+  assert.match(source, /isPreviewing/)
+  assert.match(source, /Viewing as/)
+
+  // BEHAVIOURAL SHAPE (mutation-worthy): the ONLY <select> in PersonaSwitcher
+  // must live AFTER the `if (!isAdmin)` early-return guard — i.e. the dropdown
+  // is admin-only. If a mutation moved the dropdown ahead of that guard (giving
+  // non-admins a switcher — a Phase A regression) or deleted the guard, this
+  // assertion fails.
+  const switcherStart = source.indexOf('function PersonaSwitcher')
+  assert.ok(switcherStart >= 0, 'PersonaSwitcher component must exist')
+  const nextFn = source.indexOf('\nfunction ', switcherStart + 1)
+  const switcher = source.slice(switcherStart, nextFn >= 0 ? nextFn : undefined)
+
+  const nonAdminGuard = switcher.indexOf('if (!isAdmin)')
+  const selectIdx = switcher.indexOf('<select')
+  assert.ok(nonAdminGuard >= 0, 'PersonaSwitcher must guard non-admins with `if (!isAdmin)`')
+  assert.ok(selectIdx >= 0, 'PersonaSwitcher must render a <select> for admins')
+  assert.ok(
+    selectIdx > nonAdminGuard,
+    'the persona <select> must come AFTER the non-admin early-return (admin-only dropdown)',
+  )
+
+  // Exactly one <select> — non-admins get a static <span>, not a second dropdown.
+  const selectCount = (switcher.match(/<select/g) || []).length
+  assert.equal(selectCount, 1, 'PersonaSwitcher must have exactly one (admin-only) <select>')
+}
+
+tests['RoleContext exposes isPreviewing for admin preview mode'] = () => {
+  // PHASE C: isPreviewing = admin && activePersona !== 'admin' helps the Header
+  // show a clear "Viewing as X" badge when an admin is testing another persona.
+  const source = readFileSync('src/context/RoleContext.tsx', 'utf8')
+  
+  // The context must expose isPreviewing in its interface
+  assert.match(source, /isPreviewing:\s*boolean/)
+  
+  // The value must be computed as admin viewing as non-admin
+  assert.match(source, /isPreviewing\s*=\s*isAdmin\s*&&\s*activePersona\s*!==\s*['"]admin['"]/)
+  
+  // It must be included in the context value
+  assert.match(source, /isPreviewing,/)
+}
+
+// Kick off the runner AFTER every test above has been registered on `tests`.
+// (Previously `void main()` sat mid-file; `main()` snapshots Object.keys(tests)
+// synchronously before its first await, so any test defined below that call —
+// e.g. the Phase 2 / Phase A / Phase C blocks — was silently never run.)
+void main()
