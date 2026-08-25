@@ -155,6 +155,14 @@ written back to Lakebase, which stays the portfolio's system of record.
   rationale (e.g., "Provides X data from Y category required for this use case"). Idempotent
   and non-destructive — only updates NULL/empty values. Creates helper function
   `update_asset_detail_by_category` keyed on (source_category, module).
+- **Hypothesized value override** — `020_hypothesized_override.sql`: adds three
+  `hypothesized_override_*` columns (enabled BOOLEAN NOT NULL DEFAULT false, amount
+  NUMERIC, note TEXT) to `use_cases`, mirroring the existing `realized_override_*`
+  columns from 001_init.sql. This lets the use-case detail (drawer AND full page)
+  edit HYPOTHESIZED value two ways — CALCULATE (per-component multipliers, live
+  total) and OVERRIDE (a straight dollar value + a required "why I am overriding"
+  note) — exactly as realized value already can. Idempotent and additive
+  (ADD COLUMN IF NOT EXISTS); columns only, no SP grant needed on deploy.
 - **Migration ledger** — `schema_migrations`, created by `server/migrator.py`
   rather than by a numbered migration, since it must exist before the ledger can
   be consulted.

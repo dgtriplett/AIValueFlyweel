@@ -121,6 +121,13 @@ function UseCaseDetail({
   const [actuals, setActuals] = useState<Record<number, number>>({})
   const [overrideAmount, setOverrideAmount] = useState<number | ''>('')
   const [overrideNote, setOverrideNote] = useState('')
+  // Hypothesized editor state — mirrors the realized editor exactly. CALCULATE mode
+  // edits per-component multipliers (hypActuals) with a live total; OVERRIDE mode
+  // takes a straight dollar value plus a required 'why I am overriding' note.
+  const [hypMode, setHypMode] = useState<'calculated' | 'override'>('calculated')
+  const [hypActuals, setHypActuals] = useState<Record<number, number>>({})
+  const [hypOverrideAmount, setHypOverrideAmount] = useState<number | ''>('')
+  const [hypOverrideNote, setHypOverrideNote] = useState('')
   const [targetDate, setTargetDate] = useState('')
   const [slippageReason, setSlippageReason] = useState('')
   const [progressionNote, setProgressionNote] = useState('')
@@ -153,6 +160,16 @@ function UseCaseDetail({
       next[index] = multiplierOf(component)
     })
     setActuals(next)
+    // Hypothesized editor — seed from the hypothesized components + override columns.
+    setHypMode(detail.hypothesized_override_enabled ? 'override' : 'calculated')
+    setHypOverrideAmount(detail.hypothesized_override_amount ?? '')
+    setHypOverrideNote(detail.hypothesized_override_note ?? '')
+    const hypComponents = detail.hypothesized_value_json?.components ?? []
+    const nextHyp: Record<number, number> = {}
+    hypComponents.forEach((component, index) => {
+      nextHyp[index] = multiplierOf(component)
+    })
+    setHypActuals(nextHyp)
     // Reset progression state
     setTargetDate(detail.progression?.target_go_live_date ?? '')
     setProgressionNote('')
@@ -272,6 +289,36 @@ function UseCaseDetail({
     },
   })
 
+  const saveHypothesized = useMutation({
+    mutationFn: () => {
+      if (!detail) throw new Error('no use case loaded')
+      const components = detail.hypothesized_value_json?.components ?? []
+      // Rebuild hypothesized_value_json from the edited multipliers, preserving the
+      // same shape {driver, components:[{name, calculationDisplay, multiplier, assumptionKeys}]}.
+      return api.updateUseCase(ucId, {
+        title: detail.title,
+        hypothesized_value_json: {
+          driver: detail.hypothesized_value_json?.driver ?? 'Hypothesized',
+          components: components.map((component, index) => ({
+            name: component.name,
+            calculationDisplay: component.calculationDisplay,
+            multiplier: hypActuals[index] ?? multiplierOf(component),
+            assumptionKeys: component.assumptionKeys,
+          })),
+        },
+        hypothesized_override_enabled: hypMode === 'override',
+        hypothesized_override_amount:
+          hypOverrideAmount === '' ? null : Number(hypOverrideAmount),
+        hypothesized_override_note: hypOverrideNote || null,
+      })
+    },
+    onSuccess: () => {
+      invalidateDetail()
+      queryClient.invalidateQueries({ queryKey: ['portfolio-value'] })
+      queryClient.invalidateQueries({ queryKey: ['blast'] })
+    },
+  })
+
   const postComment = useMutation({
     mutationFn: (body: string) =>
       api.createComment({ entity_type: 'use_case', entity_id: ucId, body }),
@@ -314,6 +361,14 @@ function UseCaseDetail({
   // so editing a global assumption re-quantifies every use case at once.
   const calculatedRealized = components.reduce((total, component, index) => {
     let value = actuals[index] ?? multiplierOf(component)
+    for (const key of component.assumptionKeys ?? []) value *= assumptionValues[key] ?? 0
+    return total + value
+  }, 0)
+
+  // Live hypothesized total — same math as calculatedRealized but driven by the
+  // hypothesized multiplier edits (hypActuals). Recomputed from shared assumptions.
+  const calculatedHypothesized = components.reduce((total, component, index) => {
+    let value = hypActuals[index] ?? multiplierOf(component)
     for (const key of component.assumptionKeys ?? []) value *= assumptionValues[key] ?? 0
     return total + value
   }, 0)
@@ -670,12 +725,29 @@ function UseCaseDetail({
               ))}
             </div>
 
-            <section>
-              <h3 className="text-sm font-semibold text-navy-300 mb-2 flex items-center gap-1.5">
-                <TrendingUp className="w-4 h-4 text-lava-300" /> Hypothesized value
-              </h3>
+            <section className="card p-4">
+              <div className="flex items-center justify-between mb-2">
+                <h3 className="text-sm font-semibold text-lava-300 flex items-center gap-1.5">
+                  <TrendingUp className="w-4 h-4" /> Hypothesized value
+                </h3>
+                <div className="bg-navy-700 border border-navy-600 rounded p-0.5 flex text-xs">
+                  <button
+                    className={`px-2 py-1 rounded ${hypMode === 'calculated' ? 'bg-lava-300/20 text-lava-300' : 'text-navy-400'}`}
+                    onClick={() => setHypMode('calculated')}
+                  >
+                    Calculate
+                  </button>
+                  <button
+                    className={`px-2 py-1 rounded ${hypMode === 'override' ? 'bg-warning/20 text-warning' : 'text-navy-400'}`}
+                    onClick={() => setHypMode('override')}
+                  >
+                    Override
+                  </button>
+                </div>
+              </div>
+
               {detail.value_range ? (
-                <div className="text-sm text-navy-300">
+                <div className="text-sm text-navy-300 mb-2">
                   <span className="text-lava-300 font-bold text-lg">
                     {fmtMoney(detail.value_range.mid)}
                   </span>
@@ -686,16 +758,103 @@ function UseCaseDetail({
                   </span>
                 </div>
               ) : null}
-              <div className="mt-2 space-y-1">
-                {components.map((component, index) => (
-                  <div
-                    key={index}
-                    className="text-xs text-navy-400 flex justify-between border-b border-navy-600/60 py-1"
-                  >
-                    <span>{component.name}</span>
-                    <span className="text-navy-500">{component.calculationDisplay}</span>
+
+              {hypMode === 'calculated' ? (
+                <div className="space-y-2">
+                  <p className="text-xs text-navy-500">
+                    Enter the hypothesized multiplier per component. Uses the shared
+                    assumptions, so changing a global assumption re-quantifies this too.
+                  </p>
+                  {components.map((component, index) => (
+                    <div
+                      key={index}
+                      className="flex items-center justify-between gap-2 text-xs"
+                    >
+                      <span className="flex-1 text-navy-300">
+                        {component.name}
+                        <span className="block text-navy-500">
+                          {component.calculationDisplay}
+                        </span>
+                      </span>
+                      <input
+                        id={`uc-hyp-actual-${index}`}
+                        name={`uc-hyp-actual-${index}`}
+                        aria-label={`Hypothesized multiplier for ${component.name}`}
+                        type="number"
+                        step="any"
+                        className="input-field w-32 text-right"
+                        value={hypActuals[index] ?? multiplierOf(component)}
+                        onChange={(event) =>
+                          setHypActuals((current) => ({
+                            ...current,
+                            [index]: Number(event.target.value),
+                          }))
+                        }
+                      />
+                    </div>
+                  ))}
+                  <div className="pt-2 border-t border-navy-600 flex justify-between text-sm">
+                    <span className="text-navy-400">Calculated hypothesized / yr</span>
+                    <span className="text-lava-300 font-bold">
+                      {fmtMoney(calculatedHypothesized)}
+                    </span>
                   </div>
-                ))}
+                </div>
+              ) : (
+                <div className="space-y-2">
+                  <p className="text-xs text-navy-500">
+                    Manual override — value calculated outside the app (finance model /
+                    SFDC). Parameterized inputs stay stored underneath.
+                  </p>
+                  <div className="flex items-center gap-2">
+                    <span className="text-sm text-navy-400">$</span>
+                    <input
+                      id="uc-hyp-override-amount"
+                      name="uc-hyp-override-amount"
+                      aria-label="Hypothesized value override amount in millions per year"
+                      type="number"
+                      step="any"
+                      className="input-field"
+                      placeholder="Amount ($M/yr)"
+                      value={hypOverrideAmount}
+                      onChange={(event) =>
+                        setHypOverrideAmount(
+                          event.target.value === '' ? '' : Number(event.target.value),
+                        )
+                      }
+                    />
+                    <span className="text-xs text-navy-500">M</span>
+                  </div>
+                  <textarea
+                    id="uc-hyp-override-note"
+                    name="uc-hyp-override-note"
+                    aria-label="Why I am overriding the hypothesized value (required)"
+                    className="input-field"
+                    rows={2}
+                    placeholder="Why I am overriding (required)"
+                    value={hypOverrideNote}
+                    onChange={(event) => setHypOverrideNote(event.target.value)}
+                  />
+                  {hypMode === 'override' && !hypOverrideNote.trim() ? (
+                    <p className="text-xs text-warning">
+                      A note explaining the override is required.
+                    </p>
+                  ) : null}
+                </div>
+              )}
+
+              <div className="flex items-center justify-end mt-3">
+                <button
+                  className="btn-primary text-xs"
+                  disabled={
+                    readOnly ||
+                    saveHypothesized.isPending ||
+                    (hypMode === 'override' && !hypOverrideNote.trim())
+                  }
+                  onClick={() => saveHypothesized.mutate()}
+                >
+                  Save hypothesized
+                </button>
               </div>
             </section>
 
