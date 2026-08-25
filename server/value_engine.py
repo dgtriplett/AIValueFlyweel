@@ -22,7 +22,12 @@ from __future__ import annotations
 
 import json
 
-from .db import db
+# NOTE: `from .db import db` is intentionally NOT imported at module scope.
+# db.py imports asyncpg (a running-app-only dependency absent from the scripts/
+# CLI environment). The pure helpers below — including calibrate_components and
+# compute_value_range — must import cleanly with no asyncpg so that
+# scripts/recalibrate_value_models.py can reuse the SAME calibration logic
+# instead of duplicating it. The three async DB helpers import `db` lazily.
 
 
 def _as_dict(formula):
@@ -105,6 +110,7 @@ async def load_assumptions() -> dict[str, float]:
     calibrated.
     """
     from . import accounts
+    from .db import db
 
     account_id = await accounts.current()
     if account_id is None:
@@ -121,12 +127,16 @@ async def load_assumptions() -> dict[str, float]:
 
 async def computed_value_map() -> dict[int, float | None]:
     """Map use_case_id -> computed mid hypothesized value ($M) from current assumptions."""
+    from .db import db
+
     assumptions = await load_assumptions()
     rows = await db.fetch("SELECT id, hypothesized_value_json FROM use_cases")
     return {r["id"]: compute_value(r["hypothesized_value_json"], assumptions) for r in rows}
 
 
 async def computed_range_map() -> dict[int, dict | None]:
+    from .db import db
+
     assumptions = await load_assumptions()
     rows = await db.fetch("SELECT id, hypothesized_value_json FROM use_cases")
     return {r["id"]: compute_value_range(r["hypothesized_value_json"], assumptions) for r in rows}

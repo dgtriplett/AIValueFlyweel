@@ -25,7 +25,7 @@ class TestValueCalibration(unittest.TestCase):
 
     def test_uncalibrated_bug_241_style_model_is_absurd(self):
         """Verify that an uncalibrated #241-style model produces billion-dollar values.
-        
+
         This test documents the BUG: a model with multiplier 0.00015 chaining
         annualRevenueMM * customerCount produces $1500B for a single component,
         which is absurd for a utility with $5B revenue.
@@ -41,11 +41,11 @@ class TestValueCalibration(unittest.TestCase):
                 "highCoeff": 1.3,
             }
         ]
-        
+
         # Compute what this produces WITHOUT calibration
         model = {"components": uncalibrated_components}
         rng = compute_value_range(model, self.assumptions)
-        
+
         # This is the BUG: should produce ~tens of $M, but produces billions
         self.assertIsNotNone(rng)
         # With annualRevenueMM=5000, customerCount=2M, multiplier=0.00015:
@@ -56,7 +56,7 @@ class TestValueCalibration(unittest.TestCase):
 
     def test_calibrated_241_style_model_is_sane(self):
         """Verify calibrate_components brings a #241-style model into sane range.
-        
+
         After calibration:
         - No single component should exceed 5% of annualRevenueMM (~250 $M)
         - Total mid should not exceed 25% of annualRevenueMM (~1250 $M)
@@ -71,12 +71,12 @@ class TestValueCalibration(unittest.TestCase):
                 "highCoeff": 1.3,
             }
         ]
-        
+
         # Apply calibration
         calibrated = calibrate_components(
             uncalibrated_components, self.assumptions, self.annual_revenue
         )
-        
+
         # Verify each component is under 5% ceiling
         per_component_ceiling = 0.05 * self.annual_revenue  # 250 $M
         for comp in calibrated:
@@ -85,7 +85,7 @@ class TestValueCalibration(unittest.TestCase):
                 comp_value *= self.assumptions.get(key, 0)
             self.assertLessEqual(comp_value, per_component_ceiling,
                                 f"Component '{comp['name']}' exceeds per-component ceiling")
-        
+
         # Verify total is under 25% ceiling
         model = {"components": calibrated}
         rng = compute_value_range(model, self.assumptions)
@@ -107,25 +107,25 @@ class TestValueCalibration(unittest.TestCase):
                 "lowCoeff": 0.9,
                 "highCoeff": 1.1,
             })
-        
+
         # Without calibration, total would be ~3000 $M
         uncalibrated_model = {"components": components}
         uncalibrated_rng = compute_value_range(uncalibrated_model, self.assumptions)
         self.assertGreater(uncalibrated_rng["mid"], 2500,
                           "Uncalibrated 6-component model should exceed 2500 $M")
-        
+
         # With calibration, should be clamped to 1250 $M (25% of 5000)
         calibrated = calibrate_components(components, self.assumptions, self.annual_revenue)
         calibrated_model = {"components": calibrated}
         calibrated_rng = compute_value_range(calibrated_model, self.assumptions)
-        
+
         global_ceiling = 0.25 * self.annual_revenue  # 1250 $M
         self.assertLessEqual(calibrated_rng["mid"], global_ceiling,
                             f"Calibrated mid {calibrated_rng['mid']} exceeds ceiling {global_ceiling}")
 
     def test_already_sane_model_unchanged(self):
         """Test that an already-sane model (like seeded catalog) is unchanged.
-        
+
         Catalog models have hand-calibrated tiny multipliers (e.g. 8e-10).
         Calibration should be a no-op on these (idempotent).
         """
@@ -140,25 +140,25 @@ class TestValueCalibration(unittest.TestCase):
                 "highCoeff": 1.4,
             }
         ]
-        
+
         # This produces a sane value
         model_before = {"components": [dict(c) for c in sane_components]}
         rng_before = compute_value_range(model_before, self.assumptions)
         self.assertLess(rng_before["mid"], 100,
                        "Seeded catalog model should have sane mid value")
-        
+
         # Calibration should NOT change it
         calibrated = calibrate_components(sane_components, self.assumptions, self.annual_revenue)
         model_after = {"components": calibrated}
         rng_after = compute_value_range(model_after, self.assumptions)
-        
+
         # Should be byte-identical (or within float precision)
         self.assertAlmostEqual(rng_before["mid"], rng_after["mid"], places=2,
                               msg="Calibration should not change already-sane models")
 
     def test_tightened_ceilings(self):
         """Verify that the NEW ceilings (5% per-component, 25% global) are tighter.
-        
+
         OLD ceilings were 10% per-component, 50% global.
         NEW ceilings are 5% per-component, 25% global.
         This test ensures a model that would pass OLD ceilings but not NEW
@@ -173,15 +173,15 @@ class TestValueCalibration(unittest.TestCase):
             "lowCoeff": 1.0,
             "highCoeff": 1.0,
         }
-        
+
         # This would produce 400 $M uncalibrated
         raw_value = component["multiplier"] * self.assumptions["annualRevenueMM"]
         self.assertEqual(raw_value, 400.0, "Setup check: component should target 400 $M")
-        
+
         # Under NEW calibration, should be clamped to 250 $M (5%)
         calibrated = calibrate_components([component], self.assumptions, self.annual_revenue)
         calibrated_value = calibrated[0]["multiplier"] * self.assumptions["annualRevenueMM"]
-        
+
         new_ceiling = 0.05 * self.annual_revenue  # 250 $M
         self.assertLessEqual(calibrated_value, new_ceiling,
                             f"Component should be clamped to {new_ceiling} $M under new ceiling")
@@ -191,7 +191,7 @@ class TestValueCalibration(unittest.TestCase):
         # Empty components list
         result = calibrate_components([], self.assumptions, self.annual_revenue)
         self.assertEqual(result, [])
-        
+
         # Component with zero multiplier
         zero_comp = [{
             "name": "Zero component",
@@ -213,12 +213,16 @@ class TestValueCalibration(unittest.TestCase):
             "highCoeff": 1.0,
         }]
         original_multiplier = original[0]["multiplier"]
-        
+
         calibrated = calibrate_components(original, self.assumptions, self.annual_revenue)
-        
+
         # Original should be unchanged
         self.assertEqual(original[0]["multiplier"], original_multiplier,
                         "calibrate_components should not mutate input")
+        # And the returned copy IS a distinct, calibrated object (0.5 * 5000 = 2500
+        # $M exceeds the 250 $M ceiling, so its multiplier must have been rescaled).
+        self.assertLess(calibrated[0]["multiplier"], original_multiplier,
+                        "returned copy should carry the calibrated multiplier")
 
 
 if __name__ == "__main__":

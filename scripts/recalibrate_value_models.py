@@ -55,83 +55,18 @@ sys.path.insert(0, str(ROOT))
 
 
 def _as_dict(formula):
-    """Coerce formula (dict or jsonb string) to dict, or None."""
-    if isinstance(formula, str):
-        try:
-            formula = json.loads(formula)
-        except (ValueError, TypeError):
-            return None
-    return formula if isinstance(formula, dict) else None
+    """Coerce a formula (dict or jsonb string) to a dict via the SHARED helper."""
+    from server.value_engine import _as_dict as _shared
+
+    return _shared(formula)
 
 
 def _mid(formula: dict, assumptions: dict[str, float]) -> float:
-    """Compute mid value the way value_engine does it.
+    """Mid value ($M) via the SHARED value_engine evaluator (no divergence)."""
+    from server.value_engine import compute_value_range
 
-    Reimplemented in 10 lines rather than imported to avoid pulling in asyncpg
-    and the app's config — every other script in scripts/ talks to Lakebase through
-    psycopg2 and seed_lib instead.
-    """
-    total = 0.0
-    for component in formula.get("components") or []:
-        value = float(component.get("multiplier") or 0)
-        for key in component.get("assumptionKeys") or []:
-            value *= float(assumptions.get(key, 0) or 0)
-        low = value * float(component.get("lowCoeff") or 1)
-        high = value * float(component.get("highCoeff") or 1)
-        total += (low + high) / 2
-    return total
-
-
-def calibrate_components(components: list[dict], assumption_values: dict[str, float],
-                        annual_revenue_mm: float | None = None) -> list[dict]:
-    """Apply two-layer calibration (per-component + global ceiling).
-
-    This is a COPY of server.value_engine.calibrate_components() reimplemented here
-    to avoid pulling in asyncpg. Changes to the logic MUST be kept in sync.
-    """
-    # Work on a deep copy so we don't mutate the input
-    comps = [dict(c) for c in components]
-
-    if not comps:
-        return comps
-
-    # Default annual revenue if not provided
-    annual_revenue = annual_revenue_mm if annual_revenue_mm is not None else 5000.0
-
-    # LAYER 1: Per-component ceiling (5% of revenue)
-    max_component_ceiling = 0.05 * annual_revenue
-
-    for comp in comps:
-        raw_mid = comp.get("multiplier", 0)
-        if not raw_mid:
-            continue
-
-        for key in comp.get("assumptionKeys", []):
-            raw_mid *= assumption_values.get(key, 0)
-
-        if raw_mid > max_component_ceiling and raw_mid > 0:
-            scale_factor = max_component_ceiling / raw_mid
-            comp["multiplier"] = comp["multiplier"] * scale_factor
-
-    # LAYER 2: Global total ceiling (25% of revenue)
-    max_total_ceiling = 0.25 * annual_revenue
-
-    total_mid = 0.0
-    for comp in comps:
-        comp_value = comp.get("multiplier", 0)
-        for key in comp.get("assumptionKeys", []):
-            comp_value *= assumption_values.get(key, 0)
-        low_coeff = comp.get("lowCoeff", 1.0)
-        high_coeff = comp.get("highCoeff", 1.0)
-        mid_coeff = (low_coeff + high_coeff) / 2.0
-        total_mid += comp_value * mid_coeff
-
-    if total_mid > max_total_ceiling and total_mid > 0:
-        global_scale_factor = max_total_ceiling / total_mid
-        for comp in comps:
-            comp["multiplier"] = comp.get("multiplier", 0) * global_scale_factor
-
-    return comps
+    rng = compute_value_range(formula, assumptions)
+    return rng["mid"] if rng else 0.0
 
 
 def recalibrate(cursor, assumptions: dict[str, float], dry_run: bool = False) -> dict:
@@ -139,6 +74,11 @@ def recalibrate(cursor, assumptions: dict[str, float], dry_run: bool = False) ->
 
     Returns: {"updated": int, "unchanged": int, "changes": [(id, title, before, after)]}
     """
+    # Import the SHARED calibration helper so this script and build_value_model()
+    # use the EXACT same logic (no divergence). value_engine imports cleanly
+    # because its db/asyncpg import is lazy (inside the async DB helpers only).
+    from server.value_engine import calibrate_components
+
     annual_revenue = assumptions.get("annualRevenueMM", 5000.0)
 
     # Fetch all use cases with a hypothesized_value_json
