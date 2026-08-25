@@ -23,10 +23,11 @@ Two requirement models coexist (see server/migrations/002_domains.sql):
                           Satisfied when that exact asset is curated/governed.
 
   DOMAIN path (CHUNK B) : use_case --requires--> data_domain <--serves-- asset.
-                          A required domain is satisfied when ANY asset mapped
-                          to it is curated/governed. This is what stops vendor
-                          substitution (Maximo instead of SAP PM) from showing a
-                          false gap.
+                          Counts the DISTINCT ASSETS (modules/datasets) serving
+                          all required domains. An asset is 'ready' when curated/
+                          governed for this account. This enables vendor substitution
+                          (Maximo instead of SAP PM) while counting at the concrete
+                          module level users think in.
 
 Resolution is PER USE CASE, not global, and precedence is:
 
@@ -320,15 +321,45 @@ async def readiness_map(
     )
 
     # --- DOMAIN path counts (CHUNK B) --------------------------------------
-    # A required domain is satisfied when ANY serving asset is curated/governed.
-    # bool_or over the serving assets gives per-domain satisfaction; the outer
-    # aggregate counts satisfied vs total required domains per use case.
-    # The LEFT JOINs matter: a domain with no serving asset at all must still
-    # count toward the denominator as UNSATISFIED (that is a real gap), not
-    # silently drop out of the calculation.
+    # MODULE/DATASET-level counting: count the DISTINCT ASSETS serving all required
+    # domains, where 'ready' means that asset is curated/governed for this account.
+    # This matches what the detail drawer displays (the concrete modules/datasets)
+    # and eliminates the domain-vs-asset count mismatch.
+    #
+    # For domains with NO serving assets, we count the domain itself as one
+    # "missing dataset" so the denominator reflects the real gap. This preserves
+    # the LEFT JOIN semantics but at asset granularity.
+    #
+    # We still track per-domain satisfaction (for the pending_domains list) but the
+    # COUNTS are asset-level, not domain-level.
     domain_rows = await db.fetch(
         """
-        WITH domain_satisfaction AS (
+        WITH domain_assets AS (
+            -- All distinct assets serving each required domain, with their readiness
+            SELECT urd.use_case_id,
+                   urd.domain_id,
+                   dd.name  AS domain_name,
+                   dd.label AS domain_label,
+                   asd.data_asset_id,
+                   (asd.data_asset_id = ANY($1::int[])) AS asset_ready
+            FROM uc_requires_domain urd
+            JOIN data_domains dd ON dd.id = urd.domain_id
+            LEFT JOIN asset_serves_domain asd ON asd.domain_id = urd.domain_id
+            WHERE urd.necessity = 'required'
+              AND COALESCE(dd.is_active, true) = true
+        ),
+        asset_counts AS (
+            -- Count DISTINCT assets (modules/datasets) across all required domains
+            SELECT use_case_id,
+                   COUNT(DISTINCT data_asset_id) FILTER (WHERE data_asset_id IS NOT NULL) AS asset_total,
+                   COUNT(DISTINCT data_asset_id) FILTER (WHERE asset_ready) AS asset_ready,
+                   -- Domains with NO serving assets at all
+                   COUNT(DISTINCT domain_id) FILTER (WHERE data_asset_id IS NULL) AS orphan_domains
+            FROM domain_assets
+            GROUP BY use_case_id
+        ),
+        domain_satisfaction AS (
+            -- Per-domain satisfaction for pending_domains list (unchanged logic)
             SELECT urd.use_case_id,
                    urd.domain_id,
                    dd.name  AS domain_name,
@@ -341,18 +372,20 @@ async def readiness_map(
               AND COALESCE(dd.is_active, true) = true
             GROUP BY urd.use_case_id, urd.domain_id, dd.name, dd.label
         )
-        SELECT use_case_id,
-               COUNT(*)                          AS required_total,
-               COUNT(*) FILTER (WHERE satisfied) AS required_ready,
+        SELECT ac.use_case_id,
+               -- Total = distinct assets + orphan domains (domains w/ no serving assets)
+               (ac.asset_total + ac.orphan_domains) AS required_total,
+               ac.asset_ready AS required_ready,
                COALESCE(
                    jsonb_agg(
-                       jsonb_build_object('name', domain_name, 'label', domain_label)
-                       ORDER BY domain_label
-                   ) FILTER (WHERE NOT satisfied),
+                       jsonb_build_object('name', ds.domain_name, 'label', ds.domain_label)
+                       ORDER BY ds.domain_label
+                   ) FILTER (WHERE NOT ds.satisfied),
                    '[]'::jsonb
-               )                                 AS pending_domains
-        FROM domain_satisfaction
-        GROUP BY use_case_id
+               ) AS pending_domains
+        FROM asset_counts ac
+        LEFT JOIN domain_satisfaction ds ON ds.use_case_id = ac.use_case_id
+        GROUP BY ac.use_case_id, ac.asset_total, ac.asset_ready, ac.orphan_domains
         """, ready_asset_ids
     )
     by_domain = {r["use_case_id"]: r for r in domain_rows}

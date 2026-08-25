@@ -140,9 +140,10 @@ class TestReadinessUsesOneResolution(unittest.TestCase):
         self.assertIn("ready_asset_ids = await ready_assets(", self.source)
 
     def test_both_paths_use_the_resolved_list(self):
-        self.assertEqual(self.source.count("= ANY($1::int[])"), 2,
+        self.assertEqual(self.source.count("= ANY($1::int[])"), 3,
                          "both the module path and the domain path must filter on "
-                         "the resolved asset list")
+                         "the resolved asset list (domain path uses it twice: "
+                         "once in asset_ready check, once in domain satisfaction)")
 
     def test_no_inline_status_literal_remains_in_the_path_queries(self):
         """The module/domain COUNT queries must not re-derive readiness."""
