@@ -46,6 +46,7 @@ interface RoleContextValue {
   isExecLocked: boolean
   activePersona: Persona
   setPersona: (persona: Persona) => void
+  isPreviewing: boolean
   loading: boolean
 }
 
@@ -153,6 +154,10 @@ export function RoleProvider({ children }: { children: ReactNode }) {
   // trusted persona and cannot disagree. isAdmin comes from GET /api/me.
   const activePersona = effectivePersona(persona ?? 'pm', isAdmin)
 
+  // PHASE C: isPreviewing = admin viewing as a non-admin persona (testing mode).
+  // This helps Header show a clear "Viewing as X" badge when an admin is previewing.
+  const isPreviewing = isAdmin && activePersona !== 'admin'
+
   const value = useMemo(
     () => ({
       email,
@@ -160,9 +165,10 @@ export function RoleProvider({ children }: { children: ReactNode }) {
       isExecLocked,
       activePersona,
       setPersona,
+      isPreviewing,
       loading,
     }),
-    [email, isAdmin, isExecLocked, activePersona, setPersona, loading],
+    [email, isAdmin, isExecLocked, activePersona, setPersona, isPreviewing, loading],
   )
 
   return <RoleContext.Provider value={value}>{children}</RoleContext.Provider>

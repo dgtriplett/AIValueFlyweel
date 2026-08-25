@@ -499,22 +499,23 @@ function NavGroup({
 }
 
 /**
- * ROLES PHASE A — persona switcher / role indicator.
+ * ROLES PHASE C — "View as persona" testing switcher for admins.
  *
- * The point of this phase: a regular user's persona is INFERRED from their stored
- * role, not freely chosen. So:
+ * The point of this phase: make the admin persona switcher an EXPLICIT testing
+ * affordance, not a privilege-escalation mechanism. So:
  *   - EXEC-LOCKED (stored 'executive', non-admin): a static "Executive" label. No
  *     switch — they cannot leave the executive view.
  *   - NON-ADMIN (pm or executive): a static role/persona indicator (a small label
  *     'PM' / 'Executive'). NO dropdown — persona is fixed by their stored role.
- *   - ADMIN: keeps a switcher for now. The full 'view as' UX is a LATER phase; the
- *     'admin' option is only OFFERED to a trusted admin (isAdmin from GET /api/me).
+ *   - ADMIN: a 'View as:' dropdown labeled as a TESTING preview with a tooltip.
+ *     When viewing as a non-admin persona, shows a subtle badge 'Viewing as PM'
+ *     (or Executive) to make it clear they're in preview mode.
  *
  * isAdmin is the trusted fact from /api/me (the GRID_ATLAS_ADMINS allowlist), NOT
- * the self-selected persona.
+ * the self-selected persona. Server-side authz still keys off the real isAdmin.
  */
 function PersonaSwitcher() {
-  const { activePersona, setPersona, isAdmin, isExecLocked, loading } = useRole()
+  const { activePersona, setPersona, isAdmin, isExecLocked, isPreviewing, loading } = useRole()
 
   if (loading) return null
 
@@ -545,29 +546,47 @@ function PersonaSwitcher() {
     )
   }
 
-  // Admins keep a switcher for now (full 'view as' comes in a later phase). The
-  // 'admin' option is only OFFERED to a trusted admin.
+  // Admins: show a 'View as:' testing switcher. Make it clear this is a PREVIEW for
+  // testing, not privilege escalation — server-side authz still keys off real isAdmin.
+  //
+  // The 'Admin' option is spread in ONLY when isAdmin is true, so a non-admin's
+  // option list can never contain it — defense in depth on top of the !isAdmin
+  // early-return above. PM and Executive are always offered (the personas an
+  // admin can preview as).
   const personas: Array<{ value: Persona; label: string }> = [
-    { value: 'admin', label: 'Admin' },
+    ...(isAdmin ? [{ value: 'admin' as Persona, label: 'Admin' }] : []),
     { value: 'pm', label: 'PM' },
     { value: 'executive', label: 'Executive' },
   ]
 
   return (
-    <div className="flex items-center gap-2">
-      <span className="text-xs text-navy-400">Persona:</span>
-      <select
-        value={activePersona}
-        onChange={(e) => setPersona(e.target.value as Persona)}
-        className="text-xs bg-navy-700 text-navy-200 border border-navy-600 rounded px-2 py-1 disabled:opacity-50 disabled:cursor-not-allowed"
-        title="Switch persona"
-      >
-        {personas.map((p) => (
-          <option key={p.value} value={p.value}>
-            {p.label}
-          </option>
-        ))}
-      </select>
+    <div className="flex flex-col items-end gap-1">
+      <div className="flex items-center gap-2">
+        <span
+          className="text-xs text-navy-400"
+          title="Preview the app as another persona — for testing. Your admin privileges are unchanged."
+        >
+          View as:
+        </span>
+        <select
+          value={activePersona}
+          onChange={(e) => setPersona(e.target.value as Persona)}
+          className="text-xs bg-navy-700 text-navy-200 border border-navy-600 rounded px-2 py-1 disabled:opacity-50 disabled:cursor-not-allowed"
+          title="Preview the app as another persona — for testing. Your admin privileges are unchanged."
+        >
+          {personas.map((p) => (
+            <option key={p.value} value={p.value}>
+              {p.label}
+            </option>
+          ))}
+        </select>
+      </div>
+      {/* Show a subtle badge when an admin is viewing as a non-admin persona */}
+      {isPreviewing && (
+        <span className="text-[10px] text-amber-400 bg-amber-900/20 border border-amber-700/30 rounded px-1.5 py-0.5">
+          Viewing as {activePersona === 'pm' ? 'PM' : 'Executive'}
+        </span>
+      )}
     </div>
   )
 }
