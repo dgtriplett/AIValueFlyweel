@@ -40,6 +40,7 @@ const OnboardingView = lazy(() => import('./views/OnboardingView'))
 // nobody loads on the first screen. Each becomes a chunk fetched on demand rather
 // than weight in the entry bundle every visitor pays for.
 const CoverageView = lazy(() => import('./views/CoverageView'))
+const AtRiskView = lazy(() => import('./views/AtRiskView'))
 const WhatIfView = lazy(() => import('./views/WhatIfView'))
 const TrendView = lazy(() => import('./views/TrendView'))
 const GlossaryView = lazy(() => import('./views/GlossaryView'))
@@ -189,6 +190,8 @@ function AppShell() {
         return <AssumptionsView />
       case 'coverage':
         return <CoverageView />
+      case 'atrisk':
+        return <AtRiskView />
       case 'whatif':
         return <WhatIfView />
       case 'trend':

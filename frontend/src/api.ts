@@ -16,6 +16,7 @@ import type {
   Assumption,
   AssumptionResearchResponse,
   AttributeResponse,
+  AtRiskResponse,
   BlastRadiusResponse,
   BlastNode,
   BootstrapResponse,
@@ -190,6 +191,12 @@ export const api = {
 
   useCaseDetail: (id: number) =>
     http.get<UseCaseDetail>(`/use-cases/${id}/detail`).then((r) => r.data),
+
+  /** The at-risk rollup: slipping / overdue use cases in the caller's portfolio,
+   *  with WHY and how many times they slipped. Scoped by the account interceptor
+   *  and the server's portfolio visibility helper. */
+  atRiskUseCases: () =>
+    http.get<AtRiskResponse>('/use-cases/at-risk').then((r) => r.data),
 
   createUseCase: (body: Partial<UseCase>) =>
     http.post<UseCase>('/use-cases', body).then((r) => r.data),
