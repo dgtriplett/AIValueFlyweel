@@ -197,6 +197,24 @@ def check_auth(profile: str) -> dict:
     return me
 
 
+def deployer_email(me: dict) -> str:
+    """The deploying user's email from a `current-user me` payload.
+
+    `userName` is the login, which for a Databricks account IS the email; the
+    `emails` list is the fallback for identities whose userName is not itself an
+    address. Returns "" when neither is present (e.g. an unauthenticated dry run),
+    which is the correct fail-closed default — an empty allowlist means no admin.
+    """
+    name = (me.get("userName") or "").strip()
+    if "@" in name:
+        return name
+    for entry in me.get("emails") or []:
+        value = (entry.get("value") or "").strip() if isinstance(entry, dict) else ""
+        if value:
+            return value
+    return name
+
+
 # ---------------------------------------------------------------------------
 # Step 3 — write config
 # ---------------------------------------------------------------------------
@@ -230,6 +248,7 @@ def write_config(settings: dict) -> None:
         ("GENIE_MIRROR_SCHEMA", "genie_mirror_schema"),
         ("GENIE_SPACE_ID", "genie_space_id"), ("DEMO_MODE", "demo_mode"),
         ("APP_ENV", "app_env"),
+        ("GRID_ATLAS_ADMINS", "grid_atlas_admins"),
     ):
         if settings.get(key) is not None:
             text = set_yaml_env(text, name, str(settings[key]))
@@ -576,6 +595,11 @@ def main() -> None:
     parser.add_argument("--pg-database", default=None)
     parser.add_argument("--demo-mode", choices=["on", "off"], default=None,
                         help="ship the removable Demo Mode toggle (default off)")
+    parser.add_argument("--admins", default=None,
+                        help="comma-separated Databricks emails for the "
+                             "GRID_ATLAS_ADMINS allowlist; defaults to the "
+                             "deploying user so the operator who installs the "
+                             "app is admin by default")
     parser.add_argument("--skip-build", action="store_true",
                         help="don't rebuild the frontend")
     parser.add_argument("--skip-grants", action="store_true",
@@ -635,6 +659,11 @@ def main() -> None:
                              "Lakebase project id", "grid-atlas-db")
     pg_database = value("pg_database", "pg_database", "Lakebase database", "app")
     demo_mode = args.demo_mode or cache.get("demo_mode", "off")
+    # Admin allowlist: --admins wins; otherwise default to the deploying user so the
+    # operator who installs the app is an admin by default. is_admin() still fails
+    # closed — this only ensures the deployer's email lands in the allowlist.
+    grid_atlas_admins = args.admins or deployer_email(me) or cache.get(
+        "grid_atlas_admins", "")
 
     settings = {
         "profile": profile, "target": target, "warehouse_id": warehouse_id,
@@ -652,6 +681,7 @@ def main() -> None:
         # then remembered.
         "genie_space_id": args.genie_space_id or cache.get("genie_space_id", ""),
         "demo_mode": demo_mode,
+        "grid_atlas_admins": grid_atlas_admins,
     }
 
     # Lakebase host: auto-detect so the operator doesn't have to look it up.

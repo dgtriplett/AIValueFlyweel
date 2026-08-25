@@ -188,7 +188,12 @@ python3 scripts/deploy.py --yes \
 ```
 
 Useful flags: `--dry-run`, `--skip-build`, `--skip-grants`, `--skip-seed`,
-`--skip-start`, `--seed-demo`.
+`--skip-start`, `--seed-demo`, `--admins`.
+
+By default the deploy makes **you** — the deploying user — an account administrator
+by writing your Databricks email into `GRID_ATLAS_ADMINS` (the fail-closed admin
+allowlist; see OPERATIONS.md). Pass `--admins a@x.com,b@x.com` to set a different
+allowlist instead.
 
 ---
 
