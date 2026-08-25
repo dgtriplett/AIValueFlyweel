@@ -5,7 +5,7 @@
 // and cost a full remount on every tab change — the flywheel's layout and the
 // dashboards' queries would be thrown away and recomputed each time.
 
-import { lazy, Suspense, useEffect, useState } from 'react'
+import { lazy, Suspense, useEffect, useRef, useState } from 'react'
 import { useQuery } from '@tanstack/react-query'
 import { api } from './api'
 import { FilterProvider } from './context/FilterContext'
@@ -15,7 +15,8 @@ import { FilterBar } from './components/FilterBar'
 import { AssistantPanel } from './components/AssistantPanel'
 import { Header } from './components/Header'
 import type { TabId } from './components/Header'
-import { visibleTabsForPersona } from './components/Header'
+import { resolveLandingTab, visibleTabsForPersona } from './components/Header'
+import { readLastTab, writeLastTab } from './lib/lastTab'
 import { NewUseCaseModal } from './components/NewUseCaseModal'
 import { slugFromLocation } from './lib/kbroute'
 import type { UseCaseView } from './components/ScopeSwitch'
@@ -121,23 +122,73 @@ function AppShell() {
   const [creating, setCreating] = useState(false)
   const [proposalUcId, setProposalUcId] = useState<number | null>(null)
 
-  // Phase 2: fallback when the active tab is no longer visible to the current persona.
-  // Example: an admin viewing 'accounts' switches to 'pm' persona — accounts is now
-  // hidden, so fall back to the first visible tab for that persona.
-  const { activePersona, isAdmin } = useRole()
+  const { activePersona, isAdmin, loading } = useRole()
   // Executive persona is read-only across the app; the full-page workspace honours
   // that by hiding edit controls (admin + pm get the full editing surface).
   const detailReadOnly = activePersona === 'executive'
+
+  // SAVED VIEWS — per-persona default landing + last-viewed memory.
+  //
+  // Persona is not known at mount (RoleContext resolves /api/me asynchronously),
+  // so the initializer above can only seed the KB deep-link exception. The two
+  // effects below own the persona-aware navigation once identity is known:
+  //
+  //  1. COLD LOAD: land the persona on its remembered tab, or its default home
+  //     when there is nothing remembered / the stored tab is no longer visible to
+  //     it (resolveLandingTab reuses the persona→visible-tabs logic — no second
+  //     list). A KB deep link wins over this: it is an explicit destination, so we
+  //     do not overwrite 'knowledge' with a landing tab.
+  //  2. PERSONA SWITCH: an admin 'view as' change restores THAT persona's last
+  //     tab, or its home when the stored tab is not visible to it — the same
+  //     resolveLandingTab call, so the switch and the cold load agree.
+  //
+  // `landedRef` gates the cold-load landing to run exactly once (after loading
+  // clears), and `personaRef` distinguishes the first resolution from a later
+  // switch so a cold load does not double as a "switch" and vice versa.
+  const landedRef = useRef(false)
+  const personaRef = useRef<typeof activePersona | null>(null)
+  const deepLinkedRef = useRef<boolean>(slugFromLocation() !== null)
+
+  // Persist the active tab as this persona's last-viewed tab on every change,
+  // including programmatic navigation (flywheel focus, proposal handoff, drawer
+  // Back). Skipped while identity is still loading — we do not yet know whose
+  // memory to write, and a KB deep link is a transient destination, not a home.
   useEffect(() => {
-    const visibleTabs = visibleTabsForPersona(activePersona)
-    if (!visibleTabs.has(tab)) {
-      // Current tab is not visible to this persona — pick the first visible one.
-      const fallback = visibleTabs.values().next().value
-      if (fallback) {
-        setTab(fallback)
-      }
+    if (loading) return
+    if (deepLinkedRef.current && !landedRef.current) return
+    writeLastTab(activePersona, tab)
+  }, [activePersona, tab, loading])
+
+  // Cold-load landing + persona-switch restore + visibility fallback, unified so
+  // they read the SAME resolveLandingTab and cannot disagree.
+  useEffect(() => {
+    if (loading) return
+
+    if (!landedRef.current) {
+      // First time identity is known this session.
+      landedRef.current = true
+      personaRef.current = activePersona
+      // A KB deep link is an explicit destination — honour it, do not override.
+      if (deepLinkedRef.current) return
+      const landing = resolveLandingTab(activePersona, readLastTab(activePersona))
+      if (landing !== tab) setTab(landing)
+      return
     }
-  }, [activePersona, tab])
+
+    if (personaRef.current !== activePersona) {
+      // Persona switch (admin 'view as'): restore that persona's last tab, or its
+      // home when the stored tab is not visible to it.
+      personaRef.current = activePersona
+      setTab(resolveLandingTab(activePersona, readLastTab(activePersona)))
+      return
+    }
+
+    // Same persona, no switch: only correct an active tab that is not visible to
+    // this persona (a nav edit could strand it), falling back to its home.
+    if (!visibleTabsForPersona(activePersona).has(tab)) {
+      setTab(resolveLandingTab(activePersona, readLastTab(activePersona)))
+    }
+  }, [activePersona, tab, loading])
 
   /** Jump to the flywheel with a use case already lit up. */
   const focusOnFlywheel = (id: number) => {
