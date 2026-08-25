@@ -571,8 +571,8 @@ function NavGroup({
  *   - NON-ADMIN (pm or executive): a static role/persona indicator (a small label
  *     'PM' / 'Executive'). NO dropdown — persona is fixed by their stored role.
  *   - ADMIN: a 'View as:' dropdown labeled as a TESTING preview with a tooltip.
- *     When viewing as a non-admin persona, shows a subtle badge 'Viewing as PM'
- *     (or Executive) to make it clear they're in preview mode.
+ *     When viewing as a non-admin persona, the dropdown shows an amber ring/border
+ *     to make it clear they're in preview mode.
  *
  * isAdmin is the trusted fact from /api/me (the GRID_ATLAS_ADMINS allowlist), NOT
  * the self-selected persona. Server-side authz still keys off the real isAdmin.
@@ -623,33 +623,29 @@ function PersonaSwitcher() {
   ]
 
   return (
-    <div className="flex flex-col items-end gap-1">
-      <div className="flex items-center gap-2">
-        <span
-          className="text-xs text-navy-400"
-          title="Preview the app as another persona — for testing. Your admin privileges are unchanged."
-        >
-          View as:
-        </span>
-        <select
-          value={activePersona}
-          onChange={(e) => setPersona(e.target.value as Persona)}
-          className="text-xs bg-navy-700 text-navy-200 border border-navy-600 rounded px-2 py-1 disabled:opacity-50 disabled:cursor-not-allowed"
-          title="Preview the app as another persona — for testing. Your admin privileges are unchanged."
-        >
-          {personas.map((p) => (
-            <option key={p.value} value={p.value}>
-              {p.label}
-            </option>
-          ))}
-        </select>
-      </div>
-      {/* Show a subtle badge when an admin is viewing as a non-admin persona */}
-      {isPreviewing && (
-        <span className="text-[10px] text-amber-400 bg-amber-900/20 border border-amber-700/30 rounded px-1.5 py-0.5">
-          Viewing as {activePersona === 'pm' ? 'PM' : 'Executive'}
-        </span>
-      )}
+    <div className="flex items-center gap-2">
+      <span
+        className="text-xs text-navy-400"
+        title="Preview the app as another persona — for testing. Your admin privileges are unchanged."
+      >
+        View as:
+      </span>
+      <select
+        value={activePersona}
+        onChange={(e) => setPersona(e.target.value as Persona)}
+        className={`text-xs bg-navy-700 text-navy-200 border rounded px-2 py-1 disabled:opacity-50 disabled:cursor-not-allowed ${
+          isPreviewing
+            ? 'ring-1 ring-amber-500/50 border-amber-600/50'
+            : 'border-navy-600'
+        }`}
+        title="Preview the app as another persona — for testing. Your admin privileges are unchanged."
+      >
+        {personas.map((p) => (
+          <option key={p.value} value={p.value}>
+            {p.label}
+          </option>
+        ))}
+      </select>
     </div>
   )
 }
@@ -775,21 +771,19 @@ export function Header({
               <p className="text-xs text-navy-400 -mt-0.5">{subtitle}</p>
             </div>
           </div>
-          {/* Top-right cluster: env pill, persona/role indicator, and — UNDER it —
-              the Get started button (relocated out of the main nav). */}
-          <div className="flex flex-col items-end gap-2">
-            <div className="flex items-center gap-3">
-              {env ? (
-                <span
-                  className={env.toUpperCase() === 'PROD' ? 'badge-high inline-flex items-center gap-1' : 'badge-muted inline-flex items-center gap-1'}
-                  title="Deployment environment"
-                >
-                  <Activity className="w-3 h-3" />
-                  {env.toUpperCase()}
-                </span>
-              ) : null}
-              <PersonaSwitcher />
-            </div>
+          {/* Top-right cluster: env pill, persona/role indicator, and Get started
+              button — all in a single horizontal row, right-aligned. */}
+          <div className="flex flex-wrap items-center justify-end gap-3">
+            {env ? (
+              <span
+                className={env.toUpperCase() === 'PROD' ? 'badge-high inline-flex items-center gap-1' : 'badge-muted inline-flex items-center gap-1'}
+                title="Deployment environment"
+              >
+                <Activity className="w-3 h-3" />
+                {env.toUpperCase()}
+              </span>
+            ) : null}
+            <PersonaSwitcher />
             <GetStartedButton tab={tab} setTab={setTab} visible={entryTab !== null} />
           </div>
         </div>

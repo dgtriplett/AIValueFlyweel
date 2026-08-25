@@ -2436,9 +2436,9 @@ tests['Header shows "View as:" for admins and "Role:" for non-admins'] = () => {
   // Non-admins must see "Role:" label (static indicator, no dropdown)
   assert.match(source, /Role:/)
 
-  // The switcher must check isPreviewing to show a preview badge
+  // The switcher must check isPreviewing to show the amber ring preview cue
   assert.match(source, /isPreviewing/)
-  assert.match(source, /Viewing as/)
+  assert.match(source, /ring-1 ring-amber-500\/50 border-amber-600\/50/)
 
   // BEHAVIOURAL SHAPE (mutation-worthy): the ONLY <select> in PersonaSwitcher
   // must live AFTER the `if (!isAdmin)` early-return guard — i.e. the dropdown
@@ -2466,7 +2466,7 @@ tests['Header shows "View as:" for admins and "Role:" for non-admins'] = () => {
 
 tests['RoleContext exposes isPreviewing for admin preview mode'] = () => {
   // PHASE C: isPreviewing = admin && activePersona !== 'admin' helps the Header
-  // show a clear "Viewing as X" badge when an admin is testing another persona.
+  // show an amber ring on the dropdown when an admin is testing another persona.
   const source = readFileSync('src/context/RoleContext.tsx', 'utf8')
   
   // The context must expose isPreviewing in its interface
