@@ -40,6 +40,27 @@ import {
 import { IngestionBadge, ReadinessBadge, StatusBadge } from './Badges'
 import type { Lob, Status, UseCase, ValueComponent } from '../types'
 
+/**
+ * Human-readable domain header. The backend supplies domain_label (e.g.
+ * "Customer Accounts") on every required_domains entry; render THAT, never the raw
+ * snake_case domain_name key ("customer_accounts"). If the label is ever
+ * null/empty, prettify the key (underscores -> spaces, title-case) so the header is
+ * never raw snake_case.
+ */
+function prettifyDomain(label?: string | null, name?: string | null): string {
+  const trimmed = (label ?? '').trim()
+  if (trimmed) return trimmed
+  const raw = (name ?? '').trim()
+  if (!raw) return ''
+  return raw
+    .replace(/_/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim()
+    .split(' ')
+    .map((word) => (word ? word.charAt(0).toUpperCase() + word.slice(1) : word))
+    .join(' ')
+}
+
 /** The subset of the row the edit form owns; the rest of the record is read-only. */
 type Draft = Pick<
   UseCase,
@@ -1021,7 +1042,7 @@ function UseCaseDetail({
                   detail.required_domains.map((domain) => (
                     <div key={domain.domain_id} className="space-y-0.5">
                       <div className="text-xs font-semibold text-navy-400 px-1 py-0.5 flex items-center gap-2">
-                        <span>{domain.domain_name}</span>
+                        <span>{prettifyDomain(domain.domain_label, domain.domain_name)}</span>
                         <span
                           className={`badge-${domain.satisfied ? 'high' : 'muted'} text-[10px]`}
                         >
