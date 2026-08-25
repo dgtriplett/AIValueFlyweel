@@ -212,6 +212,65 @@ class TestSettingsParity(unittest.TestCase):
         self.assertIn(match.group(1).strip("\"'"), ("off",))
 
 
+class TestDeployerAdminAllowlist(unittest.TestCase):
+    """The deploying user should be an admin by default.
+
+    is_admin() fails closed on an empty GRID_ATLAS_ADMINS, so an app deployed
+    without the operator's email in the allowlist has NO admins and every admin
+    surface is hidden. deploy.py must land the deployer's email (or --admins) in
+    the allowlist so the operator who installs the app is admin by default.
+    """
+
+    def test_deployer_email_prefers_username_when_it_is_an_email(self):
+        """`current-user me`'s userName is the login, which is the email."""
+        self.assertEqual(
+            deploy.deployer_email({"userName": "ops@utility.com"}),
+            "ops@utility.com")
+
+    def test_deployer_email_falls_back_to_emails_list(self):
+        """A userName that is not itself an address falls back to emails[0]."""
+        me = {"userName": "service-principal-123",
+              "emails": [{"value": "ops@utility.com", "primary": True}]}
+        self.assertEqual(deploy.deployer_email(me), "ops@utility.com")
+
+    def test_deployer_email_empty_when_unauthenticated(self):
+        """A dry run against an unauthenticated profile returns {} — no admin."""
+        self.assertEqual(deploy.deployer_email({}), "")
+
+    def test_admins_flag_overrides_the_deployer_default(self):
+        """Mirrors deploy.py's precedence: --admins wins over the resolved email."""
+        me = {"userName": "ops@utility.com"}
+        admins_flag = "a@x.com,b@x.com"
+        chosen = admins_flag or deploy.deployer_email(me) or ""
+        self.assertEqual(chosen, "a@x.com,b@x.com")
+
+    def test_deployer_email_is_the_default_when_no_flag(self):
+        me = {"userName": "ops@utility.com"}
+        admins_flag = None
+        chosen = admins_flag or deploy.deployer_email(me) or ""
+        self.assertEqual(chosen, "ops@utility.com")
+
+    def test_write_config_writes_grid_atlas_admins_into_app_yaml(self):
+        """The whole point: the resolved allowlist must reach app.yaml's env."""
+        with open(APP_YAML) as fh:
+            text = fh.read()
+        out = deploy.set_yaml_env(text, "GRID_ATLAS_ADMINS", "ops@utility.com")
+        self.assertEqual(_env_value(out, "GRID_ATLAS_ADMINS"), "ops@utility.com")
+
+    def test_grid_atlas_admins_is_in_write_config_mapping(self):
+        """A typo'd key would be a silent no-op — the deployer would never be
+        written and the app would ship with no admin."""
+        import inspect
+        source = inspect.getsource(deploy.write_config)
+        self.assertIn('("GRID_ATLAS_ADMINS", "grid_atlas_admins")', source)
+
+    def test_app_yaml_ships_grid_atlas_admins_empty(self):
+        """The shipped template must not bake in an admin email — deploy fills it,
+        and an empty default preserves the fail-closed posture."""
+        with open(APP_YAML) as fh:
+            self.assertEqual(_env_value(fh.read(), "GRID_ATLAS_ADMINS"), "")
+
+
 class TestCliContract(unittest.TestCase):
     def test_dry_run_suppresses_execution(self):
         """--dry-run must be trustworthy: `run` returns without spawning anything."""

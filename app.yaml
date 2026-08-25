@@ -82,6 +82,15 @@ env:
   - name: RATE_LIMITS
     value: "on"
 
+  # Account administrators — comma-separated Databricks emails permitted to run
+  # the destructive / cross-tenant account operations (User Management, Audit Log,
+  # View-as). Matched case-insensitively against the X-Forwarded-Email identity
+  # the Apps proxy injects. is_admin() FAILS CLOSED: an empty value means nobody
+  # is an admin. Ships EMPTY so no admin is baked into the template; deploy.py
+  # fills this with the deploying user's email (or --admins) at deploy time.
+  - name: GRID_ATLAS_ADMINS
+    value: ""
+
 resources:
   - name: "sql-warehouse"
     description: "Warehouse for system-table reads, UC discovery, and ai_query() enrichment."
