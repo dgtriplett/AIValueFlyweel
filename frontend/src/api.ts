@@ -251,6 +251,11 @@ export const api = {
       .post<import('./types').Progression>(`/use-cases/${id}/progression/note`, { note })
       .then((r) => r.data),
 
+  setUseCaseOwner: (id: number, owner: string | null) =>
+    http
+      .put<import('./types').Progression>(`/use-cases/${id}/owner`, { owner })
+      .then((r) => r.data),
+
   dataAssets: () => http.get<DataAsset[]>('/data-assets').then((r) => r.data),
 
   dataAsset: (id: number) => http.get<DataAsset>(`/data-assets/${id}`).then((r) => r.data),

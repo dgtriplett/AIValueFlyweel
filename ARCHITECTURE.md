@@ -170,6 +170,16 @@ written back to Lakebase, which stays the portfolio's system of record.
   by admins in the admin portal. Persona is inferred from the resolved role rather than
   self-selected. Idempotent, additive (new table — deploy must run `migrate.py --grant-app-sp`).
   The `server/routes/users.py` router (mounted at `/api/users`) is the admin-only CRUD over this table: `GET` lists rows and flags allowlist (`is_env_admin`) admins, `PUT /{email}` upserts a role, `DELETE /{email}` reverts a user to the 'pm' default. Every endpoint calls `require_admin` first (fail-closed) and every mutation writes an `audit_log` row (`entity_type='app_user'`, `role_grant`/`role_revoke`).
+- **Per-account use-case owner** — `022_account_use_case_owner.sql`: adds a nullable
+  `owner` TEXT column to the existing account-scoped `account_use_case_progress` table
+  (from `017_uc_progression.sql`, keyed by (account_id, use_case_id)) rather than a new
+  table. Ownership is a per-account decision — the same catalog use case can carry a
+  different owner in each account's portfolio, and there is no `use_cases.account_id`.
+  The `PUT /use-cases/{id}/owner` endpoint upserts it (scoped through
+  `portfolio.use_case_visibility`, failing closed with a 404 for a use case not visible
+  to the caller) and writes an `owner_change` audit row; `get_use_case_detail` surfaces
+  it on the progression overlay. Idempotent and additive (ADD COLUMN IF NOT EXISTS);
+  column-add only, no SP grant needed on deploy.
 
 - **Migration ledger** — `schema_migrations`, created by `server/migrator.py`
   rather than by a numbered migration, since it must exist before the ledger can

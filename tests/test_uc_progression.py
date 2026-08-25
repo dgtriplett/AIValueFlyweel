@@ -125,7 +125,7 @@ class TestProgressionAtRisk(unittest.TestCase):
         db.on("SELECT uc.id, uc.title, uc.stage, uc.phase, uc.status, e.rationale", [])
         # Progression queries - must match the WHERE clause pattern used in detail endpoint
         db.on("account_use_case_progress", [
-            Row(target_go_live_date=yesterday, updated_at=None, updated_by="testuser")
+            Row(target_go_live_date=yesterday, owner=None, updated_at=None, updated_by="testuser")
         ])
         db.on("use_case_status_events", [])
         db.on("SELECT * FROM value_records WHERE", [])
@@ -167,7 +167,7 @@ class TestProgressionAtRisk(unittest.TestCase):
         db.on("SELECT uc.id, uc.title, uc.stage, uc.phase, uc.status, e.rationale", [])
         # Progression queries - must match the WHERE clause pattern used in detail endpoint
         db.on("account_use_case_progress", [
-            Row(target_go_live_date=yesterday, updated_at=None, updated_by="testuser")
+            Row(target_go_live_date=yesterday, owner=None, updated_at=None, updated_by="testuser")
         ])
         db.on("use_case_status_events", [])
         db.on("SELECT * FROM value_records WHERE", [])
@@ -205,7 +205,7 @@ class TestProgressionAtRisk(unittest.TestCase):
         db.on("SELECT uc.id, uc.title, uc.stage, uc.phase, uc.status, e.rationale", [])
         # Progression queries - must match the WHERE clause pattern used in detail endpoint
         db.on("account_use_case_progress", [
-            Row(target_go_live_date=tomorrow, updated_at=None, updated_by="testuser")
+            Row(target_go_live_date=tomorrow, owner=None, updated_at=None, updated_by="testuser")
         ])
         db.on("use_case_status_events", [])
         db.on("SELECT * FROM value_records WHERE", [])

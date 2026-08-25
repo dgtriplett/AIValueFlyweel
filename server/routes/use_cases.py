@@ -620,9 +620,9 @@ async def get_use_case_detail(uc_id: int):
                WHERE account_id=$1 AND entity_type='use_case' AND entity_id=$2
                ORDER BY created_at""",
             account_id, uc_id)
-        # Fetch progression data (target go-live date + event history)
+        # Fetch progression data (target go-live date + owner + event history)
         progress_row = await db.fetchrow(
-            """SELECT target_go_live_date, updated_at, updated_by
+            """SELECT target_go_live_date, owner, updated_at, updated_by
                FROM account_use_case_progress
                WHERE account_id=$1 AND use_case_id=$2""",
             account_id, uc_id)
@@ -642,6 +642,7 @@ async def get_use_case_detail(uc_id: int):
                 at_risk = True
         progression = {
             "target_go_live_date": progress_row["target_go_live_date"].isoformat() if progress_row and progress_row["target_go_live_date"] else None,
+            "owner": progress_row["owner"] if progress_row else None,
             "updated_at": progress_row["updated_at"].isoformat() if progress_row and progress_row["updated_at"] else None,
             "updated_by": progress_row["updated_by"] if progress_row else None,
             "at_risk": at_risk,
@@ -655,7 +656,7 @@ async def get_use_case_detail(uc_id: int):
             "SELECT * FROM comments WHERE entity_type='use_case' AND entity_id=$1 ORDER BY created_at",
             uc_id,
         )
-        progression = {"target_go_live_date": None, "updated_at": None, "updated_by": None, "at_risk": False, "events": []}
+        progression = {"target_go_live_date": None, "owner": None, "updated_at": None, "updated_by": None, "at_risk": False, "events": []}
     return {
         **uc,
         "required_assets": required_assets,
@@ -938,6 +939,11 @@ class ProgressionNote(BaseModel):
     note: str
 
 
+class ProgressionOwner(BaseModel):
+    # The per-account owner/assignee (email or display name). Null/empty clears it.
+    owner: str | None = None
+
+
 @router.get("/{uc_id}/progression")
 async def get_progression(uc_id: int):
     """Get the progression data for a use case (target date + event history)."""
@@ -947,10 +953,10 @@ async def get_progression(uc_id: int):
 
     account_id = await accounts.current()
     if account_id is None:
-        return {"target_go_live_date": None, "updated_at": None, "updated_by": None, "at_risk": False, "events": []}
+        return {"target_go_live_date": None, "owner": None, "updated_at": None, "updated_by": None, "at_risk": False, "events": []}
 
     progress_row = await db.fetchrow(
-        """SELECT target_go_live_date, updated_at, updated_by
+        """SELECT target_go_live_date, owner, updated_at, updated_by
            FROM account_use_case_progress
            WHERE account_id=$1 AND use_case_id=$2""",
         account_id, uc_id)
@@ -973,6 +979,7 @@ async def get_progression(uc_id: int):
 
     return {
         "target_go_live_date": progress_row["target_go_live_date"].isoformat() if progress_row and progress_row["target_go_live_date"] else None,
+        "owner": progress_row["owner"] if progress_row else None,
         "updated_at": progress_row["updated_at"].isoformat() if progress_row and progress_row["updated_at"] else None,
         "updated_by": progress_row["updated_by"] if progress_row else None,
         "at_risk": at_risk,
@@ -1072,6 +1079,56 @@ async def add_progression_note(uc_id: int, body: ProgressionNote, request: Reque
         account_id, uc_id, body.note.strip(), actor)
 
     await write_audit("use_case", uc_id, "progression_note", actor, {"note": body.note.strip()})
+
+    return await get_progression(uc_id)
+
+
+@router.put("/{uc_id}/owner")
+async def set_owner(uc_id: int, body: ProgressionOwner, request: Request):
+    """Set (or clear) the per-account owner/assignee for a use case.
+
+    Ownership is ACCOUNT-SCOPED: it upserts into `account_use_case_progress`
+    (keyed by (account_id, use_case_id)), so the same catalog use case can carry a
+    different owner in each account's portfolio. Scoped through
+    `portfolio.use_case_visibility` and FAILS CLOSED: a use case that is neither a
+    shared catalog entry nor in THIS account's portfolio 404s, exactly as if it did
+    not exist — never leak another tenant's use case by letting the caller assign it.
+    """
+    account_id = await accounts.current()
+    if account_id is None:
+        raise HTTPException(403, "Account required to assign an owner")
+
+    # Portfolio-scoped existence check: catalog OR in this account's portfolio.
+    # $1 = uc_id, $2 = account_id (bound by the visibility predicate at param_index=2).
+    visibility, params = await portfolio.use_case_visibility("uc", param_index=2)
+    exists = await db.fetchrow(
+        f"SELECT 1 FROM use_cases uc WHERE uc.id=$1 AND {visibility}",
+        uc_id, *params)
+    if exists is None:
+        # Fail closed: out-of-portfolio (or missing) use case is indistinguishable.
+        raise HTTPException(404, "Use case not found")
+
+    actor = current_user(request)
+
+    # Normalise: blank/whitespace-only clears the owner.
+    new_owner = (body.owner or "").strip() or None
+
+    prev_row = await db.fetchrow(
+        "SELECT owner FROM account_use_case_progress WHERE account_id=$1 AND use_case_id=$2",
+        account_id, uc_id)
+    prev_owner = prev_row["owner"] if prev_row else None
+
+    # Upsert the owner without disturbing the target date on an existing row.
+    await db.execute(
+        """INSERT INTO account_use_case_progress (account_id, use_case_id, owner, updated_at, updated_by)
+           VALUES ($1, $2, $3, now(), $4)
+           ON CONFLICT (account_id, use_case_id)
+           DO UPDATE SET owner=$3, updated_at=now(), updated_by=$4""",
+        account_id, uc_id, new_owner, actor)
+
+    if prev_owner != new_owner:
+        await write_audit("use_case", uc_id, "owner_change", actor,
+                          {"from": prev_owner, "to": new_owner})
 
     return await get_progression(uc_id)
 
