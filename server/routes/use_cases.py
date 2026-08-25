@@ -567,22 +567,22 @@ async def get_use_case_detail(uc_id: int):
 async def estimate_and_persist_value(uc_id: int, request: Request):
     """
     BUG 2 FIX: Generate and persist a value model for a use case.
-    
+
     Calls build_value_model (the same LLM-based logic used during generation)
     and writes the result to hypothesized_value_json. This gives the drawer
     an affordance to (re)generate a value model for use cases that have none
     (or have an empty one), so the Calculate section is never blank.
-    
+
     Account-scoped: only the use case owner account can estimate/persist.
     Rate-limited via the shared research budget (mirrors estimate_value).
     """
     from . import accounts
     from .agents import build_value_model, research_budget
-    
+
     account_id = accounts.get_account(request)
     if account_id is None:
         raise HTTPException(403, "No account selected")
-    
+
     # Verify ownership
     uc = await db.fetchrow(
         """SELECT id, title, description, account_id
@@ -594,11 +594,11 @@ async def estimate_and_persist_value(uc_id: int, request: Request):
         raise HTTPException(404, "Use case not found")
     if uc["account_id"] != account_id:
         raise HTTPException(403, "Cannot estimate value for another account's use case")
-    
+
     # Rate-limit via research budget (same as estimate_value endpoint)
     async with research_budget(account_id):
         value_model = await build_value_model(uc["title"], uc["description"])
-    
+
     # Persist the value model
     await db.execute(
         """UPDATE use_cases
@@ -606,11 +606,11 @@ async def estimate_and_persist_value(uc_id: int, request: Request):
            WHERE id = $2 AND account_id = $3""",
         json.dumps(value_model), uc_id, account_id
     )
-    
+
     await write_audit("use_case", uc_id, "estimate_value_persist", current_user(request), {
         "component_count": len(value_model.get("components", [])),
     })
-    
+
     return value_model
 
 
