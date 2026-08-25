@@ -8,7 +8,7 @@ from .. import accounts
 from ..common import current_user, row_to_dict, rows_to_list, write_audit
 from ..db import db
 from .. import portfolio
-from ..readiness import readiness_map, readiness_for
+from ..readiness import readiness_map, readiness_for, domain_satisfaction_for
 from ..value_engine import (
     compute_realized,
     compute_value_range,
@@ -405,6 +405,18 @@ async def get_use_case_detail(uc_id: int):
         uc_id,
     )
 
+    # BUG 1 FIX: Per-domain satisfaction, computed by the SAME rule the readiness
+    # badge uses (readiness.domain_satisfaction_for -> bool_or any serving asset
+    # curated/governed). We do NOT re-derive the rule here; importing the shared
+    # helper keeps the badge count and this list telling one consistent story.
+    domain_satisfied_map = await domain_satisfaction_for(uc_id)
+
+    # required_domains groups the serving assets under their domain, with a
+    # per-domain satisfied flag. The drawer renders this grouped view for
+    # domain-path use cases so that an unlanded serving asset reads as "this domain
+    # is already covered by a sibling asset" rather than a broken N/N badge.
+    required_domains: list[dict] = []
+
     # For each domain requirement, resolve its serving assets
     for domain_req in domain_reqs:
         domain_id = domain_req["domain_id"]
@@ -412,6 +424,9 @@ async def get_use_case_detail(uc_id: int):
         domain_name = domain_req["domain_name"]
         domain_label = domain_req["domain_label"]
         rationale = domain_req["rationale"] or f"Required domain: {domain_label}"
+        # Satisfaction is only meaningful for REQUIRED domains (the ones the badge
+        # counts); default False for helpful so the flag is always present.
+        satisfied = bool(domain_satisfied_map.get(domain_id, False)) if necessity == "required" else False
 
         # Find all assets that serve this domain, with per-account status overlay
         serving_assets = await db.fetch(
@@ -426,6 +441,8 @@ async def get_use_case_detail(uc_id: int):
             domain_id, account_id,
         )
 
+        grouped_assets: list[dict] = []
+
         if serving_assets:
             # Add each serving asset to the appropriate list (required/helpful)
             for asset_row in serving_assets:
@@ -433,8 +450,15 @@ async def get_use_case_detail(uc_id: int):
                 asset_dict["criticality"] = necessity
                 asset_dict["rationale"] = rationale
                 asset_dict["via_domain"] = True  # Mark as coming from domain path
+                asset_dict["domain_id"] = domain_id
                 asset_dict["domain_name"] = domain_name
                 asset_dict["domain_label"] = domain_label
+                # domain_covered: this asset's DOMAIN is already satisfied (by this
+                # or a sibling serving asset), so an unlanded status here is NOT a
+                # blocker. Drives the "domain covered" marker in the flat list.
+                asset_dict["domain_satisfied"] = satisfied
+
+                grouped_assets.append(asset_dict)
 
                 # Check if this asset is already in the list (from module path)
                 asset_id = asset_dict["id"]
@@ -461,11 +485,24 @@ async def get_use_case_detail(uc_id: int):
                 "rationale": rationale,
                 "ingestion_status": "not_started",
                 "is_domain_placeholder": True,  # Flag to help frontend render differently
+                "via_domain": True,
+                "domain_satisfied": satisfied,
             }
+            grouped_assets.append(domain_item)
             if necessity == "required":
                 required_assets.append(domain_item)
             else:
                 helpful_assets.append(domain_item)
+
+        required_domains.append({
+            "domain_id": domain_id,
+            "domain_name": domain_name,
+            "domain_label": domain_label,
+            "necessity": necessity,
+            "satisfied": satisfied,
+            "rationale": rationale,
+            "assets": grouped_assets,
+        })
 
 
     if account_id is not None:
@@ -517,12 +554,64 @@ async def get_use_case_detail(uc_id: int):
         **uc,
         "required_assets": required_assets,
         "helpful_assets": helpful_assets,
+        "required_domains": required_domains,
         "enables": rows_to_list(enables),
         "enabled_by": rows_to_list(enabled_by),
         "value_records": rows_to_list(values),
         "comments": rows_to_list(comments),
         "progression": progression,
     }
+
+
+@router.post("/{uc_id}/estimate-value")
+async def estimate_and_persist_value(uc_id: int, request: Request):
+    """
+    BUG 2 FIX: Generate and persist a value model for a use case.
+
+    Calls build_value_model (the same LLM-based logic used during generation)
+    and writes the result to hypothesized_value_json. This gives the drawer
+    an affordance to (re)generate a value model for use cases that have none
+    (or have an empty one), so the Calculate section is never blank.
+
+    Account-scoped: only the use case owner account can estimate/persist.
+    Rate-limited via the shared research budget (mirrors estimate_value).
+    """
+    from . import accounts
+    from .agents import build_value_model, research_budget
+
+    account_id = accounts.get_account(request)
+    if account_id is None:
+        raise HTTPException(403, "No account selected")
+
+    # Verify ownership
+    uc = await db.fetchrow(
+        """SELECT id, title, description, account_id
+           FROM use_cases
+           WHERE id = $1""",
+        uc_id
+    )
+    if uc is None:
+        raise HTTPException(404, "Use case not found")
+    if uc["account_id"] != account_id:
+        raise HTTPException(403, "Cannot estimate value for another account's use case")
+
+    # Rate-limit via research budget (same as estimate_value endpoint)
+    async with research_budget(account_id):
+        value_model = await build_value_model(uc["title"], uc["description"])
+
+    # Persist the value model
+    await db.execute(
+        """UPDATE use_cases
+           SET hypothesized_value_json = $1::jsonb
+           WHERE id = $2 AND account_id = $3""",
+        json.dumps(value_model), uc_id, account_id
+    )
+
+    await write_audit("use_case", uc_id, "estimate_value_persist", current_user(request), {
+        "component_count": len(value_model.get("components", [])),
+    })
+
+    return value_model
 
 
 @router.post("")

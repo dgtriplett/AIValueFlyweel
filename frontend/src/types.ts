@@ -95,6 +95,7 @@ export interface UseCase {
   in_portfolio?: boolean | null
 
   // merged by the server
+  requirement_model?: 'module' | 'domain' | null
   readiness?: Readiness | null
   ready_pct?: number | null
   required_total?: number | null
@@ -161,9 +162,20 @@ export interface Progression {
   events: ProgressionEvent[]
 }
 
+export interface RequiredDomain {
+  domain_id: number
+  domain_name: string
+  domain_label: string
+  necessity: Criticality
+  satisfied: boolean
+  assets: Array<RequiredAsset & { domain_satisfied?: boolean }>
+}
+
 export interface UseCaseDetail extends UseCase {
   required_assets?: RequiredAsset[]
   helpful_assets?: RequiredAsset[]
+  // Bug 1 fix: domain-grouped requirements
+  required_domains?: RequiredDomain[]
   enables?: LinkedUseCase[]
   enabled_by?: LinkedUseCase[]
   value_records?: ValueRecord[]
