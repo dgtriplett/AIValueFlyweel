@@ -8,7 +8,7 @@ from .. import accounts
 from ..common import current_user, row_to_dict, rows_to_list, write_audit
 from ..db import db
 from .. import portfolio
-from ..readiness import readiness_map, readiness_for
+from ..readiness import readiness_map, readiness_for, domain_satisfaction_for
 from ..value_engine import (
     compute_realized,
     compute_value_range,
@@ -405,6 +405,18 @@ async def get_use_case_detail(uc_id: int):
         uc_id,
     )
 
+    # BUG 1 FIX: Per-domain satisfaction, computed by the SAME rule the readiness
+    # badge uses (readiness.domain_satisfaction_for -> bool_or any serving asset
+    # curated/governed). We do NOT re-derive the rule here; importing the shared
+    # helper keeps the badge count and this list telling one consistent story.
+    domain_satisfied_map = await domain_satisfaction_for(uc_id)
+
+    # required_domains groups the serving assets under their domain, with a
+    # per-domain satisfied flag. The drawer renders this grouped view for
+    # domain-path use cases so that an unlanded serving asset reads as "this domain
+    # is already covered by a sibling asset" rather than a broken N/N badge.
+    required_domains: list[dict] = []
+
     # For each domain requirement, resolve its serving assets
     for domain_req in domain_reqs:
         domain_id = domain_req["domain_id"]
@@ -412,6 +424,9 @@ async def get_use_case_detail(uc_id: int):
         domain_name = domain_req["domain_name"]
         domain_label = domain_req["domain_label"]
         rationale = domain_req["rationale"] or f"Required domain: {domain_label}"
+        # Satisfaction is only meaningful for REQUIRED domains (the ones the badge
+        # counts); default False for helpful so the flag is always present.
+        satisfied = bool(domain_satisfied_map.get(domain_id, False)) if necessity == "required" else False
 
         # Find all assets that serve this domain, with per-account status overlay
         serving_assets = await db.fetch(
@@ -426,6 +441,8 @@ async def get_use_case_detail(uc_id: int):
             domain_id, account_id,
         )
 
+        grouped_assets: list[dict] = []
+
         if serving_assets:
             # Add each serving asset to the appropriate list (required/helpful)
             for asset_row in serving_assets:
@@ -433,8 +450,15 @@ async def get_use_case_detail(uc_id: int):
                 asset_dict["criticality"] = necessity
                 asset_dict["rationale"] = rationale
                 asset_dict["via_domain"] = True  # Mark as coming from domain path
+                asset_dict["domain_id"] = domain_id
                 asset_dict["domain_name"] = domain_name
                 asset_dict["domain_label"] = domain_label
+                # domain_covered: this asset's DOMAIN is already satisfied (by this
+                # or a sibling serving asset), so an unlanded status here is NOT a
+                # blocker. Drives the "domain covered" marker in the flat list.
+                asset_dict["domain_satisfied"] = satisfied
+
+                grouped_assets.append(asset_dict)
 
                 # Check if this asset is already in the list (from module path)
                 asset_id = asset_dict["id"]
@@ -461,11 +485,24 @@ async def get_use_case_detail(uc_id: int):
                 "rationale": rationale,
                 "ingestion_status": "not_started",
                 "is_domain_placeholder": True,  # Flag to help frontend render differently
+                "via_domain": True,
+                "domain_satisfied": satisfied,
             }
+            grouped_assets.append(domain_item)
             if necessity == "required":
                 required_assets.append(domain_item)
             else:
                 helpful_assets.append(domain_item)
+
+        required_domains.append({
+            "domain_id": domain_id,
+            "domain_name": domain_name,
+            "domain_label": domain_label,
+            "necessity": necessity,
+            "satisfied": satisfied,
+            "rationale": rationale,
+            "assets": grouped_assets,
+        })
 
 
     if account_id is not None:

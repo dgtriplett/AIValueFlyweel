@@ -207,6 +207,43 @@ async def ready_assets(status_override: dict[int, str] | None = None) -> list[in
     return [asset_id for asset_id, status in statuses.items()
             if status in READY_STATUSES]
 
+
+async def domain_satisfaction_for(
+    use_case_id: int,
+    status_override: dict[int, str] | None = None,
+) -> dict[int, bool]:
+    """Return {domain_id: satisfied} for the REQUIRED domains of one use case.
+
+    This is the SINGLE definition of the domain-satisfaction rule used by the
+    readiness badge (see readiness_map's DOMAIN path): a required domain is
+    satisfied when ANY asset serving it is curated/governed for this account.
+    The detail drawer imports THIS helper instead of re-deriving the rule, so the
+    per-domain "satisfied/pending" flags it renders can never drift from the
+    numbers the badge shows.
+
+    Uses the same `ready_assets` resolution (per-account status + what-if
+    override) as readiness_map, and mirrors its LEFT JOIN so a required domain
+    with no serving asset counts as UNSATISFIED (a real gap) rather than dropping
+    out of the calculation.
+    """
+    ready_asset_ids = await ready_assets(status_override)
+    rows = await db.fetch(
+        """
+        SELECT urd.domain_id,
+               COALESCE(bool_or(asd.data_asset_id = ANY($2::int[])), false) AS satisfied
+        FROM uc_requires_domain urd
+        JOIN data_domains dd ON dd.id = urd.domain_id
+        LEFT JOIN asset_serves_domain asd ON asd.domain_id = urd.domain_id
+        WHERE urd.use_case_id = $1
+          AND urd.necessity = 'required'
+          AND COALESCE(dd.is_active, true) = true
+        GROUP BY urd.domain_id
+        """,
+        use_case_id, ready_asset_ids,
+    )
+    return {r["domain_id"]: bool(r["satisfied"]) for r in rows}
+
+
 async def readiness_map(
     status_override: dict[int, str] | None = None,
 ) -> dict[int, dict]:
