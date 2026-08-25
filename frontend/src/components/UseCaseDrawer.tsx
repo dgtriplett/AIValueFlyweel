@@ -1279,51 +1279,50 @@ function UseCaseDetail({
                 ) : null}
               </h3>
               <div className="space-y-1">
-                {detail.requirement_model === 'domain' && detail.required_domains?.length ? (
-                  // Domain-path: group serving assets by domain
-                  detail.required_domains.map((domain) => (
-                    <div key={domain.domain_id} className="space-y-0.5">
-                      <div className="text-xs font-semibold text-navy-400 px-1 py-0.5 flex items-center gap-2">
-                        <span>{prettifyDomain(domain.domain_label, domain.domain_name)}</span>
-                        <span
-                          className={`badge-${domain.satisfied ? 'high' : 'muted'} text-[10px]`}
-                        >
-                          {domain.satisfied ? 'covered' : 'pending'}
-                        </span>
-                      </div>
-                      {domain.assets.map((asset) => (
-                        <button
-                          key={asset.id}
-                          className="w-full flex items-center justify-between text-sm border-b border-navy-600 py-1.5 hover:bg-navy-700/50 px-1 rounded text-left ml-3"
-                          onClick={() => onOpenDataAsset(asset.id)}
-                        >
-                          <span className="text-navy-300 text-xs">
-                            <span className="text-lava-300">{asset.source_system}</span> ·{" "}
-                            {asset.module}
-                            {domain.satisfied && asset.ingestion_status !== 'governed' && asset.ingestion_status !== 'curated' ? (
-                              <span className="ml-2 text-[10px] text-navy-500">(domain covered)</span>
-                            ) : null}
-                          </span>
-                          <IngestionBadge status={asset.ingestion_status} />
-                        </button>
-                      ))}
-                    </div>
-                  ))
-                ) : (
-                  // Module-path or fallback: flat list (existing behavior)
-                  (detail.required_assets ?? []).map((asset) => (
+                {/*
+                  MODULE/DATASET-LEVEL LIST. The backend flattens BOTH the module
+                  path (uc_requires_asset) and the domain path (assets serving each
+                  required domain, plus a placeholder for orphan domains) into
+                  detail.required_assets, each row carrying its own per-account
+                  ingestion_status. We render that ONE flat list unconditionally so
+                  the header count (N), these rows, and the "X/Y required datasets
+                  ready" badge always describe the same set at the same granularity.
+                  We deliberately do NOT render per-domain covered/pending pills:
+                  those counted domains while this list shows datasets, so they
+                  contradicted the per-asset badges (a "pending" domain over a
+                  Governed asset, a "covered" domain over Not-started assets). The
+                  optional domain_label is shown as quiet inline context only.
+                */}
+                {(detail.required_assets ?? []).map((asset) => {
+                  const isPlaceholder = asset.id == null
+                  const key = isPlaceholder
+                    ? `domain-${asset.domain_id}`
+                    : `asset-${asset.id}`
+                  const label = isPlaceholder
+                    ? prettifyDomain(asset.domain_label, asset.domain_name)
+                    : asset.module
+                  return (
                     <button
-                      key={asset.id}
-                      className="w-full flex items-center justify-between text-sm border-b border-navy-600 py-1.5 hover:bg-navy-700/50 px-1 rounded text-left"
-                      onClick={() => onOpenDataAsset(asset.id)}
+                      key={key}
+                      className="w-full flex items-center justify-between text-sm border-b border-navy-600 py-1.5 hover:bg-navy-700/50 px-1 rounded text-left disabled:cursor-default disabled:hover:bg-transparent"
+                      disabled={isPlaceholder}
+                      onClick={() => asset.id != null && onOpenDataAsset(asset.id)}
                     >
                       <span className="text-navy-300">
-                        <span className="text-lava-300">{asset.source_system}</span> ·{" "}
-                        {asset.module}
+                        {asset.source_system ? (
+                          <span className="text-lava-300">{asset.source_system}</span>
+                        ) : null}
+                        {asset.source_system ? ' · ' : ''}
+                        {label}
+                        {asset.via_domain && asset.domain_label ? (
+                          <span className="ml-2 text-[10px] text-navy-500">
+                            {prettifyDomain(asset.domain_label, asset.domain_name)}
+                          </span>
+                        ) : null}
                       </span>
                       <div className="flex items-center gap-2">
                         <IngestionBadge status={asset.ingestion_status} />
-                        {editing ? (
+                        {editing && !isPlaceholder && !asset.via_domain && asset.id != null ? (
                           <button
                             aria-label={`Remove required module ${asset.module}`}
                             title="Remove this required module"
@@ -1331,7 +1330,7 @@ function UseCaseDetail({
                             disabled={removeRequired.isPending}
                             onClick={(e) => {
                               e.stopPropagation()
-                              removeRequired.mutate(asset.id)
+                              if (asset.id != null) removeRequired.mutate(asset.id)
                             }}
                           >
                             <X className="w-3.5 h-3.5" />
@@ -1339,8 +1338,8 @@ function UseCaseDetail({
                         ) : null}
                       </div>
                     </button>
-                  ))
-                )}
+                  )
+                })}
                 {(detail.required_assets ?? []).length === 0 ? (
                   <div className="text-xs text-navy-500">No required modules.</div>
                 ) : null}
@@ -1398,20 +1397,32 @@ function UseCaseDetail({
                   {(detail.helpful_assets ?? []).length})
                 </h3>
                 <div className="space-y-1">
-                  {(detail.helpful_assets ?? []).map((asset) => (
+                  {(detail.helpful_assets ?? []).map((asset) => {
+                    const isPlaceholder = asset.id == null
+                    const key = isPlaceholder
+                      ? `helpful-domain-${asset.domain_id}`
+                      : `helpful-asset-${asset.id}`
+                    const label = isPlaceholder
+                      ? prettifyDomain(asset.domain_label, asset.domain_name)
+                      : asset.module
+                    return (
                     <button
-                      key={asset.id}
-                      className="w-full flex items-center justify-between text-sm border-b border-navy-600 py-1.5 hover:bg-navy-700/50 px-1 rounded text-left"
-                      onClick={() => onOpenDataAsset(asset.id)}
+                      key={key}
+                      className="w-full flex items-center justify-between text-sm border-b border-navy-600 py-1.5 hover:bg-navy-700/50 px-1 rounded text-left disabled:cursor-default disabled:hover:bg-transparent"
+                      disabled={isPlaceholder}
+                      onClick={() => asset.id != null && onOpenDataAsset(asset.id)}
                     >
                       <span className="text-navy-400">
-                        <span className="text-navy-500">{asset.source_system}</span> ·{' '}
-                        {asset.module}
+                        {asset.source_system ? (
+                          <span className="text-navy-500">{asset.source_system}</span>
+                        ) : null}
+                        {asset.source_system ? ' · ' : ''}
+                        {label}
                         <span className="text-navy-500 text-xs ml-1">(helpful)</span>
                       </span>
                       <div className="flex items-center gap-2">
                         <IngestionBadge status={asset.ingestion_status} />
-                        {editing ? (
+                        {editing && !isPlaceholder && !asset.via_domain && asset.id != null ? (
                           <button
                             aria-label={`Remove helpful module ${asset.module}`}
                             title="Remove this helpful module"
@@ -1419,7 +1430,7 @@ function UseCaseDetail({
                             disabled={removeRequired.isPending}
                             onClick={(e) => {
                               e.stopPropagation()
-                              removeRequired.mutate(asset.id)
+                              if (asset.id != null) removeRequired.mutate(asset.id)
                             }}
                           >
                             <X className="w-3.5 h-3.5" />
@@ -1427,7 +1438,8 @@ function UseCaseDetail({
                         ) : null}
                       </div>
                     </button>
-                  ))}
+                    )
+                  })}
                 </div>
               </section>
             ) : null}

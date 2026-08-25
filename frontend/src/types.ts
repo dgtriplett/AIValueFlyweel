@@ -108,9 +108,22 @@ export interface UseCase {
   realized?: RealizedValue | null
 }
 
-export interface RequiredAsset extends DataAsset {
+export interface RequiredAsset extends Omit<DataAsset, 'id'> {
+  // id is nullable: a required DOMAIN with no serving assets is surfaced as a
+  // placeholder row (id === null) so the user still sees WHAT data is required.
+  id: number | null
   criticality?: Criticality | null
   rationale?: string | null
+  // Domain-path provenance. When an asset is required because it serves a
+  // required data domain, the backend tags it so the flat module/dataset list
+  // can show the domain as quiet inline context (never as a separate,
+  // potentially-contradictory covered/pending badge).
+  via_domain?: boolean | null
+  domain_id?: number | null
+  domain_name?: string | null
+  domain_label?: string | null
+  domain_satisfied?: boolean | null
+  is_domain_placeholder?: boolean | null
 }
 
 export interface LinkedUseCase {
