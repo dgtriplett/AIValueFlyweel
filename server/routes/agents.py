@@ -830,8 +830,33 @@ async def build_value_model(title: str, description: str | None = None) -> dict:
     automatically get a value model without duplicating the LLM logic.
 
     Returns: dict with keys {driver, components, roiMonths, notes}
+
+    MAGNITUDE CALIBRATION (two-layer defense against LLM-generated absurd values):
+    ---------------------------------------------------------------------------
+    The value engine computes per-component annual value in $M as:
+        multiplier * product(assumption_values) * coeff
+
+    The engine is UNIT-AGNOSTIC — the multiplier must absorb ALL unit conversion.
+    Seeded catalog models have hand-calibrated multipliers (~1e-9 to ~8.0 depending
+    on units). LLMs cannot reliably compute these magnitudes, so we deterministically
+    calibrate AFTER the LLM returns components:
+
+    LAYER 1 (per-component rescaling):
+        For each component, compute rawMid = multiplier * product(assumption values).
+        If rawMid exceeds ~500 $M (10% of annualRevenueMM = 5000), rescale that
+        component's multiplier by the power of 10 needed to bring it under the ceiling.
+
+    LAYER 2 (global sanity clamp):
+        After per-component calibration, compute the total mid value via the same
+        arithmetic the engine uses. If it exceeds 0.5 * annualRevenueMM (or 5000 $M
+        if annualRevenueMM is missing), proportionally scale ALL component multipliers
+        down so the total lands at/under the ceiling.
+
+    CRITICAL: This calibration is applied ONLY here (the NEW-model path), never in
+    value_engine.py (which evaluates EXISTING models). Seeded catalog values stay
+    byte-identical.
     """
-    assumptions = [dict(a) for a in await db.fetch("SELECT key, label, unit FROM value_assumptions ORDER BY category")]
+    assumptions = [dict(a) for a in await db.fetch("SELECT key, label, unit, value FROM value_assumptions ORDER BY category")]
     benchmarks = [dict(b) for b in await db.fetch("SELECT * FROM benchmark_library")]
     keys = [a["key"] for a in assumptions]
 
@@ -865,6 +890,67 @@ async def build_value_model(title: str, description: str | None = None) -> dict:
     if not comps:
         comps = [{"name": "O&M efficiency", "calculationDisplay": "O&M budget x 0.3%",
                   "multiplier": 0.003, "assumptionKeys": ["omBudgetMM"], "lowCoeff": 0.6, "highCoeff": 1.4}]
+
+
+    # Fetch assumption values for calibration
+    assumption_values = {a["key"]: float(a.get("value", 0) or 0) for a in assumptions}
+
+    # ---------------------------------------------------------------------------
+    # LAYER 1: Per-component magnitude rescaling
+    # ---------------------------------------------------------------------------
+    # Cap any single component at ~10% of annualRevenueMM (~500 $M for the default
+    # 5000 $M revenue). If a component's rawMid (multiplier * product(assumptions))
+    # is absurd, rescale its multiplier by the power of 10 needed to bring it under
+    # the ceiling.
+    annual_revenue = assumption_values.get("annualRevenueMM", 5000)
+    max_component_ceiling = 0.1 * annual_revenue  # ~500 $M
+
+    for comp in comps:
+        # Compute rawMid = multiplier * product(assumption values for this component)
+        raw_mid = comp["multiplier"]
+        for key in comp["assumptionKeys"]:
+            raw_mid *= assumption_values.get(key, 0)
+
+        # If rawMid exceeds the ceiling, rescale the multiplier
+        if raw_mid > max_component_ceiling and raw_mid > 0:
+            # Compute the scaling factor needed
+            scale_factor = max_component_ceiling / raw_mid
+            # Apply the scaling to the multiplier
+            comp["multiplier"] *= scale_factor
+            logger.info(
+                "Calibrated component '%s': raw_mid=%.2f $M exceeded ceiling %.2f $M, "
+                "scaled multiplier by %.2e to %.2e",
+                comp["name"], raw_mid, max_component_ceiling, scale_factor, comp["multiplier"]
+            )
+
+    # ---------------------------------------------------------------------------
+    # LAYER 2: Global sanity clamp on total value
+    # ---------------------------------------------------------------------------
+    # After per-component calibration, compute the total mid value. If it exceeds
+    # 0.5 * annualRevenueMM (or 5000 $M default), proportionally scale ALL component
+    # multipliers down so the total lands at/under the ceiling.
+    max_total_ceiling = 0.5 * annual_revenue  # ~2500 $M for default 5000 $M revenue
+
+    # Compute total mid after Layer 1 calibration
+    total_mid = 0.0
+    for comp in comps:
+        comp_value = comp["multiplier"]
+        for key in comp["assumptionKeys"]:
+            comp_value *= assumption_values.get(key, 0)
+        # Use midpoint of low/high coefficients
+        mid_coeff = (comp["lowCoeff"] + comp["highCoeff"]) / 2.0
+        total_mid += comp_value * mid_coeff
+
+    # If total still exceeds the ceiling, proportionally scale ALL components down
+    if total_mid > max_total_ceiling and total_mid > 0:
+        global_scale_factor = max_total_ceiling / total_mid
+        logger.info(
+            "Global sanity clamp: total_mid=%.2f $M exceeded ceiling %.2f $M, "
+            "scaling ALL multipliers by %.4f",
+            total_mid, max_total_ceiling, global_scale_factor
+        )
+        for comp in comps:
+            comp["multiplier"] *= global_scale_factor
 
     return {
         "driver": title,
