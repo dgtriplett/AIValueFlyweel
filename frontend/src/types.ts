@@ -82,6 +82,9 @@ export interface UseCase {
   realized_override_enabled?: boolean | null
   realized_override_amount?: number | null
   realized_override_note?: string | null
+  hypothesized_override_enabled?: boolean | null
+  hypothesized_override_amount?: number | null
+  hypothesized_override_note?: string | null
   status_source?: string | null
   created_by?: string | null
   created_at?: string | null

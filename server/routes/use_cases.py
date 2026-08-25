@@ -538,13 +538,15 @@ async def create_use_case(body: UseCaseIn, request: Request):
             effort_tshirt, priority_score, risk_tags, compliance_tags,
             hypothesized_value_json, realized_value_amount, realized_value_json,
             realized_override_enabled, realized_override_amount, realized_override_note,
+            hypothesized_override_enabled, hypothesized_override_amount, hypothesized_override_note,
             status_source, created_by, origin, in_portfolio)
            VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13::jsonb,$14,$15::jsonb,
-                   $16,$17,$18,$19,$20,'custom',true) RETURNING *""",
+                   $16,$17,$18,$19,$20,$21,$22,$23,'custom',true) RETURNING *""",
         body.title, body.description, body.lob_id, body.sub_vertical, body.stage,
         1, body.status, body.category, body.effort_tshirt, body.priority_score,  # phase derived (no prereqs yet)
         body.risk_tags, body.compliance_tags, hv, body.realized_value_amount, rvj,
         body.realized_override_enabled, body.realized_override_amount, body.realized_override_note,
+        body.hypothesized_override_enabled, body.hypothesized_override_amount, body.hypothesized_override_note,
         body.status_source, actor,
     )
     if row is None:
@@ -575,12 +577,15 @@ async def update_use_case(uc_id: int, body: UseCaseIn, request: Request):
            realized_value_amount=$13,
            realized_value_json=COALESCE($14::jsonb, realized_value_json),
            realized_override_enabled=$15, realized_override_amount=$16,
-           realized_override_note=$17, status_source=$18, updated_at=now()
-           WHERE id=$19 RETURNING *""",  # phase is DERIVED (not client-settable)
+           realized_override_note=$17,
+           hypothesized_override_enabled=$18, hypothesized_override_amount=$19,
+           hypothesized_override_note=$20, status_source=$21, updated_at=now()
+           WHERE id=$22 RETURNING *""",  # phase is DERIVED (not client-settable)
         body.title, body.description, body.lob_id, body.sub_vertical, body.stage,
         body.status, body.category, body.effort_tshirt, body.priority_score,
         body.risk_tags, body.compliance_tags, hv, body.realized_value_amount, rvj,
         body.realized_override_enabled, body.realized_override_amount, body.realized_override_note,
+        body.hypothesized_override_enabled, body.hypothesized_override_amount, body.hypothesized_override_note,
         body.status_source, uc_id,
     )
     if row is None:
