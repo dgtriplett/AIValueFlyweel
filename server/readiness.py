@@ -171,16 +171,24 @@ def _as_list(value) -> list:
     return []
 
 
-async def ready_assets(status_override: dict[int, str] | None = None) -> list[int]:
-    """Asset ids that count as READY for the current account.
+async def asset_status_map(
+    status_override: dict[int, str] | None = None,
+) -> dict[int, str]:
+    """Return {data_asset_id: ingestion_status} resolved for the current account.
 
-    One place decides this, because it is the input to every readiness answer in the
-    app. Before accounts existed it was `da.ingestion_status IN (...)` inline in each
-    query; per-account status made that wrong in eight places at once.
+    This is the SINGLE per-account status resolution used across the app. It reads
+    asset_status_by_account, which resolves the account's own row and treats a
+    missing row as 'not_started' (NO fallback to the shared da.ingestion_status
+    column — that fallback is the cross-tenant leak migration 010 removed). On a
+    pre-migration database (view absent, or no current account) it falls back to the
+    plain data_assets column so an un-upgraded install keeps working.
 
-    Reads asset_status_by_account, which resolves the account's own row over the
-    shared column, and falls back to the plain column on a pre-migration database so
-    an un-upgraded install keeps working.
+    Both `ready_assets()` (the readiness/domain calc) and the detail drawer's
+    per-asset badge resolve status THROUGH THIS HELPER, so the badge a user sees on
+    an asset can never disagree with the domain 'satisfied/pending' badge computed
+    from the same map. Before this existed, the detail query COALESCE'd to the
+    shared column and a governed catalog value leaked into a per-account 'Governed'
+    badge while the domain calc (reading the view) correctly saw 'not_started'.
 
     `status_override` is applied LAST and wins: it is the caller's hypothesis
     ("suppose we landed asset 42"), and an override that lost to stored state would
@@ -190,20 +198,49 @@ async def ready_assets(status_override: dict[int, str] | None = None) -> list[in
 
     account_id = await accounts.current()
     statuses: dict[int, str] = {}
+    # `used_view` distinguishes "the account genuinely has no rows for these assets"
+    # (a MIGRATED database where a missing row honestly means 'not_started') from
+    # "the view does not exist / no current account" (a PRE-MIGRATION database that
+    # must fall back to the shared column). An EMPTY view result is NOT a signal to
+    # fall back — post-migration 010 the view CROSS JOINs every asset for every
+    # account, so falling back on empty would reintroduce the exact shared-column
+    # leak this resolution exists to prevent.
+    used_view = False
     if account_id is not None:
         try:
             rows = await db.fetch(
                 "SELECT data_asset_id, ingestion_status FROM asset_status_by_account "
                 "WHERE account_id = $1", account_id)
             statuses = {r["data_asset_id"]: r["ingestion_status"] for r in rows}
+            used_view = True
         except Exception:  # noqa: BLE001 - view absent before migration 009
             statuses = {}
-    if not statuses:
+            used_view = False
+    if not used_view:
         rows = await db.fetch("SELECT id, ingestion_status FROM data_assets")
         statuses = {r["id"]: r["ingestion_status"] for r in rows}
 
     if status_override:
         statuses.update(status_override)
+    return statuses
+
+
+async def ready_assets(status_override: dict[int, str] | None = None) -> list[int]:
+    """Asset ids that count as READY for the current account.
+
+    One place decides this, because it is the input to every readiness answer in the
+    app. Before accounts existed it was `da.ingestion_status IN (...)` inline in each
+    query; per-account status made that wrong in eight places at once.
+
+    Resolution is delegated to `asset_status_map()`, so the READY set and the
+    per-asset status the detail drawer displays are computed from exactly one
+    per-account map — they can never drift.
+
+    `status_override` is applied LAST and wins: it is the caller's hypothesis
+    ("suppose we landed asset 42"), and an override that lost to stored state would
+    make the simulator silently report the present instead of the projection.
+    """
+    statuses = await asset_status_map(status_override)
     return [asset_id for asset_id, status in statuses.items()
             if status in READY_STATUSES]
 

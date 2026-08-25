@@ -17,45 +17,65 @@ import stubs  # noqa: E402,F401  (must precede any server.* import)
 from fakedb import FakeDB, Row, run  # noqa: E402
 
 from server.routes import use_cases, data_assets  # noqa: E402
+from server import accounts as _accounts  # noqa: E402
 
 
 class TestUseCaseDetailStatusOverlay(unittest.TestCase):
-    """PART A.1: get_use_case_detail must overlay per-account status, not read the shared column."""
+    """PART A.1 / BUG A: get_use_case_detail must overlay per-account status resolved
+    through readiness.asset_status_map (the asset_status_by_account view), NOT
+    COALESCE the shared da.ingestion_status column into the per-asset badge."""
 
     def test_detail_reads_per_account_status(self):
-        """The query must LEFT JOIN account_asset_status and COALESCE over the shared column."""
+        """The per-asset badge must reflect the account's own status from the view,
+        even when the shared catalog column says something different."""
         db = FakeDB()
         # Use case 1 requires asset 10
         db.on("SELECT * FROM use_cases WHERE id = $1", [
             Row(id=1, title="Test UC", description="Desc", status="not_started",
                 requires_locked=False, in_portfolio=True)
         ])
-        # The shared column says not_started, but this account has landed it
-        db.on("COALESCE(acs.ingestion_status, da.ingestion_status)", [
+        # The required-asset catalog row: shared column says not_started.
+        db.on("FROM uc_requires_asset ura", [
             Row(id=10, source_system="OMS", module="Work Management",
-                ingestion_status="landed",  # per-account overlay wins
+                ingestion_status="not_started",  # shared column
                 criticality="required", rationale=None)
         ])
+        # asset_status_map reads the per-account view: this account has LANDED it.
+        db.on("FROM asset_status_by_account", [
+            Row(data_asset_id=10, ingestion_status="landed")
+        ])
+        # No domain requirements for this UC -> module path.
+        db.on("FROM uc_requires_domain urd", [])
         db.on("SELECT uc.id, uc.title, uc.stage, uc.phase, uc.status, e.rationale", [])
         db.on("SELECT * FROM value_records WHERE", [])
         db.on("SELECT * FROM comments WHERE", [])
 
         with patch("server.routes.use_cases.db", db), \
+             patch("server.readiness.db", db), \
              patch("server.routes.use_cases.accounts") as mock_accounts, \
+             patch("server.readiness.domain_satisfaction_for", new_callable=AsyncMock) as mock_domsat, \
+             patch("server.routes.use_cases.domain_satisfaction_for", new_callable=AsyncMock) as mock_domsat2, \
              patch("server.routes.use_cases.readiness_for", new_callable=AsyncMock) as mock_readiness, \
              patch("server.routes.use_cases.load_assumptions", new_callable=AsyncMock) as mock_assumptions, \
              patch("server.routes.use_cases.compute_value_range") as mock_value_range, \
              patch("server.routes.use_cases.compute_realized") as mock_realized:
             mock_accounts.current = AsyncMock(return_value=123)
+            mock_domsat.return_value = {}
+            mock_domsat2.return_value = {}
             mock_readiness.return_value = {"readiness": "shovel_ready", "ready_pct": 1.0,
                                             "required_total": 1, "required_ready": 1}
             mock_assumptions.return_value = []
             mock_value_range.return_value = {"low": 0, "mid": 0, "high": 0}
             mock_realized.return_value = {"mode": "none", "value": None, "note": None}
 
-            result = run(use_cases.get_use_case_detail(1))
+            _tok = _accounts.current_account_id.set(123)
+            try:
+                result = run(use_cases.get_use_case_detail(1))
+            finally:
+                _accounts.current_account_id.reset(_tok)
 
-        # The asset's ingestion_status must be 'landed' (per-account), not 'not_started' (shared)
+        # The asset's ingestion_status must be 'landed' (per-account view), not
+        # 'not_started' (shared column) — resolved through asset_status_map.
         self.assertEqual(len(result["required_assets"]), 1)
         self.assertEqual(result["required_assets"][0]["ingestion_status"], "landed")
 
@@ -70,31 +90,46 @@ class TestUseCaseDetailHelpfulSplit(unittest.TestCase):
             Row(id=1, title="Test UC", description="Desc", status="not_started",
                 requires_locked=False, in_portfolio=True)
         ])
-        # Two assets: one required, one helpful
-        db.on("COALESCE(acs.ingestion_status, da.ingestion_status)", [
+        # Two assets: one required, one helpful (shared-column rows).
+        db.on("FROM uc_requires_asset ura", [
             Row(id=10, source_system="OMS", module="Work Management",
                 ingestion_status="governed", criticality="required", rationale="Needs work orders"),
             Row(id=20, source_system="GIS", module="Network Topology",
                 ingestion_status="curated", criticality="helpful", rationale="Provides context"),
         ])
+        # Per-account view: mirror the catalog statuses for this account.
+        db.on("FROM asset_status_by_account", [
+            Row(data_asset_id=10, ingestion_status="governed"),
+            Row(data_asset_id=20, ingestion_status="curated"),
+        ])
+        db.on("FROM uc_requires_domain urd", [])
         db.on("SELECT uc.id, uc.title, uc.stage, uc.phase, uc.status, e.rationale", [])
         db.on("SELECT * FROM value_records WHERE", [])
         db.on("SELECT * FROM comments WHERE", [])
 
         with patch("server.routes.use_cases.db", db), \
+             patch("server.readiness.db", db), \
              patch("server.routes.use_cases.accounts") as mock_accounts, \
+             patch("server.readiness.domain_satisfaction_for", new_callable=AsyncMock) as mock_domsat, \
+             patch("server.routes.use_cases.domain_satisfaction_for", new_callable=AsyncMock) as mock_domsat2, \
              patch("server.routes.use_cases.readiness_for", new_callable=AsyncMock) as mock_readiness, \
              patch("server.routes.use_cases.load_assumptions", new_callable=AsyncMock) as mock_assumptions, \
              patch("server.routes.use_cases.compute_value_range") as mock_value_range, \
              patch("server.routes.use_cases.compute_realized") as mock_realized:
             mock_accounts.current = AsyncMock(return_value=123)
+            mock_domsat.return_value = {}
+            mock_domsat2.return_value = {}
             mock_readiness.return_value = {"readiness": "shovel_ready", "ready_pct": 1.0,
                                             "required_total": 1, "required_ready": 1}
             mock_assumptions.return_value = []
             mock_value_range.return_value = {"low": 0, "mid": 0, "high": 0}
             mock_realized.return_value = {"mode": "none", "value": None, "note": None}
 
-            result = run(use_cases.get_use_case_detail(1))
+            _tok = _accounts.current_account_id.set(123)
+            try:
+                result = run(use_cases.get_use_case_detail(1))
+            finally:
+                _accounts.current_account_id.reset(_tok)
 
         # Must have exactly 1 required and 1 helpful
         self.assertEqual(len(result["required_assets"]), 1)
