@@ -1,12 +1,13 @@
 """Use Cases CRUD (the portfolio core)."""
 import json
 
-from fastapi import APIRouter, HTTPException, Request
+from fastapi import APIRouter, Depends, HTTPException, Request
 from pydantic import BaseModel
 
 from .. import accounts
 from ..common import current_user, row_to_dict, rows_to_list, write_audit
 from ..db import db
+from ..limits import limiter
 from .. import portfolio
 from ..readiness import readiness_map, readiness_for, domain_satisfaction_for, asset_status_map, BUILT_SQL_LIST
 from ..value_engine import (
@@ -670,7 +671,7 @@ async def get_use_case_detail(uc_id: int):
     }
 
 
-@router.post("/{uc_id}/estimate-value")
+@router.post("/{uc_id}/estimate-value", dependencies=[Depends(limiter("research"))])
 async def estimate_and_persist_value(uc_id: int, request: Request):
     """
     BUG 2 FIX: Generate and persist a value model for a use case.
@@ -680,38 +681,47 @@ async def estimate_and_persist_value(uc_id: int, request: Request):
     an affordance to (re)generate a value model for use cases that have none
     (or have an empty one), so the Calculate section is never blank.
 
-    Account-scoped: only the use case owner account can estimate/persist.
-    Rate-limited via the shared research budget (mirrors estimate_value).
-    """
-    from . import accounts
-    from .agents import build_value_model, research_budget
+    Account-scoped via portfolio membership: the caller may only estimate/persist
+    for a use case VISIBLE to their account. There is NO `use_cases.account_id`
+    column; ownership of a non-catalog use case is membership in
+    `account_portfolio_use_cases`. So we scope with `portfolio.use_case_visibility`
+    (catalog OR in-this-account's portfolio) -- exactly like every other use-case
+    route -- and bind the current account into it. A use case that is not visible
+    (or does not exist) returns 404, never a bogus 403.
 
-    account_id = accounts.get_account(request)
+    Rate-limited via the shared `research` limiter dependency on the route,
+    exactly like the sibling `/api/agents/estimate-value` endpoint.
+    """
+    from .agents import build_value_model
+
+    account_id = await accounts.current()
     if account_id is None:
         raise HTTPException(403, "No account selected")
 
-    # Verify ownership
+    # Fail closed via the visibility predicate: only fetch the use case if it is
+    # catalog OR in THIS account's portfolio. $1 = uc_id; the visibility predicate
+    # binds account_id as $2.
+    visibility, params = await portfolio.use_case_visibility("uc", param_index=2)
     uc = await db.fetchrow(
-        """SELECT id, title, description, account_id
-           FROM use_cases
-           WHERE id = $1""",
-        uc_id
+        f"""SELECT uc.id, uc.title, uc.description
+           FROM use_cases uc
+           WHERE uc.id = $1 AND {visibility}""",
+        uc_id, *params
     )
     if uc is None:
         raise HTTPException(404, "Use case not found")
-    if uc["account_id"] != account_id:
-        raise HTTPException(403, "Cannot estimate value for another account's use case")
 
-    # Rate-limit via research budget (same as estimate_value endpoint)
-    async with research_budget(account_id):
-        value_model = await build_value_model(uc["title"], uc["description"])
+    # Same LLM-based value model builder estimate_value uses. Rate-limiting is
+    # handled by the `research` limiter dependency on the route above.
+    value_model = await build_value_model(uc["title"], uc["description"])
 
-    # Persist the value model
+    # Persist the value model. hypothesized_value_json lives on the shared
+    # use_cases row (no account_id column); scoping was already enforced above.
     await db.execute(
         """UPDATE use_cases
            SET hypothesized_value_json = $1::jsonb
-           WHERE id = $2 AND account_id = $3""",
-        json.dumps(value_model), uc_id, account_id
+           WHERE id = $2""",
+        json.dumps(value_model), uc_id
     )
 
     await write_audit("use_case", uc_id, "estimate_value_persist", current_user(request), {
