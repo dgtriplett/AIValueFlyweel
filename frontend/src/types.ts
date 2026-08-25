@@ -1623,3 +1623,27 @@ export interface AppUser {
   updated_at?: string | null
   is_env_admin?: boolean
 }
+
+/**
+ * One row of the audit log (server/migrations/001_init.sql:189). Admin-only
+ * (GET /api/audit). `diff_json` is the parsed JSONB diff the write recorded;
+ * it is an arbitrary shape per action, so it is typed as `unknown`.
+ */
+export interface AuditLogEntry {
+  id: number
+  entity_type: string
+  entity_id: number | null
+  action: string
+  actor: string | null
+  diff_json: unknown
+  created_at: string | null
+}
+
+/** Filters the audit-log table and CSV export share. All optional. */
+export interface AuditLogFilters {
+  limit?: number
+  entity_type?: string
+  action?: string
+  actor?: string
+  search?: string
+}

@@ -697,6 +697,19 @@ async def update_use_case(uc_id: int, body: UseCaseIn, request: Request):
         raise HTTPException(503, "Database unavailable")
     await write_audit("use_case", uc_id, "update", actor, {"title": body.title, "status": body.status})
 
+    # A value OVERRIDE (manual hypothesized/realized figure) supersedes the computed
+    # value, so it is a sensitive edit that must be attributable on its own — record
+    # a dedicated audit row whenever an override is toggled on / set on this update.
+    if body.hypothesized_override_enabled or body.realized_override_enabled:
+        await write_audit("use_case", uc_id, "value_override", actor, {
+            "hypothesized_override_enabled": body.hypothesized_override_enabled,
+            "hypothesized_override_amount": body.hypothesized_override_amount,
+            "hypothesized_override_note": body.hypothesized_override_note,
+            "realized_override_enabled": body.realized_override_enabled,
+            "realized_override_amount": body.realized_override_amount,
+            "realized_override_note": body.realized_override_note,
+        })
+
     # Addition A: delivering a use case implies its required data has landed.
     delivered = {"live", "value_realized"}
     if body.status in delivered and prev_status not in delivered:

@@ -30,6 +30,7 @@ from pathlib import Path
 from fastapi import APIRouter, HTTPException, Request
 
 from .. import accounts as acct
+from ..common import write_audit
 from ..db import db
 
 # --- The single feature flag -----------------------------------------------
@@ -269,13 +270,23 @@ async def demo_status():
 
 @router.post("/load")
 async def demo_load(request: Request):
-    acct.require_admin(request, "Loading demo data")
+    actor = acct.require_admin(request, "Loading demo data")
     _require_enabled()
-    return await _run(clean=False)
+    result = await _run(clean=False)
+    # A demo load rewrites the entire live dataset; it is a sensitive, admin-only
+    # operation and must be attributable in the audit log.
+    await write_audit("demo", None, "load", actor,
+                      {"clean": False, "counts": result.get("counts")})
+    return result
 
 
 @router.post("/reset")
 async def demo_reset(request: Request):
-    acct.require_admin(request, "Resetting demo data")
+    actor = acct.require_admin(request, "Resetting demo data")
     _require_enabled()
-    return await _run(clean=True)
+    result = await _run(clean=True)
+    # A demo reset wipes+reseeds the entire live dataset; it is a sensitive,
+    # admin-only operation and must be attributable in the audit log.
+    await write_audit("demo", None, "reset", actor,
+                      {"clean": True, "counts": result.get("counts")})
+    return result

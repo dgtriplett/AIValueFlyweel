@@ -53,6 +53,7 @@ from server.routes import (
     sync_packages,
     me,
     users,
+    audit,
 )
 
 # Install handlers before anything logs. JSON in Databricks Apps, text locally;
@@ -234,7 +235,7 @@ for module in (lobs, data_assets, use_cases, dependencies, values, roadmap,
                domains, ingestion, generate, setup, taxonomy, research,
                flow, inventory, chat, branding, knowledge, proposals,
                exports, accounts_routes, whatif, snapshot_routes, quality, me,
-               users):
+               users, audit):
     app.include_router(module.router, prefix="/api")
 
 app.include_router(sync_packages.router, prefix="/api")
