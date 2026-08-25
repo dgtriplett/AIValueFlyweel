@@ -47,70 +47,70 @@ class FakeRequest:
 
 class TestRoleResolution(unittest.TestCase):
     """Test resolve_role logic in isolation."""
-    
+
     @mock.patch.dict(os.environ, {"GRID_ATLAS_ADMINS": ADMIN}, clear=True)
     def test_allowlisted_email_always_admin(self):
         """Allowlisted email returns 'admin' even with no app_users row."""
         db = FakeDB(has_pool=True)
         db.on("SELECT role FROM app_users", [])
-        
+
         with mock.patch('server.accounts.db', db):
             req = FakeRequest({"X-Forwarded-Email": ADMIN})
             role = run(acct.resolve_role(ADMIN, req))
             self.assertEqual(role, 'admin')
-    
+
     @mock.patch.dict(os.environ, {"GRID_ATLAS_ADMINS": ADMIN}, clear=True)
     def test_stored_role_for_non_allowlisted(self):
         """Non-allowlisted email returns stored app_users.role."""
         db = FakeDB(has_pool=True)
-        db.on("SELECT role FROM app_users WHERE email = $1", 
+        db.on("SELECT role FROM app_users WHERE email = $1",
               [Row(role='pm')])
-        
+
         with mock.patch('server.accounts.db', db):
             req = FakeRequest({"X-Forwarded-Email": PM_USER})
             role = run(acct.resolve_role(PM_USER, req))
             self.assertEqual(role, 'pm')
-        
+
         # Try executive too
         db2 = FakeDB(has_pool=True)
-        db2.on("SELECT role FROM app_users WHERE email = $1", 
+        db2.on("SELECT role FROM app_users WHERE email = $1",
                [Row(role='executive')])
-        
+
         with mock.patch('server.accounts.db', db2):
             req_exec = FakeRequest({"X-Forwarded-Email": EXEC_USER})
             role_exec = run(acct.resolve_role(EXEC_USER, req_exec))
             self.assertEqual(role_exec, 'executive')
-    
+
     @mock.patch.dict(os.environ, {"GRID_ATLAS_ADMINS": ADMIN}, clear=True)
     def test_unknown_user_defaults_pm(self):
         """Unknown user (no app_users row) defaults to 'pm'."""
         db = FakeDB(has_pool=True)
         db.on("SELECT role FROM app_users", [])
-        
+
         with mock.patch('server.accounts.db', db):
             req = FakeRequest({"X-Forwarded-Email": "unknown@utility.com"})
             role = run(acct.resolve_role("unknown@utility.com", req))
             self.assertEqual(role, 'pm')
-    
+
     @mock.patch.dict(os.environ, {"GRID_ATLAS_ADMINS": ADMIN}, clear=True)
     def test_unauthenticated_defaults_pm(self):
         """Unauthenticated (email=None) defaults to 'pm'."""
         db = FakeDB(has_pool=True)
-        
+
         with mock.patch('server.accounts.db', db):
             req = FakeRequest({})
             role = run(acct.resolve_role(None, req))
             self.assertEqual(role, 'pm')
-    
+
     @mock.patch.dict(os.environ, {"GRID_ATLAS_ADMINS": ADMIN}, clear=True)
     def test_db_error_fails_closed(self):
         """DB error during role resolution must NOT grant admin (fall back to 'pm')."""
         from fakedb import UndefinedTable
-        
+
         db = FakeDB(has_pool=True)
         async def raise_error(*args):
             raise UndefinedTable("app_users")
-        
+
         with mock.patch('server.accounts.db', db):
             with mock.patch.object(db, 'fetchrow', side_effect=raise_error):
                 req = FakeRequest({"X-Forwarded-Email": PM_USER})
@@ -121,18 +121,18 @@ class TestRoleResolution(unittest.TestCase):
 
 class TestMeEndpoint(unittest.TestCase):
     """Test GET /api/me returns role + correct is_exec_locked."""
-    
+
     @mock.patch.dict(os.environ, {"GRID_ATLAS_ADMINS": ADMIN}, clear=True)
     def test_me_returns_role_admin(self):
         """GET /api/me returns role='admin' for allowlisted email."""
         db = FakeDB(has_pool=True)
         db.on("SELECT role FROM app_users", [])
-        
+
         with mock.patch('server.accounts.db', db):
             app = FastAPI()
             app.include_router(me_route.router, prefix="/api")
             client = TestClient(app)
-            
+
             resp = client.get("/api/me", headers={"X-Forwarded-Email": ADMIN})
             self.assertEqual(resp.status_code, 200)
             data = resp.json()
@@ -140,19 +140,19 @@ class TestMeEndpoint(unittest.TestCase):
             self.assertTrue(data["is_admin"])
             self.assertEqual(data["role"], "admin")
             self.assertFalse(data["is_exec_locked"])  # admins are never locked
-    
+
     @mock.patch.dict(os.environ, {"GRID_ATLAS_ADMINS": ADMIN}, clear=True)
     def test_me_returns_role_pm(self):
         """GET /api/me returns role='pm' for a PM user."""
         db = FakeDB(has_pool=True)
-        db.on("SELECT role FROM app_users WHERE email = $1", 
+        db.on("SELECT role FROM app_users WHERE email = $1",
               [Row(role='pm')])
-        
+
         with mock.patch('server.accounts.db', db):
             app = FastAPI()
             app.include_router(me_route.router, prefix="/api")
             client = TestClient(app)
-            
+
             resp = client.get("/api/me", headers={"X-Forwarded-Email": PM_USER})
             self.assertEqual(resp.status_code, 200)
             data = resp.json()
@@ -160,19 +160,19 @@ class TestMeEndpoint(unittest.TestCase):
             self.assertFalse(data["is_admin"])
             self.assertEqual(data["role"], "pm")
             self.assertFalse(data["is_exec_locked"])
-    
+
     @mock.patch.dict(os.environ, {"GRID_ATLAS_ADMINS": ADMIN}, clear=True)
     def test_me_returns_role_executive_locked(self):
         """GET /api/me returns role='executive' and is_exec_locked=true."""
         db = FakeDB(has_pool=True)
-        db.on("SELECT role FROM app_users WHERE email = $1", 
+        db.on("SELECT role FROM app_users WHERE email = $1",
               [Row(role='executive')])
-        
+
         with mock.patch('server.accounts.db', db):
             app = FastAPI()
             app.include_router(me_route.router, prefix="/api")
             client = TestClient(app)
-            
+
             resp = client.get("/api/me", headers={"X-Forwarded-Email": EXEC_USER})
             self.assertEqual(resp.status_code, 200)
             data = resp.json()
@@ -180,18 +180,18 @@ class TestMeEndpoint(unittest.TestCase):
             self.assertFalse(data["is_admin"])
             self.assertEqual(data["role"], "executive")
             self.assertTrue(data["is_exec_locked"])  # executive + not admin = locked
-    
+
     @mock.patch.dict(os.environ, {"GRID_ATLAS_ADMINS": ADMIN}, clear=True)
     def test_me_admin_with_executive_role_not_locked(self):
         """Admin with executive role in app_users is NOT locked (allowlist wins)."""
         db = FakeDB(has_pool=True)
         db.on("SELECT role FROM app_users", [])
-        
+
         with mock.patch('server.accounts.db', db):
             app = FastAPI()
             app.include_router(me_route.router, prefix="/api")
             client = TestClient(app)
-            
+
             # Edge case: an admin has a 'executive' row in app_users
             # Allowlist wins, so the stored role is never checked
             resp = client.get("/api/me", headers={"X-Forwarded-Email": ADMIN})
@@ -200,17 +200,17 @@ class TestMeEndpoint(unittest.TestCase):
             self.assertTrue(data["is_admin"])
             self.assertEqual(data["role"], "admin")  # allowlist wins over stored role
             self.assertFalse(data["is_exec_locked"])  # admins are never locked
-    
+
     @mock.patch.dict(os.environ, {}, clear=True)
     def test_me_unauthenticated(self):
         """GET /api/me with no identity returns email=null, role='pm'."""
         db = FakeDB(has_pool=True)
-        
+
         with mock.patch('server.accounts.db', db):
             app = FastAPI()
             app.include_router(me_route.router, prefix="/api")
             client = TestClient(app)
-            
+
             resp = client.get("/api/me")
             self.assertEqual(resp.status_code, 200)
             data = resp.json()
