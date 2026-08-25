@@ -830,8 +830,17 @@ async def build_value_model(title: str, description: str | None = None) -> dict:
     automatically get a value model without duplicating the LLM logic.
 
     Returns: dict with keys {driver, components, roiMonths, notes}
+
+    MAGNITUDE CALIBRATION:
+    ---------------------
+    After the LLM proposes components, applies the shared calibrate_components()
+    helper from value_engine to bring absurd multipliers (from unit mismatches)
+    into a sane range. See value_engine.calibrate_components for details.
     """
-    assumptions = [dict(a) for a in await db.fetch("SELECT key, label, unit FROM value_assumptions ORDER BY category")]
+    from ..value_engine import calibrate_components
+
+    # Fetch assumptions WITH values for calibration
+    assumptions = [dict(a) for a in await db.fetch("SELECT key, label, unit, value FROM value_assumptions ORDER BY category")]
     benchmarks = [dict(b) for b in await db.fetch("SELECT * FROM benchmark_library")]
     keys = [a["key"] for a in assumptions]
 
@@ -865,6 +874,11 @@ async def build_value_model(title: str, description: str | None = None) -> dict:
     if not comps:
         comps = [{"name": "O&M efficiency", "calculationDisplay": "O&M budget x 0.3%",
                   "multiplier": 0.003, "assumptionKeys": ["omBudgetMM"], "lowCoeff": 0.6, "highCoeff": 1.4}]
+
+    # Apply shared calibration to tame LLM-generated absurd multipliers
+    assumption_values = {a["key"]: float(a.get("value", 0) or 0) for a in assumptions}
+    annual_revenue = assumption_values.get("annualRevenueMM", 5000.0)
+    comps = calibrate_components(comps, assumption_values, annual_revenue)
 
     return {
         "driver": title,
