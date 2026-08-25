@@ -1535,6 +1535,57 @@ tests['UseCaseDrawer exposes both drawer and full-page layouts from one body'] =
   assert.match(source, /data-ga-uc-page="1"/)
 }
 
+tests['the value editors render explicit, dynamic per-component formulas'] = () => {
+  const source = readFileSync('src/components/UseCaseDrawer.tsx', 'utf8')
+
+  // The USER FEEDBACK this addresses: "be more explicit in the value you are
+  // entering and show it as a dynamic calculation ... the formula used to
+  // calculate the value." These assertions pin the four moving parts of that
+  // explicitness so removing any one of them fails the gate:
+
+  // 1) A dedicated presentational component renders the explicit formula, driven
+  //    by the LIVE multiplier the user is editing (not a static string).
+  assert.match(source, /function ComponentFormula\(/)
+  assert.match(source, /multiplier: number/)
+
+  // 2) The formula line spells out multiplier × resolved assumption operand(s) =
+  //    subtotal — the exact shape the feedback asked for. The literal
+  //    "(multiplier)" label and the " × " operator between operands must render,
+  //    and the subtotal is the computed value formatted as money.
+  assert.match(source, /data-uc-formula\b/)
+  assert.match(source, /\(multiplier\)/)
+  assert.match(source, /data-uc-formula-multiplier/)
+  assert.match(source, /data-uc-formula-subtotal/)
+  assert.match(source, /×/)
+  assert.match(source, /\{fmtMoney\(subtotal\)\}/)
+
+  // 3) The operands are RESOLVED assumption values with their human labels — the
+  //    "$120k (avg loaded cost)" style — not bare assumption keys. The formula
+  //    maps over resolved operands and prints each label.
+  assert.match(source, /formatAssumptionOperand\(operand\)/)
+  assert.match(source, /\(\{operand\.label\}\)/)
+  assert.match(source, /interface AssumptionMeta/)
+  assert.match(source, /assumptionMeta\[assumption\.key\] = \{/)
+
+  // 4) DYNAMIC: the SAME computeComponentValue math drives both the running total
+  //    and each per-line subtotal, so the line the user reads sums to the total.
+  //    Both editors instantiate ComponentFormula from their live edited multiplier.
+  assert.match(source, /function computeComponentValue\(/)
+  assert.match(source, /subtotal \*= meta\.value/)
+  const formulaUses = source.match(/<ComponentFormula/g) ?? []
+  assert.ok(
+    formulaUses.length >= 2,
+    'both the hypothesized and realized calculate editors must render ComponentFormula',
+  )
+  // Hypothesized editor drives it from hypActuals; realized from actuals.
+  assert.match(source, /const multiplier = hypActuals\[index\] \?\? multiplierOf\(component\)/)
+  assert.match(source, /const multiplier = actuals\[index\] \?\? multiplierOf\(component\)/)
+
+  // 5) INPUT labeling is explicit about what the single entered number is.
+  assert.match(source, /Hypothesized multiplier/)
+  assert.match(source, /Achieved multiplier/)
+}
+
 tests['the drawer offers an expand affordance and the page offers a way back'] = () => {
   const source = readFileSync('src/components/UseCaseDrawer.tsx', 'utf8')
   // Expand-to-full-page button (drawer only) and Back breadcrumb (page only).
