@@ -1,21 +1,20 @@
-// Role + persona context for the persona-aware UI (Phase 1+).
+// Role + persona context for the persona-aware UI (Phase A+).
 //
 // This is the LINCHPIN other phases build on. It fetches GET /api/me once on load
 // and exposes:
 //   * email: the platform-attributed identity (null when local/unauthenticated).
 //   * isAdmin: whether the identity is on the GRID_ATLAS_ADMINS allowlist.
-//   * isExecLocked: whether the user is forced into 'executive' persona (hardcoded
-//     false in Phase 1; Phase 2+ reads from an admin-managed table).
-//   * activePersona: the user's self-selected persona ('admin' | 'pm' | 'executive').
-//   * setPersona: switch persona (disabled when isExecLocked).
+//   * isExecLocked: whether the user is forced into 'executive' persona (true when
+//     role='executive' AND not admin).
+//   * activePersona: INFERRED from the server-returned role (not self-selected),
+//     EXCEPT admins may temporarily 'view as' another persona (that UI comes in a
+//     later phase — for THIS phase, persona = role for non-admins, and admins
+//     default to 'admin').
 //
-// PERSONA DETERMINATION:
+// PERSONA DETERMINATION (PHASE A):
+//   - Non-admins: persona = role (inferred from stored role, NOT a dropdown).
+//   - Admins: persona defaults to 'admin'; the 'view as' switcher comes in a later phase.
 //   - If isExecLocked: forced 'executive' (cannot switch).
-//   - Else: user's self-selected persona persisted in localStorage, defaulting to
-//     'admin' if isAdmin, else 'pm'.
-//
-// Phase 1 establishes the context + the fetch + the persisted state. Phase 2+ makes
-// the nav react to persona (hide/show views, adjust styling, etc).
 
 import { createContext, useCallback, useContext, useEffect, useMemo, useState } from 'react'
 import type { ReactNode } from 'react'
@@ -78,6 +77,7 @@ export function RoleProvider({ children }: { children: ReactNode }) {
   const [email, setEmail] = useState<string | null>(null)
   const [isAdmin, setIsAdmin] = useState(false)
   const [isExecLocked, setIsExecLocked] = useState(false)
+  const [serverRole, setServerRole] = useState<Persona | null>(null)
   const [loading, setLoading] = useState(true)
   const [persona, setPersonaState] = useState<Persona | null>(null)
 
@@ -89,6 +89,8 @@ export function RoleProvider({ children }: { children: ReactNode }) {
         setEmail(data.email)
         setIsAdmin(data.is_admin)
         setIsExecLocked(data.is_exec_locked)
+        // Store the server-returned role (may be undefined on older backends)
+        setServerRole(data.role ?? (data.is_admin ? 'admin' : 'pm'))
         setLoading(false)
       })
       .catch((err) => {
@@ -97,29 +99,35 @@ export function RoleProvider({ children }: { children: ReactNode }) {
         setEmail(null)
         setIsAdmin(false)
         setIsExecLocked(false)
+        setServerRole('pm')
         setLoading(false)
       })
   }, [])
 
   // Determine active persona once identity is known
+  // PHASE A: persona = serverRole for non-admins; admins may keep their stored persona
+  // (the full 'view as' UI comes in a later phase)
   useEffect(() => {
-    if (loading) return
+    if (loading || serverRole === null) return
 
     if (isExecLocked) {
       // Forced 'executive' — ignore localStorage
       setPersonaState('executive')
-    } else {
+    } else if (isAdmin) {
+      // Admins keep their stored persona (or default 'admin')
+      // The 'view as' UI is a later phase; for now, admins just default to 'admin'
       const stored = loadStoredPersona()
       if (stored) {
         setPersonaState(stored)
       } else {
-        // Default: 'admin' if isAdmin, else 'pm'
-        const defaultPersona: Persona = isAdmin ? 'admin' : 'pm'
-        setPersonaState(defaultPersona)
-        storePersona(defaultPersona)
+        setPersonaState('admin')
+        storePersona('admin')
       }
+    } else {
+      // Non-admins: persona = serverRole (inferred, not self-selected)
+      setPersonaState(serverRole)
     }
-  }, [loading, isAdmin, isExecLocked])
+  }, [loading, isAdmin, isExecLocked, serverRole])
 
   const setPersona = useCallback(
     (newPersona: Persona) => {
@@ -128,10 +136,16 @@ export function RoleProvider({ children }: { children: ReactNode }) {
         console.warn('Cannot switch persona: user is exec-locked')
         return
       }
+      if (!isAdmin) {
+        // Non-admins cannot switch persona (it's inferred from their role)
+        console.warn('Cannot switch persona: non-admins have inferred persona')
+        return
+      }
+      // Admins can switch (for now; full 'view as' comes later)
       setPersonaState(newPersona)
       storePersona(newPersona)
     },
-    [isExecLocked],
+    [isExecLocked, isAdmin],
   )
 
   // PHASE 4: coerce a stale/forced 'admin' persona down to 'pm' for a non-admin,

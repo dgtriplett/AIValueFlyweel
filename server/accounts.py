@@ -553,3 +553,51 @@ async def scope_clause_at(param_index: int, alias: str = "") -> tuple[str, list]
         return "true", []
     return (f"({prefix}account_id = ${param_index} "
             f"OR {prefix}account_id IS NULL)"), [account_id]
+
+
+# ---------------------------------------------------------------------------
+# Role Resolution (Phase A: admin-portal/roles)
+# ---------------------------------------------------------------------------
+async def resolve_role(email: str | None, request) -> str:
+    """Resolve a user's role (one of 'admin'|'pm'|'executive').
+    
+    Resolution order (fail-closed):
+      1. If email is on GRID_ATLAS_ADMINS allowlist -> 'admin' ALWAYS
+         (bootstrap, lockout-proof).
+      2. Else look up app_users.role for that email; if a row exists, return it.
+      3. Else default 'pm' (authenticated user with no explicit role).
+      
+    email=None (unauthenticated) -> 'pm' (read-only default), is_admin=False.
+    
+    FAIL-CLOSED: any DB error resolving role must NOT grant admin; fall back to
+    non-admin 'pm'.
+    """
+    # 1. Allowlist always wins (bootstrap, never locked out)
+    if email and is_admin(request):
+        return 'admin'
+    
+    # 2. Look up stored role (fail-closed: DB error -> no admin)
+    if email:
+        try:
+            row = await db.fetchrow(
+                "SELECT role FROM app_users WHERE email = $1",
+                email.strip().lower()
+            )
+            if row is not None:
+                return row["role"]
+        except DatabaseUnavailable:
+            # DB is down: fail closed (no admin grant)
+            logger.warning("DB unavailable during role resolution for %s — defaulting to 'pm'", email)
+        except Exception as exc:  # noqa: BLE001
+            # ANY error resolving role: fail closed
+            if is_missing_relation(exc):
+                # Pre-migration: table doesn't exist yet, so no stored roles
+                pass
+            else:
+                logger.warning(
+                    "Error resolving role for %s (%s: %s) — defaulting to 'pm'",
+                    email, type(exc).__name__, exc
+                )
+    
+    # 3. Default: 'pm' (known authenticated user with no explicit role, or unauthenticated)
+    return 'pm'

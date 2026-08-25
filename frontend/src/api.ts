@@ -172,7 +172,7 @@ export const api = {
   /** The caller's trusted identity + role flags (admin status, exec lock). */
   me: () =>
     http
-      .get<{ email: string | null; is_admin: boolean; is_exec_locked: boolean }>('/me')
+      .get<{ email: string | null; is_admin: boolean; is_exec_locked: boolean; role?: "admin" | "pm" | "executive" }>('/me')
       .then((r) => r.data),
 
   lobs: () => http.get<Lob[]>('/lobs').then((r) => r.data),
