@@ -366,6 +366,53 @@ export function visibleTabsForPersona(persona: Persona): Set<TabId> {
   return new Set(ids)
 }
 
+/**
+ * SAVED VIEWS — each persona's natural HOME tab: where it lands on a cold load
+ * with no remembered tab, and the fallback when a remembered tab is no longer
+ * visible to it.
+ *
+ * The homes are chosen to match what each persona comes to the app to do:
+ *   - executive: 'dashboards' — the rolled-up value/readiness view is an
+ *     executive's landing surface (their nav leads with Portfolio then this).
+ *   - pm: 'portfolio' — the portfolio is a PM's working set.
+ *   - admin: 'portfolio' — admins default into the PM working surface, not a
+ *     settings screen; Setup/Settings are opened deliberately, not landed on.
+ *
+ * Derived from `visibleTabsForPersona`, never a second hand-maintained list:
+ * the home is asserted to BE one of the persona's visible tabs, so a home can
+ * never name a tab the persona cannot reach.
+ */
+const PERSONA_HOME: Record<Persona, TabId> = {
+  executive: 'dashboards',
+  pm: 'portfolio',
+  admin: 'portfolio',
+}
+
+export function defaultTabForPersona(persona: Persona): TabId {
+  const home = PERSONA_HOME[persona]
+  // Defense in depth: if the chosen home is ever not in the persona's visible
+  // set (a future nav edit), fall back to the first tab the persona CAN see
+  // rather than landing them on an invisible tab.
+  const visible = visibleTabsForPersona(persona)
+  if (visible.has(home)) return home
+  const first = visible.values().next().value
+  return first ?? 'portfolio'
+}
+
+/**
+ * SAVED VIEWS — resolve the tab a persona should land on given a remembered one.
+ *
+ * If the stored tab is visible to the persona, honour it — that is the whole
+ * point of remembering. Otherwise (unset, or stale/hand-edited to a tab the
+ * persona cannot see) fall back to the persona's default home. This reuses
+ * `visibleTabsForPersona` rather than duplicating any per-persona list, so it
+ * stays correct as the nav evolves.
+ */
+export function resolveLandingTab(persona: Persona, stored: TabId | null): TabId {
+  if (stored && visibleTabsForPersona(persona).has(stored)) return stored
+  return defaultTabForPersona(persona)
+}
+
 /** The console is a separate dependency-free page; these are its entry points. */
 const NAV_ITEM =
   'px-4 py-2.5 text-sm font-medium flex items-center gap-2 border-b-2 transition-colors'

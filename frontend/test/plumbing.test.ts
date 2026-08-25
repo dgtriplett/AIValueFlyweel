@@ -2061,7 +2061,13 @@ tests['App.tsx gates every admin-only tab render on isAdmin, and only those'] = 
   assert.match(source, /data-ga-not-authorized="1"/)
 
   // The shell reads the trusted isAdmin from the role context (not persona).
-  assert.match(source, /const \{ activePersona, isAdmin \} = useRole\(\)/)
+  // The destructure also pulls activePersona (and, since saved views, `loading`),
+  // so match the useRole() destructure that names activePersona + isAdmin rather
+  // than pinning the exact field list — the trusted-isAdmin claim is what matters.
+  assert.match(
+    source,
+    /const \{[^}]*\bactivePersona\b[^}]*\bisAdmin\b[^}]*\} = useRole\(\)/,
+  )
 }
 // ---------------------------------------------------------------------------
 // Phase 5 — Portfolio view: Kanban preference + AI-recs de-emphasis
@@ -2364,6 +2370,86 @@ tests['RoleContext exposes isPreviewing for admin preview mode'] = () => {
   
   // It must be included in the context value
   assert.match(source, /isPreviewing,/)
+}
+
+// ---------------------------------------------------------------------------
+// SAVED VIEWS — per-persona default landing tab + stale-tab fallback
+//
+// Each persona lands where IT left off, or on its natural HOME when there is
+// nothing remembered or the remembered tab is no longer reachable by that
+// persona. These pin the two claims that are invisible until they are wrong in
+// front of a user: (a) the computed default landing tab per persona, and (b) a
+// stored tab NOT visible to the current persona falls back to the default —
+// never stranding a persona on a tab it cannot see.
+//
+// They exercise the REAL functions from src/components/Header (defaultTabForPersona
+// / resolveLandingTab), which derive from the same visibleTabsForPersona the nav
+// uses, so a nav edit that breaks landing breaks these too.
+// ---------------------------------------------------------------------------
+
+tests['each persona has a default landing tab it can actually see'] = () => {
+  const { defaultTabForPersona, visibleTabsForPersona } =
+    require('../src/components/Header')
+
+  // The product decision, pinned per persona:
+  //   - executive lands on the rolled-up dashboards view,
+  //   - pm lands on the portfolio (its working set),
+  //   - admin lands on the portfolio too (not a settings screen).
+  assert.equal(defaultTabForPersona('executive'), 'dashboards',
+    'executive default landing must be dashboards')
+  assert.equal(defaultTabForPersona('pm'), 'portfolio',
+    'pm default landing must be portfolio')
+  assert.equal(defaultTabForPersona('admin'), 'portfolio',
+    'admin default landing must be portfolio')
+
+  // Invariant that must hold for EVERY persona: the home is a tab the persona
+  // can reach. A home naming an invisible tab would land the user on a blank
+  // (or not-authorized) screen — the exact bug saved views must never cause.
+  for (const persona of ['executive', 'pm', 'admin'] as const) {
+    const home = defaultTabForPersona(persona)
+    assert.ok(visibleTabsForPersona(persona).has(home),
+      `${persona} default landing (${home}) must be one of its visible tabs`)
+  }
+}
+
+tests['a stored tab not visible to the persona falls back to its default home'] = () => {
+  const { resolveLandingTab, defaultTabForPersona } =
+    require('../src/components/Header')
+
+  // Visible stored tab is HONOURED — the whole point of remembering.
+  assert.equal(resolveLandingTab('pm', 'roadmap'), 'roadmap',
+    'a tab the pm can see must be honoured, not overridden')
+  assert.equal(resolveLandingTab('executive', 'dashboards'), 'dashboards',
+    'a tab the executive can see must be honoured')
+
+  // Stored tab NOT visible to this persona → fall back to the default home.
+  //   - 'accounts' is admin-only, so a pm stored on it falls back to pm home.
+  //   - 'funding' is not in the executive set, so an exec stored on it falls
+  //     back to the executive home.
+  assert.equal(resolveLandingTab('pm', 'accounts'), defaultTabForPersona('pm'),
+    'a stale admin-only tab must fall back to the pm default home')
+  assert.equal(resolveLandingTab('executive', 'funding'), defaultTabForPersona('executive'),
+    'a tab outside the executive set must fall back to the executive default home')
+
+  // No stored tab at all (cold load, or storage blocked → null) → default home.
+  assert.equal(resolveLandingTab('admin', null), defaultTabForPersona('admin'),
+    'a null stored tab must resolve to the persona default home')
+
+  // MUTATION CHECK: the fallback must be the DEFAULT home, not just any first
+  // visible tab — an executive stranded on a stale tab lands on dashboards.
+  assert.equal(resolveLandingTab('executive', 'accounts'), 'dashboards',
+    'MUTATION CHECK: executive fallback must be its dashboards home')
+}
+
+tests['App wires per-persona saved-views landing into navigation'] = () => {
+  // Pin that App.tsx actually USES the saved-views plumbing rather than leaving
+  // it dead code: it must resolve the landing tab from the persona's remembered
+  // tab, and persist the active tab back per persona on change.
+  const app = readFileSync('src/App.tsx', 'utf8')
+  assert.match(app, /resolveLandingTab\(activePersona, readLastTab\(activePersona\)\)/,
+    'App must resolve the landing tab from the persona and its remembered tab')
+  assert.match(app, /writeLastTab\(activePersona, tab\)/,
+    'App must persist the active tab as the persona last-viewed tab')
 }
 
 // Kick off the runner AFTER every test above has been registered on `tests`.
