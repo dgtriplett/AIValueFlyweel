@@ -156,6 +156,7 @@ export interface ProgressionEvent {
 
 export interface Progression {
   target_go_live_date?: string | null
+  owner?: string | null
   updated_at?: string | null
   updated_by?: string | null
   at_risk: boolean

@@ -155,6 +155,9 @@ function UseCaseDetail({
   const [slippageReason, setSlippageReason] = useState('')
   const [progressionNote, setProgressionNote] = useState('')
   const [showSlippagePrompt, setShowSlippagePrompt] = useState(false)
+  // Per-account owner/assignee input (feedback item A.3a). Seeded from the
+  // per-account progression overlay; editable with its own save button.
+  const [ownerInput, setOwnerInput] = useState('')
 
   // Reset the form from the server record whenever it changes — but not while the
   // user is editing, or a background refetch would discard what they have typed.
@@ -198,6 +201,7 @@ function UseCaseDetail({
     setProgressionNote('')
     setSlippageReason('')
     setShowSlippagePrompt(false)
+    setOwnerInput(detail.progression?.owner ?? '')
   }, [detail, editing])
 
   const invalidateDetail = () => {
@@ -388,6 +392,16 @@ function UseCaseDetail({
     },
   })
 
+  const setOwnerMutation = useMutation({
+    // Owner is per-account: null/blank clears it. Refresh the detail (which carries
+    // the per-account progression overlay) on success.
+    mutationFn: (owner: string | null) => api.setUseCaseOwner(ucId, owner),
+    onSuccess: () => {
+      invalidateDetail()
+    },
+    onError: (error) => reportError(error, 'Could not update the owner.'),
+  })
+
   const lobName = (id?: number | null) =>
     id != null ? (lobs.find((lob) => lob.id === id)?.name ?? '—') : '—'
 
@@ -421,12 +435,13 @@ function UseCaseDetail({
   const statusIndex = detail?.status ? STATUSES.indexOf(detail.status) : -1
   const milestoneStep = statusIndex >= 0 ? statusIndex + 1 : 0
 
-  // Owner/assignee (feedback item A.3a): the data model exposes `created_by` but has
-  // no dedicated owner/assignee column, so we SURFACE the author read-only rather
-  // than fabricate a field.
-  // TODO: add an editable owner/assignee once the API/UseCase type carries one
-  //       (needs a server column + migration — deliberately out of scope here).
-  const owner = detail?.created_by ?? null
+  // Owner/assignee (feedback item A.3a): now a per-account, editable field backed
+  // by `account_use_case_progress.owner` (migration 022) and surfaced on the
+  // progression overlay. Falls back to the record author (`created_by`) for display
+  // only when no explicit owner has been assigned for this account.
+  const owner = detail?.progression?.owner ?? null
+  const ownerDisplay = owner ?? detail?.created_by ?? null
+  const ownerDirty = (ownerInput.trim() || null) !== (owner ?? null)
 
   // The header chrome differs by layout: a full-page view leads with a breadcrumb
   // back to where the user was and no overlay Close; the drawer keeps its Close and
@@ -577,10 +592,55 @@ function UseCaseDetail({
                   <div className="text-[11px] uppercase tracking-wide text-navy-500">
                     Owner
                   </div>
-                  <div className="text-sm font-semibold text-white mt-0.5 flex items-center gap-1">
-                    <User className="w-3.5 h-3.5 text-navy-400" />
-                    {owner ?? 'Unassigned'}
-                  </div>
+                  {readOnly ? (
+                    <div className="text-sm font-semibold text-white mt-0.5 flex items-center gap-1">
+                      <User className="w-3.5 h-3.5 text-navy-400" />
+                      {ownerDisplay ?? 'Unassigned'}
+                    </div>
+                  ) : (
+                    <div className="mt-0.5 flex items-center gap-1">
+                      <User className="w-3.5 h-3.5 text-navy-400 shrink-0" />
+                      <input
+                        id="uc-owner"
+                        name="uc-owner"
+                        aria-label="Use case owner"
+                        className="input-field text-sm py-1 h-7"
+                        placeholder="Unassigned"
+                        value={ownerInput}
+                        disabled={setOwnerMutation.isPending}
+                        onChange={(event) => setOwnerInput(event.target.value)}
+                        onKeyDown={(event) => {
+                          if (event.key === 'Enter' && ownerDirty && !setOwnerMutation.isPending) {
+                            setOwnerMutation.mutate(ownerInput.trim() || null)
+                          }
+                        }}
+                      />
+                      <button
+                        type="button"
+                        data-ga-uc-owner-save="1"
+                        className="text-success hover:text-white text-xs disabled:opacity-40"
+                        disabled={!ownerDirty || setOwnerMutation.isPending}
+                        onClick={() => setOwnerMutation.mutate(ownerInput.trim() || null)}
+                      >
+                        {setOwnerMutation.isPending ? '…' : <Save className="w-4 h-4" />}
+                      </button>
+                      {ownerInput ? (
+                        <button
+                          type="button"
+                          data-ga-uc-owner-clear="1"
+                          className="text-navy-400 hover:text-lava-300 text-xs disabled:opacity-40"
+                          title="Clear owner"
+                          disabled={setOwnerMutation.isPending}
+                          onClick={() => {
+                            setOwnerInput('')
+                            setOwnerMutation.mutate(null)
+                          }}
+                        >
+                          <X className="w-4 h-4" />
+                        </button>
+                      ) : null}
+                    </div>
+                  )}
                 </div>
                 <div>
                   <div className="text-[11px] uppercase tracking-wide text-navy-500">
