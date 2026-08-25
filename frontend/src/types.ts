@@ -1596,3 +1596,18 @@ export interface BrandingLogoResponse {
   mime: string
   logo_url?: string
 }
+
+/**
+ * `GET /api/users` — a managed user's role row. Roles are global to the instance
+ * (keyed by email), not per-account. `is_env_admin` marks emails on the
+ * GRID_ATLAS_ADMINS allowlist: they are admin regardless of any stored role, so the
+ * UI shows them as env-governed and does not let their role be changed via a row.
+ */
+export interface AppUser {
+  email: string
+  role: 'admin' | 'pm' | 'executive'
+  granted_by?: string | null
+  created_at?: string | null
+  updated_at?: string | null
+  is_env_admin?: boolean
+}
