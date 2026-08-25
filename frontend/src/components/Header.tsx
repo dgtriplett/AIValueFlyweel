@@ -234,10 +234,11 @@ export const TABS: Tab[] = [
  * the numbers rest on, work with knowledge, or configure the workspace — so the
  * choice at the top is about what you are trying to do, not which screen holds it.
  *
- * `onboarding` is deliberately NOT in a group: it is an entry-point surface,
- * rendered as its own top-level button so a customer with an empty instance can
- * find it without opening a menu. It was previously in neither TABS nor a group,
- * which left OnboardingView reachable only by editing state by hand.
+ * `onboarding` is deliberately NOT in a group: it is an entry-point surface. As
+ * of the roles Phase A it is no longer rendered inside the main horizontal nav —
+ * it is a one-time onboarding action, not a recurring destination, so its button
+ * lives in the top-right cluster UNDER the persona/role indicator (see
+ * GetStartedButton). Its routing (setTab('onboarding')) is unchanged.
  */
 const ALL_NAV_GROUPS: { label: string; ids: TabId[] }[] = [
   {
@@ -254,7 +255,8 @@ const ALL_NAV_GROUPS: { label: string; ids: TabId[] }[] = [
   { label: 'Create', ids: ['generate', 'roadmap_import', 'proposals'] },
 ]
 
-/** The entry-point surface: outside the groups, always one click away. */
+/** The entry-point surface: outside the groups, one click away in the top-right
+ *  cluster (see GetStartedButton). Not part of the main horizontal nav row. */
 const ENTRY_TAB: TabId = 'onboarding'
 
 /**
@@ -280,6 +282,10 @@ const ENTRY_TAB: TabId = 'onboarding'
  *   - roadmap (from Plan & Fund)
  *   - portfolio (from Portfolio, read-only)
  *   - NOTHING else
+ *
+ * `entryTab` names whether the persona should see the Get started affordance
+ * (admin/pm yes, executive no). Its button now lives in the top-right cluster,
+ * but the gating is unchanged.
  */
 function filterNavForPersona(persona: Persona): {
   groups: { label: string; ids: TabId[] }[]
@@ -345,8 +351,7 @@ export const ADMIN_ONLY_TABS: ReadonlySet<TabId> = new Set<TabId>([
 ])
 
 /** Collect all TabIds that are visible to a persona, for fallback logic. */
-export
-function visibleTabsForPersona(persona: Persona): Set<TabId> {
+export function visibleTabsForPersona(persona: Persona): Set<TabId> {
   const filtered = filterNavForPersona(persona)
   const ids = filtered.groups.flatMap((g) => g.ids)
   if (filtered.entryTab) ids.push(filtered.entryTab)
@@ -493,6 +498,124 @@ function NavGroup({
   )
 }
 
+/**
+ * ROLES PHASE A — persona switcher / role indicator.
+ *
+ * The point of this phase: a regular user's persona is INFERRED from their stored
+ * role, not freely chosen. So:
+ *   - EXEC-LOCKED (stored 'executive', non-admin): a static "Executive" label. No
+ *     switch — they cannot leave the executive view.
+ *   - NON-ADMIN (pm or executive): a static role/persona indicator (a small label
+ *     'PM' / 'Executive'). NO dropdown — persona is fixed by their stored role.
+ *   - ADMIN: keeps a switcher for now. The full 'view as' UX is a LATER phase; the
+ *     'admin' option is only OFFERED to a trusted admin (isAdmin from GET /api/me).
+ *
+ * isAdmin is the trusted fact from /api/me (the GRID_ATLAS_ADMINS allowlist), NOT
+ * the self-selected persona.
+ */
+function PersonaSwitcher() {
+  const { activePersona, setPersona, isAdmin, isExecLocked, loading } = useRole()
+
+  if (loading) return null
+
+  // Exec-locked users get a static Executive label — they cannot switch.
+  if (isExecLocked) {
+    return (
+      <div className="flex items-center gap-2">
+        <span className="text-xs text-navy-400">Role:</span>
+        <span className="text-xs bg-navy-700 text-navy-200 border border-navy-600 rounded px-2 py-1">
+          Executive
+        </span>
+      </div>
+    )
+  }
+
+  // Non-admins: persona is inferred from their stored role. Show a STATIC label,
+  // never a dropdown — they do not get to choose their persona.
+  if (!isAdmin) {
+    const label =
+      activePersona === 'pm' ? 'PM' : activePersona === 'executive' ? 'Executive' : 'Admin'
+    return (
+      <div className="flex items-center gap-2">
+        <span className="text-xs text-navy-400">Role:</span>
+        <span className="text-xs bg-navy-700 text-navy-200 border border-navy-600 rounded px-2 py-1">
+          {label}
+        </span>
+      </div>
+    )
+  }
+
+  // Admins keep a switcher for now (full 'view as' comes in a later phase). The
+  // 'admin' option is only OFFERED to a trusted admin.
+  const personas: Array<{ value: Persona; label: string }> = [
+    { value: 'admin', label: 'Admin' },
+    { value: 'pm', label: 'PM' },
+    { value: 'executive', label: 'Executive' },
+  ]
+
+  return (
+    <div className="flex items-center gap-2">
+      <span className="text-xs text-navy-400">Persona:</span>
+      <select
+        value={activePersona}
+        onChange={(e) => setPersona(e.target.value as Persona)}
+        className="text-xs bg-navy-700 text-navy-200 border border-navy-600 rounded px-2 py-1 disabled:opacity-50 disabled:cursor-not-allowed"
+        title="Switch persona"
+      >
+        {personas.map((p) => (
+          <option key={p.value} value={p.value}>
+            {p.label}
+          </option>
+        ))}
+      </select>
+    </div>
+  )
+}
+
+/**
+ * ROLES PHASE A — Get started button (onboarding entry point).
+ *
+ * MOVED out of the main horizontal nav row and into the top-right cluster, UNDER
+ * the persona/role indicator, alongside the DEV/PROD pill. Onboarding is a
+ * one-time action, not a recurring destination, so it does not belong among the
+ * grouped nav destinations. The tab and its routing (setTab('onboarding')) are
+ * unchanged — only the affordance's location moved.
+ *
+ * `visible` is driven by the persona's `entryTab` (admin/pm see it; executives do
+ * not, per existing gating).
+ */
+function GetStartedButton({
+  tab,
+  setTab,
+  visible,
+}: {
+  tab: TabId
+  setTab: (id: TabId) => void
+  visible: boolean
+}) {
+  if (!visible) return null
+
+  const entry = TABS.find((t) => t.id === 'onboarding')
+  if (!entry) return null
+
+  const active = tab === 'onboarding'
+
+  return (
+    <button
+      onClick={() => setTab('onboarding')}
+      className={`text-xs flex items-center gap-1.5 px-3 py-1.5 rounded border transition-colors ${
+        active
+          ? 'bg-[#FF3621] text-white border-[#FF3621]'
+          : 'bg-navy-700 text-navy-200 border-navy-600 hover:bg-navy-600'
+      }`}
+      title={entry.hint}
+    >
+      {entry.icon}
+      {entry.label}
+    </button>
+  )
+}
+
 export interface HeaderBranding {
   display_name: string
   subtitle: string
@@ -536,8 +659,6 @@ export function Header({
     }
   }, [openMenu])
 
-  const entry = entryTab ? TABS.find((candidate) => candidate.id === entryTab) : null
-
   // Use branding when available, fall back to defaults
   const displayName = branding?.display_name ?? 'AI Value Flywheel'
   const subtitle = branding?.subtitle ?? 'Power & Utilities — Data & AI Catalog, Value & Roadmap'
@@ -572,17 +693,22 @@ export function Header({
               <p className="text-xs text-navy-400 -mt-0.5">{subtitle}</p>
             </div>
           </div>
-          <div className="flex items-center gap-3">
-            {env ? (
-              <span
-                className={env.toUpperCase() === 'PROD' ? 'badge-high inline-flex items-center gap-1' : 'badge-muted inline-flex items-center gap-1'}
-                title="Deployment environment"
-              >
-                <Activity className="w-3 h-3" />
-                {env.toUpperCase()}
-              </span>
-            ) : null}
-            <PersonaSwitcher />
+          {/* Top-right cluster: env pill, persona/role indicator, and — UNDER it —
+              the Get started button (relocated out of the main nav). */}
+          <div className="flex flex-col items-end gap-2">
+            <div className="flex items-center gap-3">
+              {env ? (
+                <span
+                  className={env.toUpperCase() === 'PROD' ? 'badge-high inline-flex items-center gap-1' : 'badge-muted inline-flex items-center gap-1'}
+                  title="Deployment environment"
+                >
+                  <Activity className="w-3 h-3" />
+                  {env.toUpperCase()}
+                </span>
+              ) : null}
+              <PersonaSwitcher />
+            </div>
+            <GetStartedButton tab={tab} setTab={setTab} visible={entryTab !== null} />
           </div>
         </div>
 
@@ -603,65 +729,8 @@ export function Header({
               setOpenMenu={setOpenMenu}
             />
           ))}
-
-          {entry ? (
-            <TabButton
-              tab={entry}
-              active={tab === entry.id}
-              onSelect={() => {
-                setOpenMenu(null)
-                setTab(entry.id)
-              }}
-            />
-          ) : null}
         </nav>
       </div>
     </header>
-  )
-}
-
-/**
- * Persona switcher. Lets users self-select their persona
- * ('admin' | 'pm' | 'executive') unless they're exec-locked.
- *
- * Phase 1: establishes the switcher.
- * Phase 2: nav adapts based on activePersona.
- * Phase 4 (ADMIN LOCKDOWN): the 'admin' option is only OFFERED when the trusted
- *   isAdmin (from GET /api/me) is true. A non-admin sees only PM and Executive, so
- *   they cannot self-select into admin-only surfaces from the UI. This is the OFFER
- *   half of the lockdown; the coercion in RoleContext.effectivePersona and the
- *   render gate in App.tsx are the RENDER halves (defense in depth).
- */
-function PersonaSwitcher() {
-  const { activePersona, setPersona, isAdmin, isExecLocked, loading } = useRole()
-
-  if (loading) return null
-  // Phase 2: hide switcher for exec-locked users (they cannot switch anyway)
-  if (isExecLocked) return null
-
-  // Phase 4: only OFFER 'admin' to a trusted admin. Non-admins see PM + Executive.
-  const personas: Array<{ value: Persona; label: string }> = [
-    ...(isAdmin ? [{ value: 'admin' as Persona, label: 'Admin' }] : []),
-    { value: 'pm', label: 'PM' },
-    { value: 'executive', label: 'Executive' },
-  ]
-
-  return (
-    <div className="flex items-center gap-2">
-      <span className="text-xs text-navy-400">Persona:</span>
-      <select
-        value={activePersona}
-        onChange={(e) => setPersona(e.target.value as Persona)}
-        disabled={isExecLocked}
-        className="text-xs bg-navy-700 text-navy-200 border border-navy-600 rounded px-2 py-1 disabled:opacity-50 disabled:cursor-not-allowed"
-        title={isExecLocked ? 'Persona is locked by admin' : 'Switch persona'}
-      >
-        {personas.map((p) => (
-          <option key={p.value} value={p.value}>
-            {p.label}
-          </option>
-        ))}
-      </select>
-    </div>
   )
 }
