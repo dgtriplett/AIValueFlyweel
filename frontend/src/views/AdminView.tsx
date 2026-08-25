@@ -31,9 +31,10 @@
 
 import { useState } from 'react'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
-import { Cloud, Database, Sparkles, Trash2, Wand2 } from 'lucide-react'
+import { Cloud, Database, Sparkles, Trash2, Users, UserPlus, Wand2, X } from 'lucide-react'
 
 import { api } from '../api'
+import { useRole } from '../context/RoleContext'
 import { Banner } from '../components/Banner'
 import { ConfirmCard } from '../components/ConfirmCard'
 import { DatabricksSyncButton } from '../components/DatabricksSyncButton'
@@ -41,6 +42,7 @@ import { useApiErrorToast } from '../components/Toasts'
 import { isApiError } from '../lib/errors'
 import { NO_RETRY } from '../lib/retry'
 import type {
+  AppUser,
   ConfirmCardData,
   DemoStatusResponse,
   GenieProvisionResponse,
@@ -57,6 +59,10 @@ function healthCount(counts: unknown, key: string): number | null {
 export function AdminView(): JSX.Element {
   const queryClient = useQueryClient()
   const reportError = useApiErrorToast()
+  // Server `require_admin` is the real gate on every /api/users endpoint; this only
+  // decides whether to RENDER the section, for good UX. A non-admin who forced it
+  // open would still get a 403 the moment any call fired.
+  const { isAdmin } = useRole()
 
   // Which destructive card is open, if any. Only one at a time — the confirm cards
   // are exclusive because they all rewrite the same portfolio.
@@ -219,6 +225,9 @@ export function AdminView(): JSX.Element {
       </div>
 
       {notice ? <Banner kind={notice.kind}>{notice.text}</Banner> : null}
+
+      {/* ---- Users ------------------------------------------------------------ */}
+      {isAdmin ? <UsersSection /> : null}
 
       {/* ---- This instance ---------------------------------------------------- */}
       <div className="card space-y-2">
@@ -484,6 +493,219 @@ export function AdminView(): JSX.Element {
           {cleanup.isPending ? 'Cleaning…' : 'Clean up expired records'}
         </button>
       </div>
+    </div>
+  )
+}
+
+
+/**
+ * Users — assign/change who is a PM / Executive / Admin (admin-portal/roles, Phase B).
+ *
+ * The whole section renders only for an admin (AdminView gates on `useRole().isAdmin`),
+ * but the SERVER's `require_admin` on every /api/users endpoint is the real gate — this
+ * view does not trust the client for authz, it just avoids showing controls that would
+ * 403. Every call goes through the account-scoped `api` client (never a raw fetch), a
+ * role change is a single PUT, and a removal is confirm-gated through the shared
+ * <ConfirmCard> in local-action mode — the same primitive the demo-reset flow uses —
+ * spreading NO_RETRY so an ambiguous failure never silently replays a destructive write.
+ *
+ * Env-allowlist admins (GRID_ATLAS_ADMINS) are shown with an '(env admin)' badge and
+ * their role select disabled: the allowlist outranks the table, so their admin status
+ * cannot be changed by editing a row, and pretending otherwise would be a lie.
+ */
+const ROLE_OPTIONS: AppUser['role'][] = ['pm', 'executive', 'admin']
+
+function UsersSection(): JSX.Element {
+  const queryClient = useQueryClient()
+  const reportError = useApiErrorToast()
+
+  const [addEmail, setAddEmail] = useState('')
+  const [addRole, setAddRole] = useState<AppUser['role']>('pm')
+  // The email pending a confirm-gated removal, if any.
+  const [removing, setRemoving] = useState<string | null>(null)
+
+  const usersQuery = useQuery({ queryKey: ['users'], queryFn: api.listUsers })
+
+  const invalidateUsers = () => queryClient.invalidateQueries({ queryKey: ['users'] })
+
+  const setRole = useMutation({
+    mutationFn: ({ email, role }: { email: string; role: AppUser['role'] }) =>
+      api.setUserRole(email, role),
+    ...NO_RETRY,
+    onSuccess: invalidateUsers,
+    onError: (error) => reportError(error, 'Could not change that user\'s role.'),
+  })
+
+  const addUser = useMutation({
+    mutationFn: ({ email, role }: { email: string; role: AppUser['role'] }) =>
+      api.setUserRole(email, role),
+    ...NO_RETRY,
+    onSuccess: () => {
+      setAddEmail('')
+      setAddRole('pm')
+      invalidateUsers()
+    },
+    onError: (error) => reportError(error, 'Could not add that user.'),
+  })
+
+  const removeUser = useMutation({
+    mutationFn: (email: string) => api.removeUser(email),
+    ...NO_RETRY,
+    onSuccess: () => {
+      setRemoving(null)
+      invalidateUsers()
+    },
+    onError: (error) => {
+      setRemoving(null)
+      reportError(error, 'Could not remove that user.')
+    },
+  })
+
+  const users = usersQuery.data ?? []
+
+  const removeCard: ConfirmCardData = {
+    token: 'remove-user',
+    intent: 'user_role_revoke',
+    summary: `Remove ${removing ?? 'this user'}\'s role? They revert to the 'pm' default.`,
+    after: { action: 'remove the stored role', scope: removing ?? 'this user' },
+  }
+
+  const trimmedEmail = addEmail.trim()
+
+  return (
+    <div className="card space-y-3">
+      <div className="flex items-center gap-2">
+        <Users className="w-4 h-4 text-navy-300" />
+        <h3 className="font-semibold text-white">Users</h3>
+      </div>
+      <p className="text-sm text-navy-400 max-w-[78ch]">
+        Assign who is a PM, an Executive, or an Admin on this instance. Roles are global
+        (keyed by email), and every change here is admin-gated and audited on the server.
+        Admins from the <code>GRID_ATLAS_ADMINS</code> allowlist are admin regardless of
+        this table — their role is shown as <em>(env admin)</em> and cannot be changed here.
+      </p>
+
+      {usersQuery.isLoading ? (
+        <p className="text-sm text-navy-400">Loading users…</p>
+      ) : usersQuery.isError ? (
+        <Banner kind="err">Could not load users. You may not be an administrator.</Banner>
+      ) : (
+        <div className="overflow-x-auto">
+          <table className="w-full text-sm">
+            <thead>
+              <tr className="text-left text-navy-500 border-b border-navy-800">
+                <th className="py-2 pr-3 font-medium">Email</th>
+                <th className="py-2 pr-3 font-medium">Role</th>
+                <th className="py-2 pr-3 font-medium">Granted by</th>
+                <th className="py-2 pr-3 font-medium">Updated</th>
+                <th className="py-2 font-medium sr-only">Remove</th>
+              </tr>
+            </thead>
+            <tbody>
+              {users.length === 0 ? (
+                <tr>
+                  <td colSpan={5} className="py-3 text-navy-500">
+                    No managed users yet. Add one below.
+                  </td>
+                </tr>
+              ) : (
+                users.map((user) => (
+                  <tr key={user.email} className="border-b border-navy-900">
+                    <td className="py-2 pr-3 text-white">
+                      {user.email}
+                      {user.is_env_admin ? (
+                        <span className="ml-2 text-xs text-info">(env admin)</span>
+                      ) : null}
+                    </td>
+                    <td className="py-2 pr-3">
+                      <select
+                        className="bg-navy-900 border border-navy-700 rounded px-2 py-1 text-white text-sm disabled:opacity-50"
+                        value={user.role}
+                        disabled={user.is_env_admin || setRole.isPending}
+                        onChange={(event) =>
+                          setRole.mutate({
+                            email: user.email,
+                            role: event.target.value as AppUser['role'],
+                          })
+                        }
+                      >
+                        {ROLE_OPTIONS.map((role) => (
+                          <option key={role} value={role}>
+                            {role}
+                          </option>
+                        ))}
+                      </select>
+                    </td>
+                    <td className="py-2 pr-3 text-navy-400">{user.granted_by ?? '—'}</td>
+                    <td className="py-2 pr-3 text-navy-400">
+                      {user.updated_at ? user.updated_at.slice(0, 10) : '—'}
+                    </td>
+                    <td className="py-2 text-right">
+                      {user.is_env_admin ? (
+                        <span className="text-xs text-navy-600">—</span>
+                      ) : (
+                        <button
+                          className="text-navy-400 hover:text-lava disabled:opacity-50"
+                          aria-label={`Remove ${user.email}`}
+                          disabled={removeUser.isPending}
+                          onClick={() => setRemoving(user.email)}
+                        >
+                          <X className="w-4 h-4" />
+                        </button>
+                      )}
+                    </td>
+                  </tr>
+                ))
+              )}
+            </tbody>
+          </table>
+        </div>
+      )}
+
+      {/* Add user */}
+      <div className="flex flex-wrap items-end gap-2 pt-1">
+        <div className="flex-1 min-w-[16rem]">
+          <label className="block text-xs text-navy-500 mb-1">Add user (email)</label>
+          <input
+            type="email"
+            className="w-full bg-navy-900 border border-navy-700 rounded px-2 py-1 text-white text-sm"
+            placeholder="person@utility.com"
+            value={addEmail}
+            onChange={(event) => setAddEmail(event.target.value)}
+          />
+        </div>
+        <div>
+          <label className="block text-xs text-navy-500 mb-1">Role</label>
+          <select
+            className="bg-navy-900 border border-navy-700 rounded px-2 py-1 text-white text-sm"
+            value={addRole}
+            onChange={(event) => setAddRole(event.target.value as AppUser['role'])}
+          >
+            {ROLE_OPTIONS.map((role) => (
+              <option key={role} value={role}>
+                {role}
+              </option>
+            ))}
+          </select>
+        </div>
+        <button
+          className="btn-primary text-sm inline-flex items-center gap-1"
+          disabled={!trimmedEmail || addUser.isPending}
+          onClick={() => addUser.mutate({ email: trimmedEmail, role: addRole })}
+        >
+          <UserPlus className="w-4 h-4" />
+          {addUser.isPending ? 'Adding…' : 'Add user'}
+        </button>
+      </div>
+
+      {removing ? (
+        <ConfirmCard
+          data={removeCard}
+          approveLabel={removeUser.isPending ? 'Removing…' : 'Remove user'}
+          onApprove={() => removeUser.mutateAsync(removing)}
+          onCancel={() => setRemoving(null)}
+        />
+      ) : null}
     </div>
   )
 }

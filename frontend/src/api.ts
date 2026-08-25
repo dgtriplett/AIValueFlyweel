@@ -23,6 +23,7 @@ import type {
   BrandingLogoResponse,
   CanonicalizeResponse,
   CleanupResponse,
+  AppUser,
   CatalogRecommendResponse,
   ChatResponse,
   ClassificationRule,
@@ -981,6 +982,38 @@ export const api = {
   /** Reclaim expired generation previews and consumed confirm tokens. Safe. */
   generateCleanup: () =>
     http.post<CleanupResponse>('/generate/cleanup').then((r) => r.data),
+
+  // ---- User management (admin-portal/roles, Phase B) -----------------------
+  //
+  // Roles are global to the instance, not per-account, but EVERY endpoint is
+  // admin-gated server-side (`require_admin`, fail-closed on the GRID_ATLAS_ADMINS
+  // allowlist). The view renders the section only for an admin as a UX nicety; the
+  // server is the real gate and returns 403 whose `detail` is surfaced verbatim.
+  // These go through the account-scoped `http` client — never a raw fetch — so the
+  // account interceptor and error normalization apply like everywhere else.
+
+  /** List every managed user + which emails are admins via the env allowlist. */
+  listUsers: () => http.get<{ users: AppUser[] }>('/users').then((r) => r.data.users),
+
+  /**
+   * Grant or change a user's role (upsert). ADMIN-GATED server-side; the server
+   * validates the role and attributes `granted_by` to the acting admin, so the
+   * client never sends it. `encodeURIComponent` because an email is a path segment.
+   */
+  setUserRole: (email: string, role: AppUser['role']) =>
+    http.put<AppUser>(`/users/${encodeURIComponent(email)}`, { role }).then((r) => r.data),
+
+  /**
+   * Remove a user's role row; they revert to the 'pm' default. ADMIN-GATED and
+   * confirm-gated in the view. The server refuses a genuine self-lockout (a
+   * table-granted admin removing their own admin row) with a 422 the view surfaces.
+   */
+  removeUser: (email: string) =>
+    http
+      .delete<{ deleted: boolean; email: string; note?: string }>(
+        `/users/${encodeURIComponent(email)}`,
+      )
+      .then((r) => r.data),
 
   // ---- Branding ------------------------------------------------------------
 

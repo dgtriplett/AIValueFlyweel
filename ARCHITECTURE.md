@@ -169,6 +169,7 @@ written back to Lakebase, which stays the portfolio's system of record.
   (bootstrap, lockout-proof); this table holds granted roles for everyone else, managed
   by admins in the admin portal. Persona is inferred from the resolved role rather than
   self-selected. Idempotent, additive (new table — deploy must run `migrate.py --grant-app-sp`).
+  The `server/routes/users.py` router (mounted at `/api/users`) is the admin-only CRUD over this table: `GET` lists rows and flags allowlist (`is_env_admin`) admins, `PUT /{email}` upserts a role, `DELETE /{email}` reverts a user to the 'pm' default. Every endpoint calls `require_admin` first (fail-closed) and every mutation writes an `audit_log` row (`entity_type='app_user'`, `role_grant`/`role_revoke`).
 
 - **Migration ledger** — `schema_migrations`, created by `server/migrator.py`
   rather than by a numbered migration, since it must exist before the ledger can
