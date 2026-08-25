@@ -155,7 +155,7 @@ export function RoleProvider({ children }: { children: ReactNode }) {
   const activePersona = effectivePersona(persona ?? 'pm', isAdmin)
 
   // PHASE C: isPreviewing = admin viewing as a non-admin persona (testing mode).
-  // This helps Header show a clear "Viewing as X" badge when an admin is previewing.
+  // This helps Header show an amber ring on the dropdown when an admin is previewing.
   const isPreviewing = isAdmin && activePersona !== 'admin'
 
   const value = useMemo(
