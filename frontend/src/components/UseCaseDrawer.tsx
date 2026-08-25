@@ -927,7 +927,7 @@ function UseCaseDetail({
                 </span>
               </div>
               <div className="text-xs text-navy-400">
-                {detail.required_ready}/{detail.required_total} required {detail.requirement_model === 'domain' ? 'data domains satisfied' : 'assets ready'}
+                {detail.required_ready}/{detail.required_total} required datasets ready
               </div>
             </div>
 
