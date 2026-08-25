@@ -155,6 +155,12 @@ written back to Lakebase, which stays the portfolio's system of record.
   rationale (e.g., "Provides X data from Y category required for this use case"). Idempotent
   and non-destructive — only updates NULL/empty values. Creates helper function
   `update_asset_detail_by_category` keyed on (source_category, module).
+- **App users / role model** — `021_app_users.sql`: adds the `app_users` table
+  (email PK, role in admin/pm/executive, granted_by, timestamps) — the source of truth
+  for a user's role/persona. The `GRID_ATLAS_ADMINS` env allowlist ALWAYS grants admin
+  (bootstrap, lockout-proof); this table holds granted roles for everyone else, managed
+  by admins in the admin portal. Persona is inferred from the resolved role rather than
+  self-selected. Idempotent, additive (new table — deploy must run `migrate.py --grant-app-sp`).
 - **Migration ledger** — `schema_migrations`, created by `server/migrator.py`
   rather than by a numbered migration, since it must exist before the ledger can
   be consulted.
