@@ -575,7 +575,7 @@ async def resolve_role(email: str | None, request) -> str:
     # 1. Allowlist always wins (bootstrap, never locked out)
     if email and is_admin(request):
         return 'admin'
-    
+
     # 2. Look up stored role (fail-closed: DB error -> no admin)
     if email:
         try:
@@ -598,6 +598,6 @@ async def resolve_role(email: str | None, request) -> str:
                     "Error resolving role for %s (%s: %s) — defaulting to 'pm'",
                     email, type(exc).__name__, exc
                 )
-    
+
     # 3. Default: 'pm' (known authenticated user with no explicit role, or unauthenticated)
     return 'pm'

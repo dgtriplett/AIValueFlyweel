@@ -31,10 +31,10 @@ async def get_me(request: Request):
     email = trusted_identity(request)
     admin = is_admin(request)
     role = await resolve_role(email, request)
-    
+
     # is_exec_locked: role is 'executive' AND not an admin (admins are never locked)
     exec_locked = (role == 'executive' and not admin)
-    
+
     return {
         "email": email,
         "is_admin": admin,
