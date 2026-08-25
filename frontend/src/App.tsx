@@ -255,7 +255,7 @@ function AppShell() {
       case 'artifacts':
         return <ArtifactsView />
       case 'executive':
-        return <ExecutiveView />
+        return <ExecutiveView setTab={setTab} />
       case 'knowledge':
         return <KnowledgeView />
       case 'sourcemapping':
