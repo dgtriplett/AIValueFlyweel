@@ -760,7 +760,7 @@ function UseCaseDetail({
                       try {
                         await api.estimateUseCaseValue(detail.id)
                         // Invalidate the detail query to refetch with new hypothesized_value_json
-                        queryClient.invalidateQueries({ queryKey: ['use-case-detail', detail.id] })
+                        queryClient.invalidateQueries({ queryKey: ['uc-detail', ucId] })
                       } catch (err) {
                         console.error('Failed to estimate value:', err)
                       }
@@ -1028,7 +1028,7 @@ function UseCaseDetail({
                           {domain.satisfied ? 'covered' : 'pending'}
                         </span>
                       </div>
-                      {domain.serving_assets.map((asset) => (
+                      {domain.assets.map((asset) => (
                         <button
                           key={asset.id}
                           className="w-full flex items-center justify-between text-sm border-b border-navy-600 py-1.5 hover:bg-navy-700/50 px-1 rounded text-left ml-3"
@@ -1078,12 +1078,6 @@ function UseCaseDetail({
                     </button>
                   ))
                 )}
-                {(detail.required_assets ?? []).length === 0 ? (
-                  <div className="text-xs text-navy-500">No required modules.</div>
-                ) : null}
-              </div>
-                  </button>
-                ))}
                 {(detail.required_assets ?? []).length === 0 ? (
                   <div className="text-xs text-navy-500">No required modules.</div>
                 ) : null}

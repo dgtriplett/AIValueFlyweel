@@ -193,12 +193,13 @@ export const api = {
     http.post<UseCase>('/use-cases', body).then((r) => r.data),
 
   updateUseCase: (id: number, body: Partial<UseCase>) =>
-    http.patch<UseCase>(`/use-cases/${id}`, body).then((r) => r.data),
-
-  // Bug 2 fix: persist estimate endpoint
-  estimateUseCaseValue: (id: number) =>
-    http.post<HypothesizedValue>(`/use-cases/${id}/estimate-value`, {}).then((r) => r.data),
     http.put<UseCase>(`/use-cases/${id}`, body).then((r) => r.data),
+
+  // Bug 2 fix: persist-capable estimate endpoint
+  estimateUseCaseValue: (id: number) =>
+    http
+      .post<HypothesizedValue>(`/use-cases/${id}/estimate-value`, {})
+      .then((r) => r.data),
 
   setStatus: (id: number, status: string) =>
     http.patch<UseCase>(`/use-cases/${id}/status`, { status }).then((r) => r.data),
