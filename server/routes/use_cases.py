@@ -8,7 +8,7 @@ from .. import accounts
 from ..common import current_user, row_to_dict, rows_to_list, write_audit
 from ..db import db
 from .. import portfolio
-from ..readiness import readiness_map, readiness_for, domain_satisfaction_for
+from ..readiness import readiness_map, readiness_for, domain_satisfaction_for, asset_status_map
 from ..value_engine import (
     compute_realized,
     compute_value_range,
@@ -357,20 +357,37 @@ async def get_use_case_detail(uc_id: int):
     uc["realized"] = compute_realized(uc, assumptions)
 
     account_id = await accounts.current()
-    # FIX PART A: Overlay per-account status (not the shared catalog status), and
-    # include the new rationale field. Matches the pattern in data_assets.py line 47.
+    # BUG A FIX: resolve per-asset ingestion_status through the SAME shared
+    # per-account map that readiness/domain-satisfaction uses (asset_status_map ->
+    # asset_status_by_account view; missing row = 'not_started', NO COALESCE fallback
+    # to the shared da.ingestion_status column). Previously each query COALESCE'd to
+    # the shared column, so a governed catalog value leaked into a per-account
+    # 'Governed' badge while the domain calc correctly saw 'not_started' — the two
+    # badges contradicted each other. Resolving both from one map makes that
+    # impossible. asset_status_map preserves the pre-migration fallback internally,
+    # so an un-upgraded install still works.
+    status_map = await asset_status_map()
+
+    def _overlay_status(asset: dict) -> dict:
+        """Replace ingestion_status with the per-account resolution. A missing
+        entry means the account has said nothing -> 'not_started', matching the
+        view/readiness rule exactly (never inheriting the shared column)."""
+        asset_id = asset.get("id")
+        if asset_id in status_map:
+            asset["ingestion_status"] = status_map[asset_id]
+        else:
+            asset["ingestion_status"] = "not_started"
+        return asset
+
     required = await db.fetch(
         """SELECT da.*,
-                  COALESCE(acs.ingestion_status, da.ingestion_status) AS ingestion_status,
                   ura.criticality,
                   ura.rationale
            FROM uc_requires_asset ura
            JOIN data_assets da ON da.id = ura.data_asset_id
-           LEFT JOIN account_asset_status acs
-                  ON acs.data_asset_id = da.id AND acs.account_id = $2
            WHERE ura.use_case_id = $1
            ORDER BY ura.criticality, da.source_system, da.module""",
-        uc_id, account_id,
+        uc_id,
     )
     enables = await db.fetch(
         """SELECT uc.id, uc.title, uc.stage, uc.phase, uc.status, e.rationale, e.detected_by_agent
@@ -386,7 +403,7 @@ async def get_use_case_detail(uc_id: int):
     )
     # FIX PART A.2: Split required vs helpful assets server-side so the count reflects
     # only truly required ones.
-    required_list = rows_to_list(required)
+    required_list = [_overlay_status(a) for a in rows_to_list(required)]
     required_assets = [a for a in required_list if a.get("criticality") == "required"]
     helpful_assets = [a for a in required_list if a.get("criticality") == "helpful"]
 
@@ -428,17 +445,16 @@ async def get_use_case_detail(uc_id: int):
         # counts); default False for helpful so the flag is always present.
         satisfied = bool(domain_satisfied_map.get(domain_id, False)) if necessity == "required" else False
 
-        # Find all assets that serve this domain, with per-account status overlay
+        # Find all assets that serve this domain. Per-account status is overlaid
+        # from the shared status_map below (same resolution as the domain 'satisfied'
+        # badge), NOT COALESCE'd to the shared da.ingestion_status column.
         serving_assets = await db.fetch(
-            """SELECT da.*,
-                      COALESCE(acs.ingestion_status, da.ingestion_status) AS ingestion_status
+            """SELECT da.*
                FROM asset_serves_domain asd
                JOIN data_assets da ON da.id = asd.data_asset_id
-               LEFT JOIN account_asset_status acs
-                      ON acs.data_asset_id = da.id AND acs.account_id = $2
                WHERE asd.domain_id = $1
                ORDER BY da.source_system, da.module""",
-            domain_id, account_id,
+            domain_id,
         )
 
         grouped_assets: list[dict] = []
@@ -446,7 +462,7 @@ async def get_use_case_detail(uc_id: int):
         if serving_assets:
             # Add each serving asset to the appropriate list (required/helpful)
             for asset_row in serving_assets:
-                asset_dict = dict(asset_row)
+                asset_dict = _overlay_status(dict(asset_row))
                 asset_dict["criticality"] = necessity
                 asset_dict["rationale"] = rationale
                 asset_dict["via_domain"] = True  # Mark as coming from domain path
