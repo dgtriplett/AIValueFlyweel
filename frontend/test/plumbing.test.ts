@@ -2261,6 +2261,55 @@ tests['DashboardsView and ExecutiveView remain read-only (no mutating controls)'
 }
 
 // ---------------------------------------------------------------------------
+// EXECUTIVE ONE-SCREEN DASHBOARD — composes value-timeline + at-risk, read-only
+//
+// The Executive landing view is a single-screen dashboard, not a table dump: it
+// answers "value being driven, and what's coming" at a glance by COMPOSING the
+// existing value-timeline and at-risk endpoints alongside the executive pack. It
+// invents no new backend endpoint and stays read-only (the pack download is the
+// only mutation, and it goes through the account-scoped api client, not an anchor).
+// These assertions pin that composition so a future edit cannot quietly regress
+// it back to the pack-only dump or wire in a raw fetch.
+// ---------------------------------------------------------------------------
+
+tests['ExecutiveView composes the value-timeline + at-risk data via the shared api client'] = () => {
+  const src = readFileSync('src/views/ExecutiveView.tsx', 'utf8')
+  // Reuses the existing endpoints — no new backend method invented.
+  assert.match(src, /api\.valueTimeline/, 'must reuse api.valueTimeline (value-timeline endpoint)')
+  assert.match(src, /api\.atRiskUseCases/, 'must reuse api.atRiskUseCases (at-risk endpoint)')
+  assert.match(src, /api\.executivePack\b/, 'must keep the executive pack headline metrics')
+  // Data flows through the account-scoped http client via api.* — never a raw fetch/anchor.
+  assert.doesNotMatch(src, /\bfetch\(/, 'must not use raw fetch — data goes through the api client')
+  assert.doesNotMatch(src, /<a\s+[^>]*href=/, 'must not use anchor hrefs — download goes through saveBlob')
+  // The download stays wired to the account-scoped markdown pack + saveBlob.
+  assert.match(src, /api\.executivePackMarkdown/, 'pack download must stay on the api client')
+  assert.match(src, /saveBlob/, 'download must go through saveBlob, not an <a download> href')
+}
+
+tests['ExecutiveView renders the timeline curve and an at-risk summary, and links to the full views'] = () => {
+  const src = readFileSync('src/views/ExecutiveView.tsx', 'utf8')
+  // The value-realization curve reuses the recharts ComposedChart family (Bar + cumulative Line).
+  assert.match(src, /ComposedChart/, 'value curve must reuse the recharts ComposedChart')
+  assert.match(src, /value_landing/, 'curve must plot per-quarter value landing')
+  assert.match(src, /cumulative_value/, 'curve must plot the running cumulative')
+  // The at-risk summary reads the endpoint shape and surfaces WHY (the slippage reason).
+  assert.match(src, /days_overdue/, 'at-risk summary must read days_overdue')
+  assert.match(src, /latest_slippage_reason/, 'at-risk summary must surface the reason')
+  // Read-only navigation to the full views (setTab), not mutation.
+  assert.match(src, /setTab\('atrisk'\)/, 'must link through to the full At-Risk view')
+  assert.match(src, /setTab\('timeline'\)/, 'must link through to the full timeline view')
+  // Reuses shared building blocks rather than bespoke components.
+  assert.match(src, /StatStrip/, 'must reuse StatStrip for headline metrics')
+  assert.match(src, /QueryState/, 'must reuse QueryState for loading/error states')
+  assert.match(src, /fmtMoney/, 'must reuse fmtMoney for money formatting')
+}
+
+tests['App wires setTab into ExecutiveView so the exec dashboard can navigate read-only'] = () => {
+  const app = readFileSync('src/App.tsx', 'utf8')
+  assert.match(app, /<ExecutiveView setTab=\{setTab\} \/>/, 'App must pass setTab to ExecutiveView')
+}
+
+// ---------------------------------------------------------------------------
 // FAB FIX — AssistantPanel hides when use-case detail overlay is open
 //
 // The bug: the floating FAB (fixed bottom-5 right-5 z-40) sits atop the
