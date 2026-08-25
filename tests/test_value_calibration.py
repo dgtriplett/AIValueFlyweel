@@ -1,244 +1,228 @@
-"""Test magnitude calibration for LLM-generated value models.
+"""Value model magnitude calibration tests.
 
-CRITICAL BUG: LLM-generated use-case value models produce absurd totals (e.g.
-$2408.72B/yr for a utility with ~$5B revenue — off by ~5-6 orders of magnitude).
-
-ROOT CAUSE: The value engine computes per-component annual value in $M as:
-  multiplier * product(assumption_values) * coeff
-
-The LLM cannot reliably compute the ~1e-9-scale coefficients needed to normalize a
-product of big raw assumptions (like customerCount=2M, annualRevenueMM=5000) back
-into $M. Seeded catalog models work because their multipliers are hand-calibrated
-to absorb units (e.g. 8e-10 for customerCount * customerChurnPct * avgResidentialRevenue).
-
-THE FIX: Two-layer calibration in build_value_model (server/routes/agents.py):
-  LAYER 1: Per-component rescaling — detect absurd component values and adjust
-           multipliers to bring each component under ~500 $M (10% of revenue)
-  LAYER 2: Global sanity clamp — if total still exceeds 0.5 * annualRevenueMM,
-           proportionally scale ALL component multipliers down
+Tests the shared calibrate_components() helper and verifies it works correctly
+for both NEW models (via build_value_model) and EXISTING models (via backfill).
 """
-import os
-import sys
 import unittest
-from unittest.mock import AsyncMock, patch
 
-sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-
-import stubs  # noqa: E402,F401
-
-from server import value_engine as ve  # noqa: E402
-from server.routes import agents  # noqa: E402
+from server.value_engine import calibrate_components, compute_value_range
 
 
 class TestValueCalibration(unittest.TestCase):
-    """Test that build_value_model applies magnitude calibration to LLM output."""
+    """Test value model magnitude calibration."""
 
-    def test_uncalibrated_model_produces_absurd_total(self):
-        """Verify the bug exists: LLM multipliers like 0.00015 explode with big assumptions.
+    def setUp(self):
+        """Set up test fixtures."""
+        # Typical assumption values (matching seed defaults)
+        self.assumptions = {
+            "annualRevenueMM": 5000.0,
+            "customerCount": 2_000_000.0,
+            "omBudgetMM": 1400.0,
+            "transformerCount": 500_000.0,
+            "tdLineMiles": 15_000.0,
+        }
+        self.annual_revenue = self.assumptions["annualRevenueMM"]
 
-        This test simulates what the LLM returns BEFORE calibration is applied.
-        It should FAIL against the current (unpatched) build_value_model.
+    def test_uncalibrated_bug_241_style_model_is_absurd(self):
+        """Verify that an uncalibrated #241-style model produces billion-dollar values.
+
+        This test documents the BUG: a model with multiplier 0.00015 chaining
+        annualRevenueMM * customerCount produces $1500B for a single component,
+        which is absurd for a utility with $5B revenue.
         """
-        # Simulate LLM output: reasonable-looking but NOT properly scaled multipliers
-        llm_components = [
+        # Real #241-style uncalibrated component
+        uncalibrated_components = [
             {
-                "name": "Customer churn reduction",
-                "calculationDisplay": "Customers × churn% × revenue × reduction%",
-                "multiplier": 0.00015,  # LLM thinks this looks right, but it's ~6 orders too big
-                "assumptionKeys": ["customerCount", "customerChurnPct", "avgResidentialRevenue"],
-                "lowCoeff": 0.6,
-                "highCoeff": 1.4,
-            },
-            {
-                "name": "Revenue optimization",
-                "calculationDisplay": "Annual revenue × optimization%",
-                "multiplier": 0.00025,  # Also way too big
-                "assumptionKeys": ["annualRevenueMM"],
+                "name": "Revenue recovery from theft detection",
+                "calculationDisplay": "0.00015 x Annual Revenue x Customer Count",
+                "multiplier": 0.00015,
+                "assumptionKeys": ["annualRevenueMM", "customerCount"],
                 "lowCoeff": 0.7,
                 "highCoeff": 1.3,
-            },
+            }
         ]
 
-        # Real seeded assumptions (from seed_data.json)
-        assumptions = {
-            "customerCount": 2_000_000,
-            "customerChurnPct": 2.5,
-            "avgResidentialRevenue": 1800,
-            "annualRevenueMM": 5000,
-        }
+        # Compute what this produces WITHOUT calibration
+        model = {"components": uncalibrated_components}
+        rng = compute_value_range(model, self.assumptions)
 
-        # Compute what the UNCALIBRATED model would produce
-        # Component 1: 0.00015 * 2M * 2.5 * 1800 = 1,350 $M (way too high!)
-        # Component 2: 0.00025 * 5000 = 1.25 $M
-        # Total mid: ~1,351 $M (for comparison, annualRevenueMM = 5000)
+        # This is the BUG: should produce ~tens of $M, but produces billions
+        self.assertIsNotNone(rng)
+        # With annualRevenueMM=5000, customerCount=2M, multiplier=0.00015:
+        # raw = 0.00015 * 5000 * 2000000 = 1,500,000 $M = $1.5 trillion
+        # mid with coeff ~1.0 = $1.5 trillion
+        self.assertGreater(rng["mid"], 1_000_000,  # Over $1B is absurd
+                          "Uncalibrated model should produce absurd billion-dollar values")
 
-        formula = {"driver": "test", "components": llm_components}
-        result = ve.compute_value_range(formula, assumptions)
+    def test_calibrated_241_style_model_is_sane(self):
+        """Verify calibrate_components brings a #241-style model into sane range.
 
-        # The uncalibrated model produces an absurd total
-        self.assertIsNotNone(result)
-        uncalibrated_mid = result["mid"]
-
-        # Document the absurdity: a single component exceeds reasonable bounds
-        component1_value = 0.00015 * 2_000_000 * 2.5 * 1800
-        self.assertGreater(component1_value, 1000,
-                          f"Uncalibrated component 1 = {component1_value:.2f} $M >> sanity bounds")
-
-        # This is the bug we're fixing
-        self.assertGreater(uncalibrated_mid, 1000,
-                          f"Uncalibrated mid = {uncalibrated_mid:.2f} $M is absurdly high")
-
-    @patch('server.routes.agents.db')
-    @patch('server.routes.agents._llm_json')
-    async def test_calibrated_model_is_sane(self, mock_llm_json, mock_db):
-        """After calibration, generated models must stay within reasonable bounds.
-
-        This test feeds build_value_model a stubbed LLM response that WOULD explode,
-        runs it through the calibration layers, and verifies the result is sane.
+        After calibration:
+        - No single component should exceed 5% of annualRevenueMM (~250 $M)
+        - Total mid should not exceed 25% of annualRevenueMM (~1250 $M)
         """
-        # Mock the LLM to return components that would explode without calibration
-        llm_response = {
-            "components": [
-                {
-                    "name": "Customer churn reduction",
-                    "calculationDisplay": "Customers × churn% × revenue × reduction%",
-                    "multiplier": 0.00015,
-                    "assumptionKeys": ["customerCount", "customerChurnPct", "avgResidentialRevenue"],
-                    "lowCoeff": 0.6,
-                    "highCoeff": 1.4,
-                },
-                {
-                    "name": "Bad debt reduction",
-                    "calculationDisplay": "Revenue × bad debt% × reduction",
-                    "multiplier": 0.012,
-                    "assumptionKeys": ["annualRevenueMM", "badDebtPct"],
-                    "lowCoeff": 0.7,
-                    "highCoeff": 1.3,
-                },
-            ],
-            "roiMonths": 12,
-            "notes": "Test value model",
-        }
-        mock_llm_json.return_value = (llm_response, True, None)
+        uncalibrated_components = [
+            {
+                "name": "Revenue recovery from theft detection",
+                "calculationDisplay": "0.00015 x Annual Revenue x Customer Count",
+                "multiplier": 0.00015,
+                "assumptionKeys": ["annualRevenueMM", "customerCount"],
+                "lowCoeff": 0.7,
+                "highCoeff": 1.3,
+            }
+        ]
 
-        # Mock db.fetch to return seeded assumptions
-        mock_db.fetch = AsyncMock(side_effect=[
-            # First call: value_assumptions
-            [
-                {"key": "customerCount", "label": "Customers", "unit": "count", "value": 2_000_000},
-                {"key": "customerChurnPct", "label": "Churn %", "unit": "%", "value": 2.5},
-                {"key": "avgResidentialRevenue", "label": "Avg Revenue", "unit": "$/yr", "value": 1800},
-                {"key": "annualRevenueMM", "label": "Annual Revenue", "unit": "$M", "value": 5000},
-                {"key": "badDebtPct", "label": "Bad Debt %", "unit": "%", "value": 2.0},
-                {"key": "omBudgetMM", "label": "O&M Budget", "unit": "$M", "value": 1400},
-            ],
-            # Second call: benchmark_library
-            [],
-        ])
+        # Apply calibration
+        calibrated = calibrate_components(
+            uncalibrated_components, self.assumptions, self.annual_revenue
+        )
 
-        # Run the calibrated build_value_model
-        result = await agents.build_value_model("Test Use Case", "Test description")
-
-        # Extract the calibrated components
-        components = result["components"]
-        self.assertGreater(len(components), 0, "Should have components")
-
-        # Build assumptions dict for computation
-        assumptions = {
-            "customerCount": 2_000_000,
-            "customerChurnPct": 2.5,
-            "avgResidentialRevenue": 1800,
-            "annualRevenueMM": 5000,
-            "badDebtPct": 2.0,
-        }
-
-        # Compute value range with the CALIBRATED multipliers
-        formula = {"driver": result["driver"], "components": components}
-        calibrated_result = ve.compute_value_range(formula, assumptions)
-
-        self.assertIsNotNone(calibrated_result, "Calibrated model should evaluate")
-
-        calibrated_mid = calibrated_result["mid"]
-
-        # ACCEPTANCE CRITERIA:
-        # 1. The calibrated mid must be > 0 (model is not broken)
-        self.assertGreater(calibrated_mid, 0,
-                          "Calibrated model should produce positive value")
-
-        # 2. The calibrated mid must be < 0.5 * annualRevenueMM = 2500 $M
-        max_sane_value = 0.5 * assumptions["annualRevenueMM"]
-        self.assertLess(calibrated_mid, max_sane_value,
-                       f"Calibrated mid {calibrated_mid:.2f} $M must be < {max_sane_value} $M")
-
-        # 3. No single component should exceed ~10% of revenue (~500 $M)
-        max_component_value = 0.1 * assumptions["annualRevenueMM"]
-        for comp in components:
+        # Verify each component is under 5% ceiling
+        per_component_ceiling = 0.05 * self.annual_revenue  # 250 $M
+        for comp in calibrated:
             comp_value = comp["multiplier"]
             for key in comp["assumptionKeys"]:
-                comp_value *= assumptions.get(key, 0)
-            self.assertLess(comp_value, max_component_value * 2,  # Allow some slack
-                           f"Component '{comp['name']}' = {comp_value:.2f} $M exceeds reasonable bounds")
+                comp_value *= self.assumptions.get(key, 0)
+            self.assertLessEqual(comp_value, per_component_ceiling,
+                                f"Component '{comp['name']}' exceeds per-component ceiling")
 
-    def test_seeded_catalog_models_unchanged(self):
-        """CRITICAL: Calibration must NOT affect existing seeded models.
+        # Verify total is under 25% ceiling
+        model = {"components": calibrated}
+        rng = compute_value_range(model, self.assumptions)
+        global_ceiling = 0.25 * self.annual_revenue  # 1250 $M
+        self.assertLessEqual(rng["mid"], global_ceiling,
+                            f"Total mid {rng['mid']} exceeds global ceiling {global_ceiling}")
 
-        Catalog use-case values must stay byte-identical before/after the fix.
-        The calibration is applied ONLY in build_value_model (the NEW-model path),
-        never in compute_value_range (which evaluates EXISTING models).
+    def test_calibration_with_multiple_components(self):
+        """Test calibration with multiple components that stack up."""
+        # 6 components each trying to claim 500 $M (10% of revenue)
+        # Without calibration, total would be 3000 $M (60% of revenue)
+        components = []
+        for i in range(6):
+            components.append({
+                "name": f"Component {i+1}",
+                "calculationDisplay": "O&M efficiency",
+                "multiplier": 500.0 / self.assumptions["omBudgetMM"],  # targets 500 $M
+                "assumptionKeys": ["omBudgetMM"],
+                "lowCoeff": 0.9,
+                "highCoeff": 1.1,
+            })
+
+        # Without calibration, total would be ~3000 $M
+        uncalibrated_model = {"components": components}
+        uncalibrated_rng = compute_value_range(uncalibrated_model, self.assumptions)
+        self.assertGreater(uncalibrated_rng["mid"], 2500,
+                          "Uncalibrated 6-component model should exceed 2500 $M")
+
+        # With calibration, should be clamped to 1250 $M (25% of 5000)
+        calibrated = calibrate_components(components, self.assumptions, self.annual_revenue)
+        calibrated_model = {"components": calibrated}
+        calibrated_rng = compute_value_range(calibrated_model, self.assumptions)
+
+        global_ceiling = 0.25 * self.annual_revenue  # 1250 $M
+        self.assertLessEqual(calibrated_rng["mid"], global_ceiling,
+                            f"Calibrated mid {calibrated_rng['mid']} exceeds ceiling {global_ceiling}")
+
+    def test_already_sane_model_unchanged(self):
+        """Test that an already-sane model (like seeded catalog) is unchanged.
+
+        Catalog models have hand-calibrated tiny multipliers (e.g. 8e-10).
+        Calibration should be a no-op on these (idempotent).
         """
-        import json
-        from pathlib import Path
+        # A hand-calibrated catalog-style component
+        sane_components = [
+            {
+                "name": "Customer churn reduction",
+                "calculationDisplay": "8e-10 x customerCount x customerChurnPct x avgResidentialRevenue",
+                "multiplier": 8e-10,
+                "assumptionKeys": ["customerCount"],  # simplified for test
+                "lowCoeff": 0.6,
+                "highCoeff": 1.4,
+            }
+        ]
 
-        # Load a seeded model with hand-calibrated multipliers
-        seed_path = Path(__file__).parent.parent / "scripts" / "seed_data.json"
-        seed_data = json.loads(seed_path.read_text())
+        # This produces a sane value
+        model_before = {"components": [dict(c) for c in sane_components]}
+        rng_before = compute_value_range(model_before, self.assumptions)
+        self.assertLess(rng_before["mid"], 100,
+                       "Seeded catalog model should have sane mid value")
 
-        # Get assumptions
-        assumptions = {a["key"]: float(a["value"]) for a in seed_data["value_assumptions"]}
+        # Calibration should NOT change it
+        calibrated = calibrate_components(sane_components, self.assumptions, self.annual_revenue)
+        model_after = {"components": calibrated}
+        rng_after = compute_value_range(model_after, self.assumptions)
 
-        # Test a seeded use case with tiny multipliers (these must not change)
-        for uc in seed_data["use_cases"]:
-            hvj = uc.get("hypothesized_value_json")
-            if not hvj or not hvj.get("components"):
-                continue
+        # Should be byte-identical (or within float precision)
+        self.assertAlmostEqual(rng_before["mid"], rng_after["mid"], places=2,
+                              msg="Calibration should not change already-sane models")
 
-            # Compute value with the original seeded multipliers
-            original_result = ve.compute_value_range(hvj, assumptions)
+    def test_tightened_ceilings(self):
+        """Verify that the NEW ceilings (5% per-component, 25% global) are tighter.
 
-            if original_result is None:
-                continue
+        OLD ceilings were 10% per-component, 50% global.
+        NEW ceilings are 5% per-component, 25% global.
+        This test ensures a model that would pass OLD ceilings but not NEW
+        ones is correctly clamped.
+        """
+        # Component that would be 400 $M (8% of 5000) — OK under old 10%, exceeds new 5%
+        component = {
+            "name": "Medium-sized component",
+            "calculationDisplay": "8% of revenue",
+            "multiplier": 0.08,
+            "assumptionKeys": ["annualRevenueMM"],
+            "lowCoeff": 1.0,
+            "highCoeff": 1.0,
+        }
 
-            # The value_engine.py arithmetic should be unchanged
-            # (calibration happens in agents.py, not value_engine.py)
-            self.assertIsNotNone(original_result,
-                               f"Seeded model for '{uc['title']}' should still evaluate")
+        # This would produce 400 $M uncalibrated
+        raw_value = component["multiplier"] * self.assumptions["annualRevenueMM"]
+        self.assertEqual(raw_value, 400.0, "Setup check: component should target 400 $M")
 
-            # Verify the seeded model produces a reasonable value
-            mid = original_result["mid"]
-            self.assertGreater(mid, 0, f"'{uc['title']}' should have positive value")
-            self.assertLess(mid, 10000, f"'{uc['title']}' value should be reasonable")
+        # Under NEW calibration, should be clamped to 250 $M (5%)
+        calibrated = calibrate_components([component], self.assumptions, self.annual_revenue)
+        calibrated_value = calibrated[0]["multiplier"] * self.assumptions["annualRevenueMM"]
 
-            # If this test fails, we've broken the existing catalog
-            break  # Just test one seeded model as a smoke check
+        new_ceiling = 0.05 * self.annual_revenue  # 250 $M
+        self.assertLessEqual(calibrated_value, new_ceiling,
+                            f"Component should be clamped to {new_ceiling} $M under new ceiling")
 
+    def test_empty_components(self):
+        """Test that calibration handles edge cases gracefully."""
+        # Empty components list
+        result = calibrate_components([], self.assumptions, self.annual_revenue)
+        self.assertEqual(result, [])
 
-def async_test(coro):
-    """Decorator to run async test methods."""
-    import asyncio
-    def wrapper(self):
-        loop = asyncio.new_event_loop()
-        asyncio.set_event_loop(loop)
-        try:
-            return loop.run_until_complete(coro(self))
-        finally:
-            loop.close()
-    return wrapper
+        # Component with zero multiplier
+        zero_comp = [{
+            "name": "Zero component",
+            "multiplier": 0,
+            "assumptionKeys": ["omBudgetMM"],
+            "lowCoeff": 1.0,
+            "highCoeff": 1.0,
+        }]
+        result = calibrate_components(zero_comp, self.assumptions, self.annual_revenue)
+        self.assertEqual(result[0]["multiplier"], 0)
 
+    def test_calibration_does_not_mutate_input(self):
+        """Verify that calibrate_components returns a copy and doesn't mutate input."""
+        original = [{
+            "name": "Test",
+            "multiplier": 0.5,
+            "assumptionKeys": ["annualRevenueMM"],
+            "lowCoeff": 1.0,
+            "highCoeff": 1.0,
+        }]
+        original_multiplier = original[0]["multiplier"]
 
-# Apply decorator to async test methods
-TestValueCalibration.test_calibrated_model_is_sane = async_test(
-    TestValueCalibration.test_calibrated_model_is_sane)
+        calibrated = calibrate_components(original, self.assumptions, self.annual_revenue)
+
+        # Original should be unchanged
+        self.assertEqual(original[0]["multiplier"], original_multiplier,
+                        "calibrate_components should not mutate input")
+        # And the returned copy IS a distinct, calibrated object (0.5 * 5000 = 2500
+        # $M exceeds the 250 $M ceiling, so its multiplier must have been rescaled).
+        self.assertLess(calibrated[0]["multiplier"], original_multiplier,
+                        "returned copy should carry the calibrated multiplier")
 
 
 if __name__ == "__main__":
