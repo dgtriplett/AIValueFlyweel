@@ -251,6 +251,53 @@ class TestDualPath(unittest.TestCase):
         self.assertEqual(out["readiness"], "nearly_ready")
 
 
+class TestDomainPathCountsAtModuleLevel(unittest.TestCase):
+    """MUTATION GUARD for the module/dataset-level readiness fix.
+
+    The bug: the DOMAIN-path readiness badge counted DOMAINS (e.g. "2/4 required
+    data domains satisfied") while the drawer's "Required data assets" list showed
+    the concrete serving ASSETS (7 rows). Badge and list never reconciled.
+
+    The fix: the domain path now counts the DISTINCT ASSETS (modules/datasets)
+    serving all required domains, at the SAME granularity the list renders, so the
+    badge says "4/7 required datasets ready" and matches the 7 rows exactly.
+
+    These are SOURCE-STRUCTURE assertions on server/readiness.py because FakeDB
+    routes queries by substring and cannot execute a CTE; the value of the fix lives
+    in the SQL, so we pin the SQL. Each assertion below would FAIL against the old
+    domain-count query (COUNT(*) FILTER (WHERE satisfied)).
+    """
+
+    @classmethod
+    def setUpClass(cls):
+        import pathlib
+        cls.source = (pathlib.Path(__file__).parent.parent
+                      / "server" / "readiness.py").read_text()
+
+    def test_domain_path_counts_distinct_assets(self):
+        """required_total on the domain path must be built from DISTINCT assets."""
+        self.assertIn("COUNT(DISTINCT data_asset_id)", self.source,
+                      "the domain path must count distinct assets (modules/datasets), "
+                      "not domains, so the badge matches the required-asset list")
+
+    def test_domain_path_does_not_count_domains_for_the_badge(self):
+        """The old badge count was COUNT(*) FILTER (WHERE satisfied) over domains.
+
+        That exact shape must be gone from the counting SELECT (per-domain
+        satisfaction survives only to build the pending_domains context list, which
+        aggregates domain NAMES, never feeds required_total/required_ready)."""
+        self.assertNotIn("COUNT(*) FILTER (WHERE satisfied)", self.source,
+                         "the readiness badge must not count satisfied DOMAINS; it "
+                         "must count ready ASSETS at module/dataset granularity")
+
+    def test_domain_total_is_assets_plus_orphan_domains(self):
+        """A required domain with NO serving asset is still a real gap: it counts
+        as one missing dataset so the denominator reflects work to do."""
+        self.assertIn("asset_total + ac.orphan_domains", self.source,
+                      "required_total must be (distinct serving assets + orphan "
+                      "domains), matching the placeholder rows the drawer renders")
+
+
 class TestSingleSourceOfTruth(unittest.TestCase):
     """The readiness rule must be defined exactly once.
 
