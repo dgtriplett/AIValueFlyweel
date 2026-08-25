@@ -1,0 +1,1 @@
+import{i as t,r as o}from"./index-CffR13kB.js";const r=[["assumptions"],["portfolio-value"],["use-cases"],["blast"]];function a(){const e=t();return o.useCallback(()=>{for(const s of r)e.invalidateQueries({queryKey:[...s]})},[e])}export{a as u};

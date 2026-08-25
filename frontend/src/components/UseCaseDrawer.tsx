@@ -28,6 +28,7 @@ import {
   X,
 } from 'lucide-react'
 import { api } from '../api'
+import { useApiErrorToast } from './Toasts'
 import {
   STATUSES,
   STATUS_LABELS,
@@ -121,6 +122,7 @@ function UseCaseDetail({
 }: UseCaseDetailProps) {
   const isPage = layout === 'page'
   const queryClient = useQueryClient()
+  const reportError = useApiErrorToast()
   const {
     data: detail,
     isLoading,
@@ -211,6 +213,24 @@ function UseCaseDetail({
       queryClient.invalidateQueries({ queryKey: ['blast'] })
       setEditing(false)
     },
+  })
+
+  // Estimate a value model for a use case that has none. Mirrors the shared
+  // useMutation pattern: isPending drives the loading label + disables the
+  // button, onError surfaces the server's message via the toast infra (so a
+  // 404/rate-limit is visible instead of silently console.error'd), and
+  // onSuccess refreshes the detail so the value model appears and
+  // Calculate/Override unlock.
+  const estimateValue = useMutation({
+    mutationFn: () => {
+      if (!detail?.id) throw new Error('no use case loaded')
+      return api.estimateUseCaseValue(detail.id)
+    },
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ['uc-detail', ucId] })
+      queryClient.invalidateQueries({ queryKey: ['portfolio-value'] })
+    },
+    onError: (error) => reportError(error, 'Could not estimate a value model for this use case.'),
   })
 
   const advance = useMutation({
@@ -776,19 +796,16 @@ function UseCaseDetail({
                   </p>
                   <button
                     className="btn-primary text-sm"
-                    onClick={async () => {
-                      if (!detail?.id) return
-                      try {
-                        await api.estimateUseCaseValue(detail.id)
-                        // Invalidate the detail query to refetch with new hypothesized_value_json
-                        queryClient.invalidateQueries({ queryKey: ['uc-detail', ucId] })
-                      } catch (err) {
-                        console.error('Failed to estimate value:', err)
-                      }
-                    }}
+                    disabled={readOnly || estimateValue.isPending || !detail?.id}
+                    onClick={() => estimateValue.mutate()}
                   >
-                    Estimate value
+                    {estimateValue.isPending ? 'Estimating…' : 'Estimate value'}
                   </button>
+                  {estimateValue.isError ? (
+                    <p className="text-xs text-warning" role="alert">
+                      Could not estimate a value model. Please try again.
+                    </p>
+                  ) : null}
                 </div>
               ) : (
                 <>
