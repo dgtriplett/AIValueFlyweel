@@ -1577,8 +1577,15 @@ tests['the full-page detail surfaces tracking signals prominently'] = () => {
   assert.match(source, /data-ga-uc-tracking="1"/)
   // Milestone/stage indicator (item A.3b) is built from the existing status field.
   assert.match(source, /const statusIndex = detail\?\.status \? STATUSES\.indexOf\(detail\.status\)/)
-  // Owner (item A.3a) surfaces the existing created_by rather than a fabricated field.
-  assert.match(source, /const owner = detail\?\.created_by \?\? null/)
+  // Owner (item A.3a) is now a per-account, EDITABLE field backed by the
+  // progression overlay (migration 022), no longer the read-only created_by.
+  assert.match(source, /const owner = detail\?\.progression\?\.owner \?\? null/)
+  // It saves through a dedicated mutation that hits the per-account owner endpoint
+  // and refreshes the detail on success.
+  assert.match(source, /api\.setUseCaseOwner\(ucId, owner\)/)
+  assert.match(source, /data-ga-uc-owner-save="1"/)
+  // Clearing is supported (blank/null owner).
+  assert.match(source, /data-ga-uc-owner-clear="1"/)
 }
 
 // 7. P6 — persona-aware KPI reduction
