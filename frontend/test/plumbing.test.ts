@@ -1832,7 +1832,7 @@ tests['admin persona sees all nav groups and all tabs'] = () => {
   
   // Admin should see ALL tabs (the full superset)
   const allExpected = [
-    'portfolio', 'flywheel', 'registry', 'dashboards', 'coverage', 'atrisk', 'whatif', 'trend',
+    'portfolio', 'flywheel', 'registry', 'dashboards', 'coverage', 'atrisk', 'timeline', 'whatif', 'trend',
     'roadmap', 'funding', 'executive',
     'value', 'research',
     'knowledge', 'glossary', 'taxonomy', 'sourcemapping', 'rules', 'artifacts',
@@ -1853,7 +1853,7 @@ tests['pm persona sees registry but NOT admin-only curation or settings'] = () =
   
   // PM SHOULD see:
   const pmExpected = [
-    'portfolio', 'flywheel', 'registry', 'dashboards', 'coverage', 'atrisk', 'whatif', 'trend',
+    'portfolio', 'flywheel', 'registry', 'dashboards', 'coverage', 'atrisk', 'timeline', 'whatif', 'trend',
     'roadmap', 'funding', // NOT executive
     'value', 'research',
     'knowledge', 'glossary', 'artifacts', // NOT sourcemapping, taxonomy, rules
@@ -1883,7 +1883,7 @@ tests['executive persona sees only the minimal read-only set'] = () => {
   
   // Executive sees ONLY: portfolio, dashboards, atrisk, roadmap, executive.
   // 'atrisk' is the At-Risk rollup, surfaced to the Executive (and PM) personas.
-  const execExpected = ['portfolio', 'dashboards', 'atrisk', 'roadmap', 'executive']
+  const execExpected = ['portfolio', 'dashboards', 'atrisk', 'timeline', 'roadmap', 'executive']
   
   assert.equal(execTabs.size, execExpected.length, 
     `executive should see exactly ${execExpected.length} tabs, got ${execTabs.size}`)

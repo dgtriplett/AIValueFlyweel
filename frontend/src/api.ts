@@ -17,6 +17,7 @@ import type {
   AssumptionResearchResponse,
   AttributeResponse,
   AtRiskResponse,
+  ValueTimelineResponse,
   BlastRadiusResponse,
   BlastNode,
   BootstrapResponse,
@@ -197,6 +198,13 @@ export const api = {
    *  and the server's portfolio visibility helper. */
   atRiskUseCases: () =>
     http.get<AtRiskResponse>('/use-cases/at-risk').then((r) => r.data),
+
+  /** The value-realization timeline: a by-quarter curve of projected annual value
+   *  landing on each use case's target go-live date, with a running cumulative and
+   *  a separate unscheduled bucket. Scoped by the account interceptor and the
+   *  server's portfolio visibility helper. */
+  valueTimeline: () =>
+    http.get<ValueTimelineResponse>('/use-cases/portfolio/value-timeline').then((r) => r.data),
 
   createUseCase: (body: Partial<UseCase>) =>
     http.post<UseCase>('/use-cases', body).then((r) => r.data),
