@@ -38,6 +38,7 @@ from ..config import SERVING_ENDPOINT
 from ..db import db
 from ..readiness import ready_assets
 from ..limits import limiter
+from ..routes.agents import build_value_model
 
 router = APIRouter(prefix="/generate", tags=["generation"])
 confirm_router = APIRouter(prefix="/confirm", tags=["generation"])
@@ -350,6 +351,38 @@ async def _execute_create_use_cases(payload: dict, actor: str) -> dict:
                        ON CONFLICT (use_case_id, domain_id) DO NOTHING""",
                     uc_id, domain_id, necessity,
                     "Declared by the use-case generation agent.")
+
+        # BUG 2 FIX: Automatically build and persist a value model for the generated
+        # use case. Ensure a generated use case NEVER has an empty value model:
+        # build_value_model has a heuristic fallback that always returns >=1 component,
+        # and we persist it even if the LLM path failed (with a warning). This way
+        # the drawer's Calculate section always has something to show.
+        value_model_dict = None
+        try:
+            value_model_dict = await build_value_model(row["title"], _describe(candidate))
+        except Exception as exc:  # noqa: BLE001
+            # Log the LLM failure but continue with the heuristic fallback, which
+            # build_value_model guarantees (single O&M component if LLM yields nothing).
+            import logging
+            logging.getLogger(__name__).warning(
+                "LLM value model generation failed for use case %d (%s): %s. Using heuristic fallback.",
+                uc_id, row["title"], exc)
+            # build_value_model raised before returning — force the heuristic fallback
+            value_model_dict = {
+                "driver": row["title"],
+                "components": [{"name": "O&M efficiency", "calculationDisplay": "O&M budget x 0.3%",
+                                "multiplier": 0.003, "assumptionKeys": ["omBudgetMM"],
+                                "lowCoeff": 0.6, "highCoeff": 1.4}],
+                "roiMonths": 12,
+                "notes": "Heuristic fallback due to LLM failure",
+            }
+        # Always persist the value model (which is guaranteed non-empty)
+        if value_model_dict and value_model_dict.get("components"):
+            await db.execute(
+                """UPDATE use_cases
+                   SET hypothesized_value_json = $1::jsonb
+                   WHERE id = $2""",
+                json.dumps(value_model_dict), uc_id)
 
         created.append({"id": uc_id, "title": row["title"], "lens": candidate.get("lens")})
         await write_audit("use_case", uc_id, "generate", actor,

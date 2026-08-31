@@ -2,16 +2,14 @@
 
 ## Overview
 
-A single Databricks App: FastAPI serving a pre-built React SPA plus a
-dependency-free operator console, backed by **Lakebase** (portfolio state) and
-**Unity Catalog** (discovery state), with the **Foundation Model API** behind the
-agents.
+A single Databricks App: FastAPI serving a pre-built React SPA, backed by
+**Lakebase** (portfolio state) and **Unity Catalog** (discovery state), with the
+**Foundation Model API** behind the agents.
 
 ```
 ┌──────────────────── Databricks App (grid-atlas) ────────────────────┐
 │  FastAPI (app.py)                                                    │
 │   ├─ /api/*   REST                                                   │
-│   ├─ /console static operator console                                │
 │   └─ /        static SPA (frontend/dist)                             │
 │  Auth: dual-mode — service principal in-app, CLI profile locally     │
 └──────┬─────────────────┬──────────────────────┬─────────────────────┘
@@ -48,8 +46,7 @@ written back to Lakebase, which stays the portfolio's system of record.
 
 - **Frontend** — React 18 + TS + Vite + Tailwind (Blueprint dark tokens),
   TanStack Query, React Flow (graph/blast radius), Recharts. Heavy views are
-  lazy-loaded. The `/console` page is plain HTML/JS with no build step; see the
-  README's note on the frontend source for why.
+  lazy-loaded. See the README's note on the frontend source.
 - **Backend** — FastAPI + `asyncpg` pool with an OAuth-token password and ~45-min
   refresh; dual-mode auth (`server/config.py`). Lakebase SQL is parameterized
   (`$n` placeholders, no interpolation of user input).
@@ -125,6 +122,65 @@ written back to Lakebase, which stays the portfolio's system of record.
   global selection into the default account only, preserves non-default accounts'
   real work via roadmap/value/external-sync rows, and lets newly-created accounts
   start with a clean portfolio ready for roadmap import.
+- **Joint funding delivery cost** — `015_joint_funding_delivery_cost.sql`: adds
+  `funding_requests.delivery_cost` for user-entered labor/people cost, replacing
+  the auto-assumed estimate with an editable field. The auto-calculated
+  `delivery_cost_mid` now serves only as a prefilled suggestion.
+- **Asset detail enrichment** — `016_asset_detail.sql`: adds four descriptive
+  fields to `data_assets` (provides, refresh_cadence, steward, source_of_record) and
+  `rationale` to `uc_requires_asset`, making the module edge symmetric with the
+  domain edge (`uc_requires_domain.rationale` existed but `uc_requires_asset.rationale`
+  did not). Supports the clickable data-asset detail drawer (PART B) and fixes the
+  per-account status overlay bug in `get_use_case_detail` (PART A).
+- **Use-case progression tracking** — `017_uc_progression.sql`: adds per-account
+  target go-live dates (`account_use_case_progress`) and an append-only event log
+  (`use_case_status_events`) for status changes, date changes (incl. slippage with
+  reason), and free notes. Enables centralized tracking of "when we may start to
+  realize value" and "what's slipping and why" — the user-approved feature request.
+  Fully account-scoped (no cross-tenant leak). Routes: `GET/PUT /use-cases/{id}/progression/target-date`,
+  `POST /use-cases/{id}/progression/note`. Frontend: Progression section in UseCaseDrawer.
+- **Asset detail content population** — `018_asset_detail_content.sql`: populates
+  the four descriptive columns added in migration 016 (provides, steward, source_of_record,
+  refresh_cadence) for all 146 catalog data assets, deriving confident values from existing
+  metadata (source_system, module, owning_lob, source_category). Idempotent and
+  non-destructive — only updates NULL/empty values so user edits are preserved. Uses
+  natural-key matching (source_system, module) to work across environments. Complements
+  the inline-edit UI added to DataAssetDrawer (pencil icon → editable fields → Save/Cancel).
+- **Asset detail content FIX** — `019_asset_detail_content_fix.sql`: corrects migration
+  018, which used the WRONG natural key (source_system, module) instead of the CORRECT
+  canonical key (source_category, module) documented in `scripts/seed_lib.py`. As a result,
+  only 41 of 146 assets were populated; 105 remained NULL. This migration fills those 105
+  assets using the correct key, matching the tone and confidence-derivation approach of 018.
+  Also populates uc_requires_asset.rationale for 734 edges with concise, category-derived
+  rationale (e.g., "Provides X data from Y category required for this use case"). Idempotent
+  and non-destructive — only updates NULL/empty values. Creates helper function
+  `update_asset_detail_by_category` keyed on (source_category, module).
+- **Hypothesized value override** — `020_hypothesized_override.sql`: adds three
+  `hypothesized_override_*` columns (enabled BOOLEAN NOT NULL DEFAULT false, amount
+  NUMERIC, note TEXT) to `use_cases`, mirroring the existing `realized_override_*`
+  columns from 001_init.sql. This lets the use-case detail (drawer AND full page)
+  edit HYPOTHESIZED value two ways — CALCULATE (per-component multipliers, live
+  total) and OVERRIDE (a straight dollar value + a required "why I am overriding"
+  note) — exactly as realized value already can. Idempotent and additive
+  (ADD COLUMN IF NOT EXISTS); columns only, no SP grant needed on deploy.
+- **App users / role model** — `021_app_users.sql`: adds the `app_users` table
+  (email PK, role in admin/pm/executive, granted_by, timestamps) — the source of truth
+  for a user's role/persona. The `GRID_ATLAS_ADMINS` env allowlist ALWAYS grants admin
+  (bootstrap, lockout-proof); this table holds granted roles for everyone else, managed
+  by admins in the admin portal. Persona is inferred from the resolved role rather than
+  self-selected. Idempotent, additive (new table — deploy must run `migrate.py --grant-app-sp`).
+  The `server/routes/users.py` router (mounted at `/api/users`) is the admin-only CRUD over this table: `GET` lists rows and flags allowlist (`is_env_admin`) admins, `PUT /{email}` upserts a role, `DELETE /{email}` reverts a user to the 'pm' default. Every endpoint calls `require_admin` first (fail-closed) and every mutation writes an `audit_log` row (`entity_type='app_user'`, `role_grant`/`role_revoke`).
+- **Per-account use-case owner** — `022_account_use_case_owner.sql`: adds a nullable
+  `owner` TEXT column to the existing account-scoped `account_use_case_progress` table
+  (from `017_uc_progression.sql`, keyed by (account_id, use_case_id)) rather than a new
+  table. Ownership is a per-account decision — the same catalog use case can carry a
+  different owner in each account's portfolio, and there is no `use_cases.account_id`.
+  The `PUT /use-cases/{id}/owner` endpoint upserts it (scoped through
+  `portfolio.use_case_visibility`, failing closed with a 404 for a use case not visible
+  to the caller) and writes an `owner_change` audit row; `get_use_case_detail` surfaces
+  it on the progression overlay. Idempotent and additive (ADD COLUMN IF NOT EXISTS);
+  column-add only, no SP grant needed on deploy.
+
 - **Migration ledger** — `schema_migrations`, created by `server/migrator.py`
   rather than by a numbered migration, since it must exist before the ledger can
   be consulted.

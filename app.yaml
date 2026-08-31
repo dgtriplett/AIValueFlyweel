@@ -17,13 +17,13 @@ env:
   # itself and uses its OAuth token as the Postgres password — no stored secret).
   # ---------------------------------------------------------------------------
   - name: PGHOST
-    value: "ep-calm-scene-d1m74u39.database.us-west-2.cloud.databricks.com"                       # e.g. ep-xxxx.database.us-west-2.cloud.databricks.com
+    value: ""                       # e.g. ep-xxxx.database.us-west-2.cloud.databricks.com
   - name: PGPORT
     value: "5432"
   - name: PGDATABASE
     value: "app"
   - name: PGUSER
-    value: "5f72cb85-5f41-4036-85cd-11e0bc156486"                       # app service-principal client id (UUID)
+    value: ""                       # app service-principal client id (UUID)
 
   # SQL warehouse for system-table reads, Unity Catalog access, and ai_query()
   # enrichment. Injected from the bound sql_warehouse resource below.
@@ -46,28 +46,29 @@ env:
   # (/api/setup/*) probes this and prints the exact GRANT statements if not.
   # ---------------------------------------------------------------------------
   - name: ATLAS_CATALOG
-    value: "grid_ops_demo_catalog"                       # e.g. main
+    value: ""                       # e.g. main
   - name: ATLAS_SCHEMA
-    value: "grid_atlas_discovery"
+    value: ""
 
   # Genie space over the portfolio mirror (optional; set after creating a space).
   - name: GENIE_SPACE_ID
-    value: "01f19588289f16c78dab137eb896836d"
+    value: ""
 
   # Unity Catalog target for the Genie mirror of the portfolio.
   - name: GENIE_MIRROR_CATALOG
-    value: "grid_ops_demo_catalog"                       # e.g. main
+    value: ""                       # e.g. main
   - name: GENIE_MIRROR_SCHEMA
-    value: "grid_atlas"
+    value: ""
 
   # Demo Mode toggle (ISOLATED, removable feature — see DEMO_MODE.md).
   # Ship OFF for customer / Marketplace installs.
   - name: DEMO_MODE
     value: "off"
 
-  # Visible environment marker. Deploy sets this to PROD or DEV.
+  # Visible environment marker. DEV is the safe shipped default; deploy sets
+  # this to PROD or DEV for the target environment.
   - name: APP_ENV
-    value: "PROD"
+    value: "DEV"
 
   # Log level. INFO is right for normal operation; DEBUG turns up detail on a
   # deployed app without a code change or redeploy.
@@ -81,11 +82,20 @@ env:
   - name: RATE_LIMITS
     value: "on"
 
+  # Account administrators — comma-separated Databricks emails permitted to run
+  # the destructive / cross-tenant account operations (User Management, Audit Log,
+  # View-as). Matched case-insensitively against the X-Forwarded-Email identity
+  # the Apps proxy injects. is_admin() FAILS CLOSED: an empty value means nobody
+  # is an admin. Ships EMPTY so no admin is baked into the template; deploy.py
+  # fills this with the deploying user's email (or --admins) at deploy time.
+  - name: GRID_ATLAS_ADMINS
+    value: ""
+
 resources:
   - name: "sql-warehouse"
     description: "Warehouse for system-table reads, UC discovery, and ai_query() enrichment."
     sql_warehouse:
-      id: "7fb5ec85684023e6"                        # your warehouse id — deploy.py fills this in
+      id: ""                        # your warehouse id — deploy.py fills this in
       permission: "CAN_USE"
   - name: "ai-query-endpoint"
     description: "Foundation Model endpoint used by SQL ai_query() batch enrichment."

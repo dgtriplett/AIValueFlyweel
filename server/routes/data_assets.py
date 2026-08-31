@@ -3,7 +3,7 @@ from fastapi import APIRouter, HTTPException, Request
 from pydantic import BaseModel
 
 from ..common import current_user, row_to_dict, rows_to_list, write_audit
-from .. import accounts
+from .. import accounts, portfolio
 from ..db import db
 
 router = APIRouter(prefix="/data-assets", tags=["data_assets"])
@@ -22,6 +22,11 @@ class DataAssetIn(BaseModel):
     uc_schema: str | None = None
     owning_lob_id: int | None = None
     benefiting_lob_ids: list[int] = []
+    # PART B.2: new detail fields from migration 016
+    provides: str | None = None
+    refresh_cadence: str | None = None
+    steward: str | None = None
+    source_of_record: str | None = None
 
 
 async def _attach_benefiting(asset: dict) -> dict:
@@ -66,7 +71,45 @@ async def get_data_asset(asset_id: int):
     """, asset_id, await accounts.current())
     if row is None:
         raise HTTPException(404, "Data asset not found")
-    return await _attach_benefiting(row_to_dict(row))
+    asset = await _attach_benefiting(row_to_dict(row))
+
+    # PART B.2(i): enrich with required_by = reverse join to use cases + readiness per UC
+    # Apply use-case visibility to prevent cross-tenant leaks: only show catalog use cases
+    # (shared) and use cases in the current account's portfolio (never another tenant's
+    # custom use cases).
+    visibility_condition, visibility_params = await portfolio.use_case_visibility("uc", param_index=2)
+    required_by_rows = await db.fetch(f"""
+        SELECT uc.id AS use_case_id,
+               uc.title,
+               ura.criticality,
+               ura.rationale
+        FROM uc_requires_asset ura
+        JOIN use_cases uc ON uc.id = ura.use_case_id
+        WHERE ura.data_asset_id = $1
+          AND {visibility_condition}
+        ORDER BY uc.title
+    """, asset_id, *visibility_params)
+
+    # Attach per-use-case readiness cheaply via the existing readiness_map
+    from ..readiness import readiness_map
+    rmap = await readiness_map()
+
+    required_by = []
+    for r in required_by_rows:
+        uc_id = r["use_case_id"]
+        entry = {
+            "use_case_id": uc_id,
+            "title": r["title"],
+            "criticality": r["criticality"],
+            "rationale": r["rationale"],
+        }
+        # Overlay readiness if available
+        if uc_id in rmap:
+            entry["readiness"] = rmap[uc_id].get("readiness")
+        required_by.append(entry)
+
+    asset["required_by"] = required_by
+    return asset
 
 
 @router.post("")
@@ -77,11 +120,13 @@ async def create_data_asset(body: DataAssetIn, request: Request):
     row = await db.fetchrow(
         """INSERT INTO data_assets
            (source_category, vendor, source_system, module, description, sub_vertical,
-            ingestion_status, uc_catalog, uc_schema, owning_lob_id, origin, created_by)
-           VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,'custom',$11) RETURNING *""",
+            ingestion_status, uc_catalog, uc_schema, owning_lob_id, origin, created_by,
+            provides, refresh_cadence, steward, source_of_record)
+           VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,'custom',$11,$12,$13,$14,$15) RETURNING *""",
         body.source_category, body.vendor, body.source_category, body.module, body.description,
         body.sub_vertical or "cross", body.ingestion_status, body.uc_catalog, body.uc_schema,
         body.owning_lob_id, actor,
+        body.provides, body.refresh_cadence, body.steward, body.source_of_record,
     )
     if row is None:
         raise HTTPException(503, "Database unavailable")
@@ -169,10 +214,13 @@ async def update_data_asset(asset_id: int, body: DataAssetIn, request: Request):
             """UPDATE data_assets SET
                source_category=$1, vendor=$2, source_system=$1, module=$3,
                description=$4, sub_vertical=COALESCE($5, sub_vertical, 'cross'),
-               uc_catalog=$6, uc_schema=$7, updated_at=now()
+               uc_catalog=$6, uc_schema=$7,
+               provides=$9, refresh_cadence=$10, steward=$11, source_of_record=$12,
+               updated_at=now()
                WHERE id=$8 RETURNING *""",
             body.source_category, body.vendor, body.module, body.description,
-            body.sub_vertical, body.uc_catalog, body.uc_schema, asset_id)
+            body.sub_vertical, body.uc_catalog, body.uc_schema, asset_id,
+            body.provides, body.refresh_cadence, body.steward, body.source_of_record)
         if row is not None:
             await db.execute("""
                 INSERT INTO account_asset_status
@@ -192,10 +240,13 @@ async def update_data_asset(asset_id: int, body: DataAssetIn, request: Request):
             """UPDATE data_assets SET
                source_category=$1, vendor=$2, source_system=$1, module=$3, description=$4,
                sub_vertical=COALESCE($5, sub_vertical, 'cross'), ingestion_status=$6,
-               uc_catalog=$7, uc_schema=$8, owning_lob_id=$9, updated_at=now()
+               uc_catalog=$7, uc_schema=$8, owning_lob_id=$9,
+               provides=$11, refresh_cadence=$12, steward=$13, source_of_record=$14,
+               updated_at=now()
                WHERE id=$10 RETURNING *""",
             body.source_category, body.vendor, body.module, body.description, body.sub_vertical,
             body.ingestion_status, body.uc_catalog, body.uc_schema, body.owning_lob_id, asset_id,
+            body.provides, body.refresh_cadence, body.steward, body.source_of_record,
         )
     if row is None:
         raise HTTPException(404, "Data asset not found")

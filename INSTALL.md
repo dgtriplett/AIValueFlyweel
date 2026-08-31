@@ -6,7 +6,7 @@ Deploy into **your own** Databricks workspace.
 - [Prerequisites](#prerequisites)
 - [Step 1 — Provision Lakebase](#step-1--provision-lakebase)
 - [Step 2 — Deploy](#step-2--deploy)
-- [Step 3 — Verify with the Setup console](#step-3--verify-with-the-setup-console)
+- [Step 3 — Verify setup](#step-3--verify-setup)
 - [Step 4 — Unity Catalog grants](#step-4--unity-catalog-grants)
 - [Step 5 — Discover your data (optional)](#step-5--discover-your-data-optional)
 - [Step 6 — Genie space (optional)](#step-6--genie-space-optional)
@@ -22,11 +22,12 @@ Deploy into **your own** Databricks workspace.
 
 ```bash
 git clone <this-repo> && cd grid-atlas
+python3 -m pip install -r requirements-deploy.txt
 python3 scripts/deploy.py --dry-run     # review what it will do
 python3 scripts/deploy.py               # do it
 ```
 
-Then open the app → **`/console`** → *Setup & health*, and fix anything red.
+Then open the app → **Get started** tab → *Setup & health*, and fix anything red.
 
 ---
 
@@ -50,6 +51,14 @@ Then open the app → **`/console`** → *Setup & health*, and fix anything red.
 | [Databricks CLI](https://docs.databricks.com/dev-tools/cli/install.html) | ≥ 0.239 | Bundle deploy, grants, app start |
 | Python | ≥ 3.11 | The deploy and seed scripts |
 | Node.js | ≥ 18 | Only to rebuild the SPA (the built bundle is committed) |
+
+Install the operator-side Python dependency used by the deploy, migration, and
+seed scripts. It is separate from `requirements.txt`, which is installed inside
+the Databricks App runtime and uses `asyncpg` instead.
+
+```bash
+python3 -m pip install -r requirements-deploy.txt
+```
 
 Authenticate first:
 
@@ -150,6 +159,7 @@ database.
 ## Step 2 — Deploy
 
 ```bash
+python3 -m pip install -r requirements-deploy.txt
 python3 scripts/deploy.py
 ```
 
@@ -178,14 +188,19 @@ python3 scripts/deploy.py --yes \
 ```
 
 Useful flags: `--dry-run`, `--skip-build`, `--skip-grants`, `--skip-seed`,
-`--skip-start`, `--seed-demo`.
+`--skip-start`, `--seed-demo`, `--admins`.
+
+By default the deploy makes **you** — the deploying user — an account administrator
+by writing your Databricks email into `GRID_ATLAS_ADMINS` (the fail-closed admin
+allowlist; see OPERATIONS.md). Pass `--admins a@x.com,b@x.com` to set a different
+allowlist instead.
 
 ---
 
-## Step 3 — Verify with the Setup console
+## Step 3 — Verify setup
 
-Open the app and go to **`/console`**. The *Setup & health* view probes every
-dependency and shows a pill per check.
+Open the app and go to the **Get started** tab. The *Setup & health* view probes
+every dependency and shows a pill per check.
 
 | Check | Required | If it fails |
 |---|---|---|
@@ -209,7 +224,7 @@ problems show the exact GRANT statements.
 ## Step 4 — Unity Catalog grants
 
 `scripts/deploy.py` runs these when you have the privileges. If you don't, get the
-full block from **`/console` → Setup → Show all GRANTs** (or
+full block from **Get started → Setup → Show all GRANTs** (or
 `GET /api/setup/grants`) and hand it to a metastore admin:
 
 ```sql
@@ -232,7 +247,7 @@ Plus, in the UI (these can't be expressed as SQL):
 - **SQL Warehouses → `<warehouse>` → Permissions →** `CAN USE` for the app SP
 - **Serving → `<endpoint>` → Permissions →** `CAN QUERY` for the app SP
 
-Click **Re-check** in the console afterward.
+Click **Re-check** in the **Get started** tab afterward.
 
 ---
 
@@ -254,7 +269,7 @@ Output lands in `schema-extractor/output/`. See
 [`schema-extractor/README.md`](schema-extractor/README.md) for options such as
 `--no-columns` on very large estates.
 
-**5b. Run the pipeline** in `/console` → *Discovery*, in order:
+**5b. Run the pipeline** in the **Discovery** nav group, in order:
 
 1. **Create discovery tables** — one click, idempotent.
 2. **Upload** `all_schemas.csv`, `all_tables.csv`, and optionally
@@ -280,7 +295,7 @@ correcting it pins that mapping permanently.
 
 Natural-language Q&A over the portfolio. The app creates the space for you.
 
-1. In the console: **Admin → Genie → Create the Genie space**
+1. In the **Admin** tab: **Genie → Create the Genie space**
    (or `POST /api/genie/provision`).
 
    It mirrors the portfolio into `GENIE_MIRROR_CATALOG.GENIE_MIRROR_SCHEMA` and
@@ -344,7 +359,7 @@ No workspace, database, or network needed:
 
 ```bash
 python3 tests/serve_local.py --port 8000
-# http://127.0.0.1:8000/console   — operator console
+# http://127.0.0.1:8000           — the app
 # http://127.0.0.1:8000/docs      — OpenAPI
 ```
 
@@ -354,7 +369,7 @@ makes the "nothing configured yet" state easy to inspect deliberately.
 Run the tests:
 
 ```bash
-python3 -m unittest discover -s tests -v      # 281 tests, stdlib only
+python3 -m unittest discover -s tests -v      # 976 tests, stdlib only
 ```
 
 To work on the portfolio SPA you need `frontend/src/`, which is not in this repo —
@@ -365,7 +380,7 @@ see the README's note on the frontend source.
 ## Troubleshooting
 
 **Every `/api/*` call returns 403.** The app SP lacks warehouse or catalog access.
-`/console` → Setup names the failing probe and gives the GRANT.
+**Get started** → Setup names the failing probe and gives the GRANT.
 
 **`ai_query()` fails.** The SP needs `CAN_QUERY` on `AI_QUERY_ENDPOINT`, and that
 endpoint must support SQL `ai_query()` batch inference. This is separate from

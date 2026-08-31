@@ -8,7 +8,7 @@ import io
 from fastapi import APIRouter, HTTPException, Request, UploadFile, File
 from fastapi.responses import StreamingResponse
 
-from .. import accounts
+from .. import accounts, portfolio
 from ..common import current_user, write_audit
 from ..db import db
 
@@ -35,6 +35,23 @@ async def export_template():
             cell.fill = hdr_fill
             cell.font = hdr_font
 
+    def add_column_validation(ws, dv, column):
+        """Attach `dv` to `column` over the DATA rows only, if there are any.
+
+        On a fresh install every sheet is header-only, so `max_row` is 1 and the
+        obvious f"{column}2:{column}{ws.max_row}" spells "E2:E1" — a reversed range
+        that makes the workbook invalid, which turned the very first template a new
+        customer downloads into a 500. An empty sheet simply gets no dropdown: there
+        is no data cell to constrain, and the validation reappears on the next
+        export once rows exist.
+        """
+        if ws.max_row < 2:
+            return
+        ws.add_data_validation(dv)
+        dv.add(f"{column}2:{column}{ws.max_row}")
+
+    account_id = await accounts.current()
+
     # Instructions sheet
     ws0 = wb.active
     ws0.title = "Instructions"
@@ -55,12 +72,23 @@ async def export_template():
     ws1 = wb.create_sheet("Data Sources")
     ws1.append(["id", "source_category", "module", "vendor", "ingestion_status"])
     style_header(ws1, 5)
-    assets = await db.fetch("SELECT id, source_category, module, vendor, ingestion_status FROM data_assets ORDER BY source_category, id")
+    if account_id is not None:
+        assets = await db.fetch("""
+            SELECT da.id, da.source_category, da.module, da.vendor,
+                   COALESCE(s.ingestion_status, 'not_started') AS ingestion_status
+            FROM data_assets da
+            LEFT JOIN asset_status_by_account s
+                   ON s.data_asset_id = da.id AND s.account_id = $1
+            ORDER BY da.source_category, da.id
+        """, account_id)
+    else:
+        assets = await db.fetch(
+            "SELECT id, source_category, module, vendor, ingestion_status "
+            "FROM data_assets ORDER BY source_category, id")
     for a in assets:
         ws1.append([a["id"], a["source_category"], a["module"], a["vendor"] or "", a["ingestion_status"]])
     dv = DataValidation(type="list", formula1='"not_started,landed,curated,governed"', allow_blank=False)
-    ws1.add_data_validation(dv)
-    dv.add(f"E2:E{ws1.max_row}")
+    add_column_validation(ws1, dv, "E")
     for r in range(2, ws1.max_row + 1):
         ws1.cell(row=r, column=4).fill = edit_fill
         ws1.cell(row=r, column=5).fill = edit_fill
@@ -71,16 +99,25 @@ async def export_template():
     ws2 = wb.create_sheet("Use Cases")
     ws2.append(["id", "title", "domain", "phase", "status", "owner_lob", "priority", "value_base_mm", "notes"])
     style_header(ws2, 9)
-    ucs = await db.fetch("""
-        SELECT uc.id, uc.title, l.name AS domain, uc.phase, uc.status, uc.priority_score,
-               (uc.hypothesized_value_json->>'mid_mm')::numeric AS value_mm
-        FROM use_cases uc LEFT JOIN lobs l ON l.id = uc.lob_id ORDER BY uc.id""")
+    if account_id is not None:
+        use_case_visibility, use_case_params = await portfolio.use_case_visibility("uc")
+        ucs = await db.fetch(f"""
+            SELECT uc.id, uc.title, l.name AS domain, uc.phase, uc.status, uc.priority_score,
+                   (uc.hypothesized_value_json->>'mid_mm')::numeric AS value_mm
+            FROM use_cases uc LEFT JOIN lobs l ON l.id = uc.lob_id
+            WHERE {use_case_visibility}
+            ORDER BY uc.id
+        """, *use_case_params)
+    else:
+        ucs = await db.fetch("""
+            SELECT uc.id, uc.title, l.name AS domain, uc.phase, uc.status, uc.priority_score,
+                   (uc.hypothesized_value_json->>'mid_mm')::numeric AS value_mm
+            FROM use_cases uc LEFT JOIN lobs l ON l.id = uc.lob_id ORDER BY uc.id""")
     for u in ucs:
         ws2.append([u["id"], u["title"], u["domain"], u["phase"], u["status"], u["domain"],
                     float(u["priority_score"]) if u["priority_score"] else "", float(u["value_mm"]) if u["value_mm"] else "", ""])
     dv2 = DataValidation(type="list", formula1='"not_started,scoping,in_progress,live,value_realized"', allow_blank=False)
-    ws2.add_data_validation(dv2)
-    dv2.add(f"E2:E{ws2.max_row}")
+    add_column_validation(ws2, dv2, "E")
     for r in range(2, ws2.max_row + 1):
         for c in (5, 6, 7, 8, 9):
             ws2.cell(row=r, column=c).fill = edit_fill
@@ -91,7 +128,6 @@ async def export_template():
     ws3 = wb.create_sheet("Assumptions")
     ws3.append(["key", "label", "unit", "value"])
     style_header(ws3, 4)
-    account_id = await accounts.current()
     if account_id is not None:
         assumptions = await db.fetch("""
             SELECT DISTINCT ON (key) key, label, unit, value, category
@@ -177,7 +213,16 @@ async def _compute_import(parsed):
             changes["data_sources"].append({"id": aid, "label": f"{a['source_category']} · {a['module']}",
                                             "field": "ingestion_status", "from": a["ingestion_status"], "to": st})
 
-    cur_ucs = {u["id"]: u for u in await db.fetch("SELECT id, title, status, priority_score FROM use_cases")}
+    if account_id is not None:
+        use_case_visibility, use_case_params = await portfolio.use_case_visibility("uc")
+        cur_ucs = {u["id"]: u for u in await db.fetch(f"""
+            SELECT uc.id, uc.title, uc.status, uc.priority_score
+            FROM use_cases uc
+            WHERE {use_case_visibility}
+        """, *use_case_params)}
+    else:
+        cur_ucs = {u["id"]: u for u in await db.fetch(
+            "SELECT id, title, status, priority_score FROM use_cases")}
     for r in parsed["use_cases"]:
         try:
             uid = int(r["id"])

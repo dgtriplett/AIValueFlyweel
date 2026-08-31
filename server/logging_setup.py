@@ -154,8 +154,7 @@ def install_middleware(app) -> None:
                 elapsed = (time.monotonic() - started) * 1000
                 # Static assets and health checks would drown the useful lines.
                 path = request.url.path
-                if not (path.startswith("/assets") or path.startswith("/console")
-                        or path == "/api/health"):
+                if not (path.startswith("/assets") or path == "/api/health"):
                     record_level = (logging.WARNING if status >= 500
                                     else logging.INFO)
                     logger.log(record_level, "%s %s -> %d in %dms",

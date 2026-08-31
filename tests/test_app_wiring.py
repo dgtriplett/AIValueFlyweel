@@ -24,13 +24,27 @@ os.environ.pop("PGHOST", None)
 from app import app  # noqa: E402
 
 
+def _routes():
+    """Flatten routes across FastAPI's pre- and post-0.137 representations."""
+    for route in app.routes:
+        effective_routes = getattr(route, "effective_route_contexts", None)
+        if callable(effective_routes):
+            yield from effective_routes()
+        else:
+            yield route
+
+
 def _paths() -> set[str]:
-    return {route.path for route in app.routes if hasattr(route, "path")}
+    return {route.path for route in _routes() if hasattr(route, "path")}
+
+
+def _route_order() -> list[str]:
+    return [route.path for route in _routes() if hasattr(route, "path")]
 
 
 def _methods(path: str) -> set[str]:
     out: set[str] = set()
-    for route in app.routes:
+    for route in _routes():
         if getattr(route, "path", None) == path:
             out |= set(getattr(route, "methods", set()) or set())
     return out
@@ -42,6 +56,18 @@ class TestAppImports(unittest.TestCase):
 
     def test_health_endpoint_registered(self):
         self.assertIn("/api/health", _paths())
+
+    def test_status_includes_app_env(self):
+        """The /api/status endpoint must include app_env from APP_ENV env var."""
+        from fastapi.testclient import TestClient
+        client = TestClient(app)
+        response = client.get("/api/setup/status")
+        body = response.json()
+        # app_env should be present and match APP_ENV or default to 'DEV'
+        self.assertIn("app_env", body, "status response must include app_env field")
+        expected = os.environ.get("APP_ENV", "DEV")
+        self.assertEqual(body["app_env"], expected,
+                         f"app_env should be {expected} but got {body.get('app_env')}")
 
 
 class TestPortfolioRoutesSurvivedTheFork(unittest.TestCase):
@@ -67,7 +93,7 @@ class TestPortfolioRoutesSurvivedTheFork(unittest.TestCase):
     def test_spa_catch_all_registered_last(self):
         """The SPA fallback matches everything; if it were registered before an
         API route, that route would be shadowed and return index.html."""
-        order = [r.path for r in app.routes if hasattr(r, "path")]
+        order = _route_order()
         if "/{full_path:path}" in order:
             self.assertEqual(order[-1], "/{full_path:path}")
 
@@ -94,7 +120,7 @@ class TestDomainRoutes(unittest.TestCase):
     def test_literal_domain_routes_precede_the_id_route(self):
         """/domains/gaps and /domains/coverage-matrix must be declared before
         /domains/{domain_id}, or the literal path is captured as an id and 422s."""
-        order = [r.path for r in app.routes if hasattr(r, "path")]
+        order = _route_order()
         id_route = order.index("/api/domains/{domain_id}")
         for literal in ("/api/domains/gaps", "/api/domains/coverage-matrix"):
             self.assertLess(order.index(literal), id_route, literal)
@@ -102,7 +128,7 @@ class TestDomainRoutes(unittest.TestCase):
     def test_gaps_route_not_shadowed_by_the_id_route(self):
         """/domains/gaps must be declared before /domains/{domain_id}, or the
         literal path is captured as an id and 422s on int parsing."""
-        order = [r.path for r in app.routes if hasattr(r, "path")]
+        order = _route_order()
         self.assertLess(order.index("/api/domains/gaps"),
                         order.index("/api/domains/{domain_id}"))
 
@@ -129,7 +155,7 @@ class TestGenerationRoutes(unittest.TestCase):
         They coexist today only because the parameterized route is GET-only. If
         someone adds a GET to commit, or declares {preview_id} first for POST,
         commit silently becomes a preview lookup — so pin both facts."""
-        order = [r.path for r in app.routes if hasattr(r, "path")]
+        order = _route_order()
         commit_methods = _methods("/api/generate/use-cases/commit")
         preview_methods = _methods("/api/generate/use-cases/{preview_id}")
         self.assertEqual(commit_methods & preview_methods, set(),
@@ -302,7 +328,7 @@ class TestNewFeatureRoutes(unittest.TestCase):
         """A literal segment declared after a parameterized one is captured as an
         id and 404s/422s. This has bitten /domains/gaps, /generate/use-cases/commit,
         and /chat/tools/list — so assert the whole class of hazard at once."""
-        order = [r.path for r in app.routes if hasattr(r, "path")]
+        order = _route_order()
         pairs = [
             ("/api/chat/tools/list", "/api/chat/{conversation_id}"),
             ("/api/domains/gaps", "/api/domains/{domain_id}"),

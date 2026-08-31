@@ -13,6 +13,7 @@ build is reproducible and doesn't re-hit the LLM unless the catalog/UC changes.
 Falls back to a domain-scoped heuristic if the LLM is unavailable.
 """
 import json
+import os
 import subprocess
 from pathlib import Path
 
@@ -99,17 +100,28 @@ def _catalog_for_prompt(modules):
     return "\n".join(f"{i}) {m[0]} · {m[1]}" for i, m in enumerate(modules))
 
 
-def _llm_client():
+def _llm_client(profile=None, host=None):
     """Return (host, token, model) — we call the serving endpoint via urllib
     (no openai SDK needed at build time)."""
-    prof = "fe-vm-grid-ops-demo"
-    host = "https://fevm-grid-ops-demo.cloud.databricks.com"
-    tok = json.loads(subprocess.run(["databricks", "auth", "token", "-p", prof, "-o", "json"],
-                                    capture_output=True, text=True).stdout)["access_token"]
+    profile = (profile or os.environ.get("DATABRICKS_CONFIG_PROFILE")
+               or os.environ.get("DATABRICKS_PROFILE") or "DEFAULT")
+    host = (host or os.environ.get("DATABRICKS_HOST") or "").rstrip("/")
+    if not host:
+        auth_env = subprocess.run(
+            ["databricks", "auth", "env", "--profile", profile, "-o", "json"],
+            capture_output=True, text=True, check=True)
+        env = json.loads(auth_env.stdout).get("env", {})
+        host = env.get("DATABRICKS_HOST", "").rstrip("/")
+    if not host:
+        raise RuntimeError("no Databricks host; set DATABRICKS_HOST or configure the selected profile")
+    tok = json.loads(subprocess.run(
+        ["databricks", "auth", "token", "--profile", profile, "-o", "json"],
+        capture_output=True, text=True, check=True).stdout)["access_token"]
     return (host, tok), "databricks-claude-sonnet-4-5"
 
 
-def derive_all(ucs_raw, modules, sub_vertical_of, use_llm=False):
+def derive_all(ucs_raw, modules, sub_vertical_of, use_llm=False,
+               profile=None, host=None):
     """Return {parent_id: [(asset_index, 'required'|'helpful')]} for imported UCs.
 
     FAST by default: a deterministic, domain-scoped, word-boundary heuristic with
@@ -129,7 +141,7 @@ def derive_all(ucs_raw, modules, sub_vertical_of, use_llm=False):
     model = None
     if use_llm:
         try:
-            client, model = _llm_client()
+            client, model = _llm_client(profile=profile, host=host)
         except Exception as exc:  # noqa: BLE001
             print(f"[derive] LLM unavailable, using heuristic: {exc}")
             client = None

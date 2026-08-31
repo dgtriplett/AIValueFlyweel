@@ -53,7 +53,7 @@ catalog, 63 data domains, 34 value assumptions** — so day one is populated.
 | **Get Started** | Excel export/import for bulk offline population. |
 | **Genie assistant** | NL Q&A over the portfolio. The app creates the Genie space itself (**Admin → Genie**), seeded with the units, the readiness vocabulary and starter questions — see [`INSTALL.md`](INSTALL.md). |
 
-### Discovery & agents *(the console, at `/console`)*
+### Discovery & agents
 | Area | What it does |
 |---|---|
 | **Get started** | Guided setup: probes every dependency — Lakebase, warehouse, Unity Catalog, serving endpoint, system tables, Genie — and prints the exact GRANT statements for anything failing. Also Excel export/import for bulk offline population, and a downloadable extractor for workspaces this one cannot reach. |
@@ -76,21 +76,20 @@ catalog, 63 data domains, 34 value assumptions** — so day one is populated.
 | **Logs** | Structured JSON with a request id on every line, echoed as `X-Request-Id`. `LOG_LEVEL` turns up detail without a redeploy. OAuth tokens are redacted in the formatter, not at call sites. |
 | **Rate limits** | Per-actor token buckets on the endpoints that cost money or warehouse time, plus a per-request query budget bounding one chat turn's share of the connection pool. Guard rails against accidental load, not a quota — set `RATE_LIMITS=off` for a demo. |
 | **Human approval** | Every agent-initiated write goes through a single-use, server-side, 10-minute propose/confirm token. The client's authority is one bit: yes or no to what it was shown. |
-| **CI** | [`scripts/check.py`](scripts/check.py) runs every gate — tests, lint, secret scan, console syntax, and a clean import against the real dependencies. The workflow only calls it, so the gates are identical locally and in CI. |
+| **CI** | [`scripts/check.py`](scripts/check.py) runs every gate — tests, lint, secret scan, and a clean import against the real dependencies. The workflow only calls it, so the gates are identical locally and in CI. |
 
 ---
 
 ## Reference architecture
 
-One **Databricks App** (FastAPI serving a pre-built React SPA plus the console),
-backed by **Lakebase** for portfolio state and **Unity Catalog** for the discovery
-layer, with the **Foundation Model API** behind the agents.
+One **Databricks App** (FastAPI serving a pre-built React SPA), backed by
+**Lakebase** for portfolio state and **Unity Catalog** for the discovery layer,
+with the **Foundation Model API** behind the agents.
 
 ```
                         ┌───────────────────────────────┐
                         │  User (browser)                │
                         │  /          portfolio SPA      │
-                        │  /console   operator console   │
                         └───────────────┬────────────────┘
                                         │ HTTPS (Databricks App auth)
 ┌───────────────────── Databricks App: "grid-atlas" ──────────────────────────┐
@@ -202,7 +201,7 @@ wrong:
 
 | Layer | Technology |
 |---|---|
-| **Frontend** | React 18 · TypeScript · Vite · TailwindCSS (Databricks Blueprint dark) · TanStack Query · React Flow · Recharts · dagre. Plus a dependency-free operator console. |
+| **Frontend** | React 18 · TypeScript · Vite · TailwindCSS (Databricks Blueprint dark) · TanStack Query · React Flow · Recharts · dagre. |
 | **Backend** | FastAPI · `asyncpg` (pooled, OAuth-token password, ~45-min refresh) · Uvicorn. Lakebase SQL is parameterized. |
 | **Portfolio state** | Lakebase — Autoscaling Postgres in your workspace. Migrations in [`server/migrations/`](server/migrations/). |
 | **Discovery state** | Unity Catalog Delta tables in `ATLAS_CATALOG.ATLAS_SCHEMA`. |
@@ -216,10 +215,11 @@ wrong:
 
 ```
 .
-├── app.py                      # FastAPI entry: /api routers, SPA, console
+├── app.py                      # FastAPI entry: /api routers, SPA
 ├── app.yaml                    # App runtime config (ships with no environment baked in)
 ├── databricks.yml              # Asset Bundle — every value is a variable
-├── requirements.txt
+├── requirements.txt            # Databricks App runtime dependencies
+├── requirements-deploy.txt     # Local deploy/migrate/seed dependencies
 ├── server/
 │   ├── config.py               # Dual-mode auth + settings
 │   ├── db.py                   # asyncpg pool + OAuth refresh + budget charging
@@ -251,8 +251,7 @@ wrong:
 │   └── pu_domains.py           # 63-domain vocabulary + module mappings
 ├── schema-extractor/           # Standalone multi-workspace metadata sweep
 ├── frontend/
-│   ├── dist/                   # Pre-built SPA (COMMITTED — served by the app)
-│   └── console/                # Operator console (plain HTML/JS, no build)
+│   └── dist/                   # Pre-built SPA (COMMITTED — served by the app)
 ├── tests/                      # stdlib-only test suite + a local dev server
 ├── .github/workflows/ci.yml    # Calls scripts/check.py — no logic of its own
 └── ARCHITECTURE.md · INSTALL.md · DEMO_MODE.md · DELTA_SHARING.md · LICENSE.md
@@ -264,6 +263,7 @@ wrong:
 
 ```bash
 git clone <this-repo> && cd grid-atlas
+python3 -m pip install -r requirements-deploy.txt
 python3 scripts/deploy.py
 ```
 
@@ -284,8 +284,8 @@ python3 scripts/deploy.py --yes \
   --lakebase-project grid-atlas-db
 ```
 
-Then open the app and go to **`/console`** → *Setup & health*. Every dependency is
-probed there, with copy-pastable GRANTs for anything missing.
+Then open the app and go to the **Get started** tab. Every dependency is probed
+there, with copy-pastable GRANTs for anything missing.
 
 Full manual steps are in [`INSTALL.md`](INSTALL.md).
 
@@ -307,6 +307,7 @@ with empty values.
 | `GENIE_SPACE_ID` | Genie space over the portfolio mirror. | Genie |
 | `GENIE_MIRROR_CATALOG` / `GENIE_MIRROR_SCHEMA` | UC target for the mirror. | Genie |
 | `DEMO_MODE` | Header toggle + `/api/demo/*`. **Ship `off`** — it can reset the portfolio. | no |
+| `APP_ENV` | Visible environment pill/marker. Allowed values are `DEV` and `PROD`; the repository ships `DEV`, and deploy sets the target value. | no |
 | `LOG_LEVEL` | `INFO` normally; `DEBUG` raises detail on a running app with no redeploy. | no |
 | `RATE_LIMITS` | `on` by default. Set `off` for a demo where clicking fast is deliberate. | no |
 | `DATABRICKS_PROFILE` | **Local development only.** The CLI profile used when not running inside Databricks Apps, where the service principal is injected instead. | local |
@@ -346,16 +347,16 @@ Standard library only — no pytest, no containers, no database, no network. See
 faked rather than provisioned.
 
 `scripts/check.py` is the single definition of "does this repo pass": tests, lint,
-a secret scan, a syntax check of the operator console, and a clean import of
-`app.py` against the **real** dependencies (the suite stubs `asyncpg`/`openai`, so
-that last gate is what catches "works in tests, crashes on boot"). CI only calls
-this script, so the gates are identical on a laptop and in CI, and a missing tool
-is reported as *skipped* rather than counted as a pass.
+a secret scan, and a clean import of `app.py` against the **real** dependencies
+(the suite stubs `asyncpg`/`openai`, so that last gate is what catches "works in
+tests, crashes on boot"). CI only calls this script, so the gates are identical on
+a laptop and in CI, and a missing tool is reported as *skipped* rather than
+counted as a pass.
 
 To work on the UI without a workspace:
 
 ```bash
-python3 tests/serve_local.py --port 8000       # then open /console
+python3 tests/serve_local.py --port 8000
 ```
 
 ---
@@ -377,35 +378,46 @@ python3 tests/serve_local.py --port 8000       # then open /console
 
 ## A note on the frontend source
 
-This repo ships the **pre-built** SPA in `frontend/dist/`, which is what the app
-serves. The TypeScript source (`frontend/src/`) was not part of the exported
-workspace folder and is therefore **not** included — the committed `dist/` bundle
-is the source of record for the portfolio UI.
+The SPA is a normal React 18 + TypeScript + Vite app. Its source is in
+`frontend/src/`, and `frontend/dist/` is the build output.
 
-That is why the discovery and agent screens ship as a separate, dependency-free
-page in `frontend/console/`: adding them to the SPA would mean reverse-engineering
-a minified bundle, and a mistake there would break a UI that already works. The
-build config (`package.json`, `vite.config.ts`, `tailwind.config.js`,
-`tsconfig*.json`) is all present, so restoring `frontend/src/` is enough to make
-the SPA buildable again.
+```bash
+cd frontend
+npm install
+npm run build      # tsc && vite build → frontend/dist
+npm run dev        # vite dev server, proxying /api to localhost:8000
+```
 
----
+`frontend/dist` is **committed**, because the app serves the pre-built bundle and
+the deploy has no Node build step. So a source change is only shipped once you
+rebuild and commit the result. `scripts/check.py` gates on exactly that: it
+verifies the chunk `dist/index.html` loads still carries the behaviour the source
+promises, so a stale `dist` fails rather than quietly shipping the previous UI.
 
-### The SPA's nav is patched, not built
+### It used to be patched, not built
 
-`frontend/dist` is committed and its React source is not in this repo, so two edits
-to the SPA live in re-runnable scripts rather than in source:
+This was not always the case, and the history explains some of the shape of the
+code. `frontend/src/` was missing from the exported workspace folder, so for a
+while the only way to change the SPA was to regex-patch the minified bundle —
+`patch_spa_nav.py`, `patch_spa_grouped_nav.py`, `patch_spa_proposal_button.py`,
+`patch_spa_customer_visibility.py` and `rebrand_bundle.py` each rewrote strings
+inside the built JS, and CI asserted the patches were still applied.
 
-| Script | What it changes |
-|---|---|
-| [`scripts/patch_spa_nav.py`](scripts/patch_spa_nav.py) | Product name and subtitle in the header. |
-| [`scripts/patch_spa_grouped_nav.py`](scripts/patch_spa_grouped_nav.py) | Collapses the nine flat tabs into `Portfolio · Analyze ▾ · Plan ▾`, and adds links to the knowledge base and the proposal agent. |
+The source has since been reconstructed, so those scripts are gone. Two
+consequences worth knowing:
 
-**If you ever rebuild the SPA, re-run both.** A fresh build reverts them, which
-silently hides the knowledge base and the proposal agent from the app's front door
-without anything failing. `scripts/check.py` gates on this (`--check` reports status
-without modifying anything), and the patch refuses to write a bundle that does not
-parse — an unparseable bundle is a blank page for every user.
+- **The reconstructed source already contains what they patched in** — the
+  `Portfolio · Analyze ▾ · Plan ▾` grouped nav, the knowledge-base and
+  "Write a proposal" links, the drawer's proposal action, the current product
+  name, and the removal of customer-visible *phase* text. A rebuild no longer
+  reverts any of it, which was the whole failure mode those scripts existed to
+  paper over.
+- **The `data-ga*` attributes in the JSX are deliberate.** `data-gaGroupedNav`,
+  `data-ga-menu`, `data-gaProposalBtn` and `data-gaCustomerVisibility` were the
+  markers those patch scripts used to prove they had run. They are kept because
+  they are stable identifiers for the same behaviour across a minified rebuild,
+  which is what [`scripts/check_spa_bundle.py`](scripts/check_spa_bundle.py) keys
+  on — minified variable names change on every build, so they cannot be asserted.
 
 ## License
 

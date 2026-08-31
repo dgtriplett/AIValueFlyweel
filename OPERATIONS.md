@@ -172,6 +172,54 @@ message is already saved, so the conversation stays coherent on retry.
 failed — usually a missing grant or an unapplied migration. `rate_limits` reports
 counts only, never who used them, since this endpoint is widely readable.
 
+A **503 with `"status":"unhealthy"`** means Lakebase is configured (`PGHOST` is set)
+but unreachable — a stale OAuth token, DNS, or an outage. Reads return empty and
+writes 503 until it recovers. This is deliberately *not* reported as `demo_mode`:
+demo mode means nobody configured Lakebase at all, and conflating the two made a
+full outage render as "no data yet" over a populated database while the health check
+still said healthy.
+
+---
+
+## Account administration
+
+Destructive and cross-tenant account operations require an administrator:
+
+| Operation | Endpoint |
+|---|---|
+| Create an account | `POST /api/accounts` |
+| Rename / archive / make default | `PATCH /api/accounts/{id}` |
+| Archive or hard-delete | `DELETE /api/accounts/{id}[?hard=true]` |
+| List archived accounts | `GET /api/accounts?include_inactive=true` |
+
+Set **`GRID_ATLAS_ADMINS`** to a comma-separated list of Databricks emails to permit
+them:
+
+```yaml
+- name: GRID_ATLAS_ADMINS
+  value: "ops@utility.com,platform@utility.com"
+```
+
+The identity is taken from the `X-Forwarded-Email` header the Databricks Apps proxy
+injects, which the browser cannot forge. Matching is case-insensitive.
+
+**`scripts/deploy.py` sets this for you.** Every deploy writes the deploying user's
+Databricks email into `GRID_ATLAS_ADMINS`, so the operator who installs the app is an
+admin by default — no separate bootstrap step. Pass `--admins a@x.com,b@x.com` to set
+a different allowlist instead; the flag wins over the resolved deployer email. The
+shipped `app.yaml` template keeps this empty (fail-closed) — deploy fills it per-deploy.
+
+**Unset means nobody is an admin** and these operations return 403. That is the
+intended default: hard-deleting an account cascades away a customer's calibrated
+assumptions, research and proposals, so it fails closed rather than being available
+to every authenticated user of the instance. A 403 naming `GRID_ATLAS_ADMINS` is the
+signal to set it.
+
+Reading and switching between *active* accounts is not gated — the deployment model
+is one instance per customer, and every authenticated user of an instance is trusted
+with that instance's data. There is no per-account membership model yet; see the
+`TODO(multi-tenant)` notes in `server/accounts.py` for what would change.
+
 ---
 
 ## Upgrading a deployed instance

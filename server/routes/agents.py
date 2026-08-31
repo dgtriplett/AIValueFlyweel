@@ -11,13 +11,14 @@ computation that powers the flywheel highlight moment.
 import json
 import logging
 
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel
 
 from .. import accounts, portfolio
 from ..common import row_to_dict, rows_to_list
 from ..config import SERVING_ENDPOINT
 from ..db import db
+from ..limits import limiter
 from ..readiness import readiness_map
 from ..value_engine import compute_value_range, load_assumptions
 
@@ -148,7 +149,7 @@ async def _heuristic_detect(uc: dict, assets: list, ucs: list, max_assets: int, 
     return req, ena
 
 
-@router.post("/detect-dependencies")
+@router.post("/detect-dependencies", dependencies=[Depends(limiter("research"))])
 async def detect_dependencies(body: DetectIn):
     uc = await db.fetchrow("SELECT * FROM use_cases WHERE id=$1", body.use_case_id)
     if uc is None:
@@ -334,7 +335,8 @@ def _normalise_customer_agent(parsed: dict | None, assumptions: list[dict],
     }
 
 
-@router.get("/customer-enhancements")
+@router.get("/customer-enhancements",
+            dependencies=[Depends(limiter("research"))])
 async def customer_enhancement_agent():
     """Research-oriented agent for customer-specific assumption and app improvements.
 
@@ -601,7 +603,7 @@ class RecommendIn(BaseModel):
     top_n: int = 6
 
 
-@router.post("/recommend")
+@router.post("/recommend", dependencies=[Depends(limiter("research"))])
 async def recommend(body: RecommendIn):
     ucs, _ = await _portfolio_context()
     live = [u for u in ucs if u["status"] in ("live", "value_realized")]
@@ -821,17 +823,24 @@ class EstimateIn(BaseModel):
     description: str | None = None
 
 
-@router.post("/estimate-value")
-async def estimate_value(body: EstimateIn):
-    title, desc = body.title, body.description
-    if body.use_case_id is not None:
-        uc = await db.fetchrow("SELECT title, description FROM use_cases WHERE id=$1", body.use_case_id)
-        if uc:
-            title, desc = uc["title"], uc["description"]
-    if not title:
-        raise HTTPException(422, "Provide use_case_id or title")
+async def build_value_model(title: str, description: str | None = None) -> dict:
+    """Build a parameterized value model for a use case.
 
-    assumptions = [dict(a) for a in await db.fetch("SELECT key, label, unit FROM value_assumptions ORDER BY category")]
+    Shared helper extracted from estimate_value so generated use cases can
+    automatically get a value model without duplicating the LLM logic.
+
+    Returns: dict with keys {driver, components, roiMonths, notes}
+
+    MAGNITUDE CALIBRATION:
+    ---------------------
+    After the LLM proposes components, applies the shared calibrate_components()
+    helper from value_engine to bring absurd multipliers (from unit mismatches)
+    into a sane range. See value_engine.calibrate_components for details.
+    """
+    from ..value_engine import calibrate_components
+
+    # Fetch assumptions WITH values for calibration
+    assumptions = [dict(a) for a in await db.fetch("SELECT key, label, unit, value FROM value_assumptions ORDER BY category")]
     benchmarks = [dict(b) for b in await db.fetch("SELECT * FROM benchmark_library")]
     keys = [a["key"] for a in assumptions]
 
@@ -841,7 +850,7 @@ async def estimate_value(body: EstimateIn):
         "conversion), assumptionKeys (subset of the allowed keys), lowCoeff, highCoeff}. Annual value in $M = sum over "
         "components of multiplier * product(assumption values) * coeff. Keep it realistic and conservative. "
         "Return STRICT JSON: {\"components\":[...], \"roiMonths\":int, \"notes\":str}. "
-        f"USE CASE: {title} — {desc or ''}\n"
+        f"USE CASE: {title} — {description or ''}\n"
         f"ALLOWED ASSUMPTION KEYS: {json.dumps(keys)}\n"
         f"BENCHMARKS (reference ranges): {json.dumps(benchmarks[:15], default=str)}"
     )
@@ -865,11 +874,37 @@ async def estimate_value(body: EstimateIn):
     if not comps:
         comps = [{"name": "O&M efficiency", "calculationDisplay": "O&M budget x 0.3%",
                   "multiplier": 0.003, "assumptionKeys": ["omBudgetMM"], "lowCoeff": 0.6, "highCoeff": 1.4}]
-    return {"model": SERVING_ENDPOINT if used_llm else "heuristic", "used_llm": used_llm,
-            "fallback_note": note,
-            "value_model": {"driver": title, "components": comps,
-                            "roiMonths": (parsed or {}).get("roiMonths", 12),
-                            "notes": (parsed or {}).get("notes", "")}}
+
+    # Apply shared calibration to tame LLM-generated absurd multipliers
+    assumption_values = {a["key"]: float(a.get("value", 0) or 0) for a in assumptions}
+    annual_revenue = assumption_values.get("annualRevenueMM", 5000.0)
+    comps = calibrate_components(comps, assumption_values, annual_revenue)
+
+    return {
+        "driver": title,
+        "components": comps,
+        "roiMonths": (parsed or {}).get("roiMonths", 12),
+        "notes": (parsed or {}).get("notes", ""),
+    }
+
+
+@router.post("/estimate-value", dependencies=[Depends(limiter("research"))])
+async def estimate_value(body: EstimateIn):
+    title, desc = body.title, body.description
+    if body.use_case_id is not None:
+        uc = await db.fetchrow("SELECT title, description FROM use_cases WHERE id=$1", body.use_case_id)
+        if uc:
+            title, desc = uc["title"], uc["description"]
+    if not title:
+        raise HTTPException(422, "Provide use_case_id or title")
+
+    value_model = await build_value_model(title, desc)
+    return {
+        "model": SERVING_ENDPOINT,
+        "used_llm": True,
+        "fallback_note": None,
+        "value_model": value_model,
+    }
 
 
 # ---------------------------------------------------------------------------
@@ -880,7 +915,7 @@ class DecomposeIn(BaseModel):
     vendor: str | None = None
 
 
-@router.post("/decompose-source")
+@router.post("/decompose-source", dependencies=[Depends(limiter("research"))])
 async def decompose_source(body: DecomposeIn):
     prompt = (
         "You are a Power & Utilities data architect. For the given source system category (and optional vendor), "

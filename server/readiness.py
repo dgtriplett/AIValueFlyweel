@@ -23,10 +23,11 @@ Two requirement models coexist (see server/migrations/002_domains.sql):
                           Satisfied when that exact asset is curated/governed.
 
   DOMAIN path (CHUNK B) : use_case --requires--> data_domain <--serves-- asset.
-                          A required domain is satisfied when ANY asset mapped
-                          to it is curated/governed. This is what stops vendor
-                          substitution (Maximo instead of SAP PM) from showing a
-                          false gap.
+                          Counts the DISTINCT ASSETS (modules/datasets) serving
+                          all required domains. An asset is 'ready' when curated/
+                          governed for this account. This enables vendor substitution
+                          (Maximo instead of SAP PM) while counting at the concrete
+                          module level users think in.
 
 Resolution is PER USE CASE, not global, and precedence is:
 
@@ -171,16 +172,24 @@ def _as_list(value) -> list:
     return []
 
 
-async def ready_assets(status_override: dict[int, str] | None = None) -> list[int]:
-    """Asset ids that count as READY for the current account.
+async def asset_status_map(
+    status_override: dict[int, str] | None = None,
+) -> dict[int, str]:
+    """Return {data_asset_id: ingestion_status} resolved for the current account.
 
-    One place decides this, because it is the input to every readiness answer in the
-    app. Before accounts existed it was `da.ingestion_status IN (...)` inline in each
-    query; per-account status made that wrong in eight places at once.
+    This is the SINGLE per-account status resolution used across the app. It reads
+    asset_status_by_account, which resolves the account's own row and treats a
+    missing row as 'not_started' (NO fallback to the shared da.ingestion_status
+    column — that fallback is the cross-tenant leak migration 010 removed). On a
+    pre-migration database (view absent, or no current account) it falls back to the
+    plain data_assets column so an un-upgraded install keeps working.
 
-    Reads asset_status_by_account, which resolves the account's own row over the
-    shared column, and falls back to the plain column on a pre-migration database so
-    an un-upgraded install keeps working.
+    Both `ready_assets()` (the readiness/domain calc) and the detail drawer's
+    per-asset badge resolve status THROUGH THIS HELPER, so the badge a user sees on
+    an asset can never disagree with the domain 'satisfied/pending' badge computed
+    from the same map. Before this existed, the detail query COALESCE'd to the
+    shared column and a governed catalog value leaked into a per-account 'Governed'
+    badge while the domain calc (reading the view) correctly saw 'not_started'.
 
     `status_override` is applied LAST and wins: it is the caller's hypothesis
     ("suppose we landed asset 42"), and an override that lost to stored state would
@@ -190,22 +199,88 @@ async def ready_assets(status_override: dict[int, str] | None = None) -> list[in
 
     account_id = await accounts.current()
     statuses: dict[int, str] = {}
+    # `used_view` distinguishes "the account genuinely has no rows for these assets"
+    # (a MIGRATED database where a missing row honestly means 'not_started') from
+    # "the view does not exist / no current account" (a PRE-MIGRATION database that
+    # must fall back to the shared column). An EMPTY view result is NOT a signal to
+    # fall back — post-migration 010 the view CROSS JOINs every asset for every
+    # account, so falling back on empty would reintroduce the exact shared-column
+    # leak this resolution exists to prevent.
+    used_view = False
     if account_id is not None:
         try:
             rows = await db.fetch(
                 "SELECT data_asset_id, ingestion_status FROM asset_status_by_account "
                 "WHERE account_id = $1", account_id)
             statuses = {r["data_asset_id"]: r["ingestion_status"] for r in rows}
+            used_view = True
         except Exception:  # noqa: BLE001 - view absent before migration 009
             statuses = {}
-    if not statuses:
+            used_view = False
+    if not used_view:
         rows = await db.fetch("SELECT id, ingestion_status FROM data_assets")
         statuses = {r["id"]: r["ingestion_status"] for r in rows}
 
     if status_override:
         statuses.update(status_override)
+    return statuses
+
+
+async def ready_assets(status_override: dict[int, str] | None = None) -> list[int]:
+    """Asset ids that count as READY for the current account.
+
+    One place decides this, because it is the input to every readiness answer in the
+    app. Before accounts existed it was `da.ingestion_status IN (...)` inline in each
+    query; per-account status made that wrong in eight places at once.
+
+    Resolution is delegated to `asset_status_map()`, so the READY set and the
+    per-asset status the detail drawer displays are computed from exactly one
+    per-account map — they can never drift.
+
+    `status_override` is applied LAST and wins: it is the caller's hypothesis
+    ("suppose we landed asset 42"), and an override that lost to stored state would
+    make the simulator silently report the present instead of the projection.
+    """
+    statuses = await asset_status_map(status_override)
     return [asset_id for asset_id, status in statuses.items()
             if status in READY_STATUSES]
+
+
+async def domain_satisfaction_for(
+    use_case_id: int,
+    status_override: dict[int, str] | None = None,
+) -> dict[int, bool]:
+    """Return {domain_id: satisfied} for the REQUIRED domains of one use case.
+
+    This is the SINGLE definition of the domain-satisfaction rule used by the
+    readiness badge (see readiness_map's DOMAIN path): a required domain is
+    satisfied when ANY asset serving it is curated/governed for this account.
+    The detail drawer imports THIS helper instead of re-deriving the rule, so the
+    per-domain "satisfied/pending" flags it renders can never drift from the
+    numbers the badge shows.
+
+    Uses the same `ready_assets` resolution (per-account status + what-if
+    override) as readiness_map, and mirrors its LEFT JOIN so a required domain
+    with no serving asset counts as UNSATISFIED (a real gap) rather than dropping
+    out of the calculation.
+    """
+    ready_asset_ids = await ready_assets(status_override)
+    rows = await db.fetch(
+        """
+        SELECT urd.domain_id,
+               COALESCE(bool_or(asd.data_asset_id = ANY($2::int[])), false) AS satisfied
+        FROM uc_requires_domain urd
+        JOIN data_domains dd ON dd.id = urd.domain_id
+        LEFT JOIN asset_serves_domain asd ON asd.domain_id = urd.domain_id
+        WHERE urd.use_case_id = $1
+          AND urd.necessity = 'required'
+          AND COALESCE(dd.is_active, true) = true
+        GROUP BY urd.domain_id
+        """,
+        use_case_id, ready_asset_ids,
+    )
+    return {r["domain_id"]: bool(r["satisfied"]) for r in rows}
+
 
 async def readiness_map(
     status_override: dict[int, str] | None = None,
@@ -246,15 +321,45 @@ async def readiness_map(
     )
 
     # --- DOMAIN path counts (CHUNK B) --------------------------------------
-    # A required domain is satisfied when ANY serving asset is curated/governed.
-    # bool_or over the serving assets gives per-domain satisfaction; the outer
-    # aggregate counts satisfied vs total required domains per use case.
-    # The LEFT JOINs matter: a domain with no serving asset at all must still
-    # count toward the denominator as UNSATISFIED (that is a real gap), not
-    # silently drop out of the calculation.
+    # MODULE/DATASET-level counting: count the DISTINCT ASSETS serving all required
+    # domains, where 'ready' means that asset is curated/governed for this account.
+    # This matches what the detail drawer displays (the concrete modules/datasets)
+    # and eliminates the domain-vs-asset count mismatch.
+    #
+    # For domains with NO serving assets, we count the domain itself as one
+    # "missing dataset" so the denominator reflects the real gap. This preserves
+    # the LEFT JOIN semantics but at asset granularity.
+    #
+    # We still track per-domain satisfaction (for the pending_domains list) but the
+    # COUNTS are asset-level, not domain-level.
     domain_rows = await db.fetch(
         """
-        WITH domain_satisfaction AS (
+        WITH domain_assets AS (
+            -- All distinct assets serving each required domain, with their readiness
+            SELECT urd.use_case_id,
+                   urd.domain_id,
+                   dd.name  AS domain_name,
+                   dd.label AS domain_label,
+                   asd.data_asset_id,
+                   (asd.data_asset_id = ANY($1::int[])) AS asset_ready
+            FROM uc_requires_domain urd
+            JOIN data_domains dd ON dd.id = urd.domain_id
+            LEFT JOIN asset_serves_domain asd ON asd.domain_id = urd.domain_id
+            WHERE urd.necessity = 'required'
+              AND COALESCE(dd.is_active, true) = true
+        ),
+        asset_counts AS (
+            -- Count DISTINCT assets (modules/datasets) across all required domains
+            SELECT use_case_id,
+                   COUNT(DISTINCT data_asset_id) FILTER (WHERE data_asset_id IS NOT NULL) AS asset_total,
+                   COUNT(DISTINCT data_asset_id) FILTER (WHERE asset_ready) AS asset_ready,
+                   -- Domains with NO serving assets at all
+                   COUNT(DISTINCT domain_id) FILTER (WHERE data_asset_id IS NULL) AS orphan_domains
+            FROM domain_assets
+            GROUP BY use_case_id
+        ),
+        domain_satisfaction AS (
+            -- Per-domain satisfaction for pending_domains list (unchanged logic)
             SELECT urd.use_case_id,
                    urd.domain_id,
                    dd.name  AS domain_name,
@@ -267,18 +372,20 @@ async def readiness_map(
               AND COALESCE(dd.is_active, true) = true
             GROUP BY urd.use_case_id, urd.domain_id, dd.name, dd.label
         )
-        SELECT use_case_id,
-               COUNT(*)                          AS required_total,
-               COUNT(*) FILTER (WHERE satisfied) AS required_ready,
+        SELECT ac.use_case_id,
+               -- Total = distinct assets + orphan domains (domains w/ no serving assets)
+               (ac.asset_total + ac.orphan_domains) AS required_total,
+               ac.asset_ready AS required_ready,
                COALESCE(
                    jsonb_agg(
-                       jsonb_build_object('name', domain_name, 'label', domain_label)
-                       ORDER BY domain_label
-                   ) FILTER (WHERE NOT satisfied),
+                       jsonb_build_object('name', ds.domain_name, 'label', ds.domain_label)
+                       ORDER BY ds.domain_label
+                   ) FILTER (WHERE NOT ds.satisfied),
                    '[]'::jsonb
-               )                                 AS pending_domains
-        FROM domain_satisfaction
-        GROUP BY use_case_id
+               ) AS pending_domains
+        FROM asset_counts ac
+        LEFT JOIN domain_satisfaction ds ON ds.use_case_id = ac.use_case_id
+        GROUP BY ac.use_case_id, ac.asset_total, ac.asset_ready, ac.orphan_domains
         """, ready_asset_ids
     )
     by_domain = {r["use_case_id"]: r for r in domain_rows}

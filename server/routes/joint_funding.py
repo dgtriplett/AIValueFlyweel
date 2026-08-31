@@ -8,12 +8,13 @@ LLM-generated one-page funding brief.
 """
 import json
 
-from fastapi import APIRouter, HTTPException, Request
+from fastapi import APIRouter, Depends, HTTPException, Request
 from pydantic import BaseModel
 
 from .. import accounts, portfolio
 from ..common import current_user, write_audit
 from ..db import db
+from ..limits import limiter
 from ..value_engine import load_assumptions, EFFORT_COST, asset_cost, use_case_value
 # Import the readiness rule rather than restating it: a local copy would let
 # this module silently disagree with how readiness is actually computed.
@@ -197,7 +198,7 @@ class BriefIn(BaseModel):
     asset_id: int
 
 
-@router.post("/brief")
+@router.post("/brief", dependencies=[Depends(limiter("research"))])
 async def brief(body: BriefIn):
     """LLM-generated one-page funding brief (markdown) for the opportunity."""
     assumptions, assets, ucs, lobs, by_asset, req_by_uc, prereqs_built = await _context()
@@ -261,6 +262,7 @@ class FundIn(BaseModel):
     cost_share: dict | None = None
     brief_md: str | None = None
     status: str = "proposed"
+    delivery_cost: float | None = None  # user-entered labor cost override
 
 
 @router.post("/request")
@@ -271,21 +273,23 @@ async def create_request(body: FundIn, request: Request):
         row = await db.fetchrow(
             """INSERT INTO funding_requests
                (account_id, data_asset_id, requesting_lob_id, co_funding_lobs,
-                combined_value, status, sponsor, cost_share_json, brief_md)
-               VALUES ($1,$2,$3,$4,$5,$6,$7,$8::jsonb,$9) RETURNING *""",
+                combined_value, status, sponsor, cost_share_json, brief_md, delivery_cost)
+               VALUES ($1,$2,$3,$4,$5,$6,$7,$8::jsonb,$9,$10) RETURNING *""",
             account_id, body.data_asset_id, body.requesting_lob_id,
             body.co_funding_lobs, body.combined_value, body.status,
             body.sponsor or actor,
-            json.dumps(body.cost_share) if body.cost_share else None, body.brief_md)
+            json.dumps(body.cost_share) if body.cost_share else None, body.brief_md,
+            body.delivery_cost)
     else:
         row = await db.fetchrow(
             """INSERT INTO funding_requests
                (data_asset_id, requesting_lob_id, co_funding_lobs, combined_value, status,
-                sponsor, cost_share_json, brief_md)
-               VALUES ($1,$2,$3,$4,$5,$6,$7::jsonb,$8) RETURNING *""",
+                sponsor, cost_share_json, brief_md, delivery_cost)
+               VALUES ($1,$2,$3,$4,$5,$6,$7::jsonb,$8,$9) RETURNING *""",
             body.data_asset_id, body.requesting_lob_id, body.co_funding_lobs, body.combined_value,
             body.status, body.sponsor or actor,
-            json.dumps(body.cost_share) if body.cost_share else None, body.brief_md)
+            json.dumps(body.cost_share) if body.cost_share else None, body.brief_md,
+            body.delivery_cost)
     if row is None:
         raise HTTPException(503, "Database unavailable")
     await write_audit("funding_request", row["id"], "create", actor, {"data_asset_id": body.data_asset_id})

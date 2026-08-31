@@ -392,14 +392,14 @@ class TestLimiterRunsBeforeBodyValidation(LimitsTestCase):
     the only way to establish the ordering, since it is FastAPI's, not ours.
     """
 
-    def _post(self, path, body):
+    def _request(self, method, path, body=b""):
         import asyncio
 
         import app as app_module
 
         scope = {
             "type": "http", "asgi": {"version": "3.0"}, "http_version": "1.1",
-            "method": "POST", "path": path, "raw_path": path.encode(),
+            "method": method, "path": path, "raw_path": path.encode(),
             "query_string": b"", "root_path": "", "scheme": "http",
             "server": ("test", 80), "client": ("9.9.9.9", 1),
             "headers": [(b"x-forwarded-email", b"limits-test@example.com"),
@@ -417,6 +417,9 @@ class TestLimiterRunsBeforeBodyValidation(LimitsTestCase):
         asyncio.run(app_module.app(scope, receive, send))
         return captured["status"]
 
+    def _post(self, path, body):
+        return self._request("POST", path, body)
+
     def test_invalid_bodies_still_consume_the_limit(self):
         import json
 
@@ -430,6 +433,45 @@ class TestLimiterRunsBeforeBodyValidation(LimitsTestCase):
                          "a flood of malformed requests was not rate limited — the "
                          f"limiter is running after body validation: {statuses}")
 
+    def test_new_model_posts_consume_research_limit_before_validation(self):
+        import json
+
+        cases = {
+            "/api/genie/ask": {"not_the_expected_field": "x"},
+            "/api/agents/detect-dependencies": {"not_the_expected_field": "x"},
+            "/api/agents/recommend": {"top_n": "not-an-integer"},
+            "/api/agents/estimate-value": {"use_case_id": "not-an-integer"},
+            "/api/agents/decompose-source": {"not_the_expected_field": "x"},
+            "/api/joint-funding/brief": {"asset_id": "not-an-integer"},
+        }
+        burst = limits.LIMITS["research"].burst
+
+        for path, payload in cases.items():
+            with self.subTest(path=path):
+                limits.reset()
+                body = json.dumps(payload).encode()
+                statuses = [self._post(path, body) for _ in range(burst + 1)]
+                self.assertEqual(statuses[:burst], [422] * burst)
+                self.assertEqual(statuses[burst], 429)
+
+    def test_customer_enhancements_uses_research_limit(self):
+        actor = "limits-test@example.com"
+        for _ in range(limits.LIMITS["research"].burst):
+            self.assertTrue(limits.LIMITS["research"].check(actor)[0])
+
+        self.assertEqual(
+            self._request("GET", "/api/agents/customer-enhancements"), 429)
+
+    def test_rate_limits_off_bypasses_new_route_dependencies(self):
+        import json
+
+        limits.LIMITS_ENABLED = False
+        burst = limits.LIMITS["research"].burst
+        garbage = json.dumps({"not_the_expected_field": "x"}).encode()
+        statuses = [self._post("/api/genie/ask", garbage)
+                    for _ in range(burst + 2)]
+        self.assertEqual(statuses, [422] * (burst + 2))
+
 
 class TestExpensiveEndpointsAreLimited(unittest.TestCase):
     """Every endpoint that costs money or warehouse time must declare a limit.
@@ -442,7 +484,16 @@ class TestExpensiveEndpointsAreLimited(unittest.TestCase):
     # Endpoint path fragment -> the limit class it must use.
     EXPECTED = {
         "server/routes/chat.py": [('@router.post("", ', "chat")],
+        "server/routes/agents.py": [('/detect-dependencies"', "research"),
+                                     ("get", '/customer-enhancements"',
+                                      "research"),
+                                     ('/recommend"', "research"),
+                                     ('/estimate-value"', "research"),
+                                     ('/decompose-source"', "research")],
+        "server/routes/genie.py": [('/ask"', "research"),
+                                    ('/provision"', "sweep")],
         "server/routes/research.py": [('/company"', "research"), ('/apply"', "write")],
+        "server/routes/joint_funding.py": [('/brief"', "research")],
         "server/routes/generate.py": [('/use-cases"', "generate"),
                                       ('/use-cases/commit"', "write")],
         "server/routes/taxonomy.py": [('/classify"', "generate")],
@@ -469,9 +520,15 @@ class TestExpensiveEndpointsAreLimited(unittest.TestCase):
         missing = []
         for relative, expectations in self.EXPECTED.items():
             lines = (root / relative).read_text().split("\n")
-            for fragment, limit_name in expectations:
+            for expectation in expectations:
+                if len(expectation) == 2:
+                    fragment, limit_name = expectation
+                    method = "post"
+                else:
+                    method, fragment, limit_name = expectation
                 for index, line in enumerate(lines):
-                    if not (line.startswith("@router.post(") and fragment in line):
+                    if not (line.startswith(f"@router.{method}(")
+                            and fragment in line):
                         continue
                     # A decorator can wrap across lines. Reading only the first one
                     # reported a correctly-limited endpoint as unlimited, which
@@ -548,10 +605,7 @@ class TestExpensiveEndpointsAreLimited(unittest.TestCase):
         from pathlib import Path
 
         root = Path(__file__).parent.parent
-        # joint_funding calls llm_text from a GET (a narrative brief). GETs are not
-        # rate limited here; it is a single call on an explicit user action, and the
-        # 'write'/'generate' classes cover the paths that mutate or cost the most.
-        exempt = {"server/routes/joint_funding.py", "server/routes/agents.py"}
+        exempt = {"server/routes/agents.py"}
         uncovered = []
         for path in (root / "server" / "routes").glob("*.py"):
             relative = f"server/routes/{path.name}"

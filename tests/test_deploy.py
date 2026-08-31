@@ -16,6 +16,8 @@ import unittest
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 APP_YAML = os.path.join(ROOT, "app.yaml")
 BUNDLE_YAML = os.path.join(ROOT, "databricks.yml")
+RUNTIME_REQUIREMENTS = os.path.join(ROOT, "requirements.txt")
+DEPLOY_REQUIREMENTS = os.path.join(ROOT, "requirements-deploy.txt")
 
 
 def _load_deploy():
@@ -28,6 +30,29 @@ def _load_deploy():
 
 
 deploy = _load_deploy()
+
+
+class TestDeployToolDependencies(unittest.TestCase):
+    def test_psycopg2_is_pinned_only_for_operator_scripts(self):
+        with open(DEPLOY_REQUIREMENTS) as fh:
+            deploy_requirements = fh.read()
+        with open(RUNTIME_REQUIREMENTS) as fh:
+            runtime_requirements = fh.read()
+
+        self.assertRegex(deploy_requirements, r"(?m)^psycopg2-binary==\d+\.\d+\.\d+$")
+        self.assertNotIn("psycopg2", runtime_requirements.lower())
+
+    def test_quickstarts_install_operator_dependencies_before_deploy(self):
+        install_command = "python3 -m pip install -r requirements-deploy.txt"
+        deploy_command = "python3 scripts/deploy.py"
+
+        for filename in ("README.md", "INSTALL.md"):
+            with self.subTest(filename=filename):
+                with open(os.path.join(ROOT, filename)) as fh:
+                    documentation = fh.read()
+                self.assertIn(install_command, documentation)
+                self.assertLess(documentation.index(install_command),
+                                documentation.index(deploy_command))
 
 
 def _env_value(text: str, name: str) -> str | None:
@@ -167,9 +192,13 @@ class TestSettingsParity(unittest.TestCase):
         into another's workspace."""
         with open(APP_YAML) as fh:
             text = fh.read()
-        for name in ("PGHOST", "PGUSER", "ATLAS_CATALOG", "GENIE_MIRROR_CATALOG"):
+        for name in ("PGHOST", "PGUSER", "ATLAS_CATALOG", "ATLAS_SCHEMA",
+                     "GENIE_MIRROR_CATALOG", "GENIE_MIRROR_SCHEMA",
+                     "GENIE_SPACE_ID"):
             self.assertEqual(_env_value(text, name), "",
                              f"{name} has a baked-in value; it must ship empty")
+        self.assertEqual(_env_value(text, "APP_ENV"), "DEV",
+                         "APP_ENV must ship with the safe DEV default")
         match = re.search(r"sql_warehouse:\s*\n\s*id:\s*\"([^\"]*)\"", text)
         self.assertEqual(match.group(1), "", "a warehouse id is baked into app.yaml")
 
@@ -181,6 +210,65 @@ class TestSettingsParity(unittest.TestCase):
             match = re.search(
                 r"  demo_mode:\n(?:    [^\n]*\n)*?    default:\s*(\S+)", fh.read())
         self.assertIn(match.group(1).strip("\"'"), ("off",))
+
+
+class TestDeployerAdminAllowlist(unittest.TestCase):
+    """The deploying user should be an admin by default.
+
+    is_admin() fails closed on an empty GRID_ATLAS_ADMINS, so an app deployed
+    without the operator's email in the allowlist has NO admins and every admin
+    surface is hidden. deploy.py must land the deployer's email (or --admins) in
+    the allowlist so the operator who installs the app is admin by default.
+    """
+
+    def test_deployer_email_prefers_username_when_it_is_an_email(self):
+        """`current-user me`'s userName is the login, which is the email."""
+        self.assertEqual(
+            deploy.deployer_email({"userName": "ops@utility.com"}),
+            "ops@utility.com")
+
+    def test_deployer_email_falls_back_to_emails_list(self):
+        """A userName that is not itself an address falls back to emails[0]."""
+        me = {"userName": "service-principal-123",
+              "emails": [{"value": "ops@utility.com", "primary": True}]}
+        self.assertEqual(deploy.deployer_email(me), "ops@utility.com")
+
+    def test_deployer_email_empty_when_unauthenticated(self):
+        """A dry run against an unauthenticated profile returns {} — no admin."""
+        self.assertEqual(deploy.deployer_email({}), "")
+
+    def test_admins_flag_overrides_the_deployer_default(self):
+        """Mirrors deploy.py's precedence: --admins wins over the resolved email."""
+        me = {"userName": "ops@utility.com"}
+        admins_flag = "a@x.com,b@x.com"
+        chosen = admins_flag or deploy.deployer_email(me) or ""
+        self.assertEqual(chosen, "a@x.com,b@x.com")
+
+    def test_deployer_email_is_the_default_when_no_flag(self):
+        me = {"userName": "ops@utility.com"}
+        admins_flag = None
+        chosen = admins_flag or deploy.deployer_email(me) or ""
+        self.assertEqual(chosen, "ops@utility.com")
+
+    def test_write_config_writes_grid_atlas_admins_into_app_yaml(self):
+        """The whole point: the resolved allowlist must reach app.yaml's env."""
+        with open(APP_YAML) as fh:
+            text = fh.read()
+        out = deploy.set_yaml_env(text, "GRID_ATLAS_ADMINS", "ops@utility.com")
+        self.assertEqual(_env_value(out, "GRID_ATLAS_ADMINS"), "ops@utility.com")
+
+    def test_grid_atlas_admins_is_in_write_config_mapping(self):
+        """A typo'd key would be a silent no-op — the deployer would never be
+        written and the app would ship with no admin."""
+        import inspect
+        source = inspect.getsource(deploy.write_config)
+        self.assertIn('("GRID_ATLAS_ADMINS", "grid_atlas_admins")', source)
+
+    def test_app_yaml_ships_grid_atlas_admins_empty(self):
+        """The shipped template must not bake in an admin email — deploy fills it,
+        and an empty default preserves the fail-closed posture."""
+        with open(APP_YAML) as fh:
+            self.assertEqual(_env_value(fh.read(), "GRID_ATLAS_ADMINS"), "")
 
 
 class TestCliContract(unittest.TestCase):

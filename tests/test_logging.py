@@ -354,7 +354,7 @@ class TestMiddleware(LoggingTestCase):
     def test_health_and_static_are_not_logged(self):
         """Otherwise the platform's health probe buries every real line."""
         self.get("/api/health")
-        self.get("/console/")
+        self.get("/assets/favicon.ico")
         self.assertEqual(
             [line["msg"] for line in self.lines()], [],
             "health checks and static assets must not produce request log lines")

@@ -284,6 +284,7 @@ async def status(request: Request):
     connection the first one warmed up.
     """
     sp = await _service_principal()
+    import os
     checks = [
         _probe_config(),
         _check("identity", True, "Identity",
@@ -344,6 +345,7 @@ async def status(request: Request):
         "service_principal": sp,
         "grants_sql": all_grants,
         "environment": "databricks" if config.IS_DATABRICKS_APP else "local",
+        "app_env": os.environ.get("APP_ENV", "DEV"),
         # What to do next, in dependency order — the first required failure is the
         # root cause, not a symptom of something further down.
         "next_action": (required_failures[0]["fix"] if required_failures

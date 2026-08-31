@@ -48,26 +48,6 @@ def run(name: str, args: list[str], *, cwd: Path = ROOT,
     return Result(name, "PASS")
 
 
-def check_console_bundle() -> Result:
-    """The operator console is hand-written JS served as-is — no build step.
-
-    That means a syntax error ships and the page renders blank with the error only
-    in the browser console. There is no bundler to catch it, so this is the only
-    gate between a typo and a customer seeing an empty tab.
-    """
-    console = ROOT / "frontend" / "console" / "console.js"
-    if not console.exists():
-        return Result("console bundle syntax", "FAIL", "console.js missing")
-    if shutil.which("node") is None:
-        return Result("console bundle syntax", "SKIP", "node not installed")
-    completed = subprocess.run(["node", "--check", str(console)],
-                               capture_output=True, text=True)
-    if completed.returncode != 0:
-        print(completed.stderr.strip()[:1500])
-        return Result("console bundle syntax", "FAIL", "console.js does not parse")
-    return Result("console bundle syntax", "PASS")
-
-
 def check_app_imports() -> Result:
     """Import app.py in a clean interpreter, against the REAL dependencies.
 
@@ -102,6 +82,33 @@ def check_app_imports() -> Result:
     return Result(name, "PASS")
 
 
+def check_frontend_tests() -> Result:
+    """The SPA's plumbing unit tests (account header, 429 -> ApiError, ConfirmCard).
+
+    Delegates to scripts/check_frontend_tests.py, which prints a `SKIP:` line and
+    exits 0 when the toolchain it needs is absent — CI pins node 20 and installs no
+    npm packages, so it cannot run these. That is reported as SKIP rather than PASS
+    here for the same reason as every other gate: a green summary must never stand
+    in for a check that never executed. See that script's docstring for why adding
+    `npm ci` to CI to run 24 assertions is the wrong trade.
+    """
+    name = "frontend plumbing tests"
+    script = ROOT / "scripts" / "check_frontend_tests.py"
+    if not script.exists():
+        return Result(name, "SKIP", "check_frontend_tests.py missing")
+    print(f"\n=== {name}\n    $ python3 {script.relative_to(ROOT)}", flush=True)
+    completed = subprocess.run([sys.executable, str(script)],
+                               cwd=ROOT, capture_output=True, text=True)
+    output = (completed.stdout + completed.stderr).strip()
+    if output:
+        print("\n".join(f"    {line}" for line in output.split("\n")[-40:]))
+    if completed.returncode != 0:
+        return Result(name, "FAIL", f"exit {completed.returncode}")
+    if output.startswith("SKIP:"):
+        return Result(name, "SKIP", output[len("SKIP:"):].strip())
+    return Result(name, "PASS")
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__,
                                      formatter_class=argparse.RawDescriptionHelpFormatter)
@@ -116,6 +123,12 @@ def main() -> int:
                        [sys.executable, "-m", "unittest", "discover",
                         "-s", "tests", "-p", "test_*.py"]))
 
+    # Pure source parsing, so CI can prove every nav destination renders without
+    # installing npm packages or relying on TypeScript being available there.
+    results.append(run("SPA TabIds have render cases",
+                       [sys.executable, str(ROOT / "scripts"
+                                            / "check_tab_render.py")]))
+
     results.append(check_app_imports())
 
     # Runs unconditionally: a committed credential is the one failure that is
@@ -126,25 +139,23 @@ def main() -> int:
     if not args.fast:
         results.append(run("lint (ruff)", ["ruff", "check", "."],
                            optional_tool="ruff"))
-        results.append(check_console_bundle())
-        # The SPA bundle is committed and serves the app's front door. An unpatched
-        # one silently reverts the grouped nav and hides the knowledge base and the
-        # proposal agent — features become invisible without anything failing.
-        results.append(run("SPA nav patch applied",
+        # frontend/dist is committed and serves the app's front door, and it is now
+        # BUILT from frontend/src rather than patched in place. The failure this
+        # catches is a stale dist: source says one thing, the bundle a customer
+        # loads says another, and nothing else notices. It asserts the behaviour —
+        # grouped nav, the knowledge-base and proposal links, the drawer's proposal
+        # action, the current product name, no customer-visible phase text — on the
+        # exact chunk index.html references.
+        #
+        # This replaces the historical patch_spa_grouped_nav.py,
+        # patch_spa_proposal_button.py, and patch_spa_customer_visibility.py
+        # `--check` gates (now deleted). Those asserted minified identifiers
+        # (`Dg.find(x=>x.id===`) that a minifier reassigns on every build, so they
+        # could only ever pass for one historical bundle.
+        results.append(run("SPA bundle carries the source's behaviour",
                            [sys.executable, str(ROOT / "scripts"
-                                                / "patch_spa_grouped_nav.py"),
-                            "--check"]))
-        # Same reasoning: an unpatched bundle silently removes the drawer's
-        # "Write proposal" action, and the feature goes back to being reachable
-        # only by typing an id into a form.
-        results.append(run("SPA proposal button applied",
-                           [sys.executable, str(ROOT / "scripts"
-                                                / "patch_spa_proposal_button.py"),
-                            "--check"]))
-        results.append(run("SPA customer visibility applied",
-                           [sys.executable, str(ROOT / "scripts"
-                                                / "patch_spa_customer_visibility.py"),
-                            "--check"]))
+                                                / "check_spa_bundle.py")]))
+        results.append(check_frontend_tests())
 
     print("\n" + "=" * 62)
     for result in results:

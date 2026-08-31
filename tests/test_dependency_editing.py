@@ -239,19 +239,6 @@ class TestManualEditsAreLocked(unittest.TestCase):
     def test_requires_edits_set_the_lock(self):
         self.assertIn("requires_locked=true", SOURCE)
 
-    def test_console_marks_its_edits_manual(self):
-        """The lock is driven by `manual: true` from the client, so the UI must send it —
-        on delete as well as create, since removing a wrong edge is equally a judgement."""
-        console = (ROOT / "frontend" / "console" / "console.js").read_text()
-        self.assertIn("manual: true", console)
-        self.assertIn("&manual=true", console)
-
-    def test_the_lock_is_visible_in_the_ui(self):
-        """A locked mapping stops receiving automated updates, which is a real trade-off
-        and has to be stated rather than discovered."""
-        console = (ROOT / "frontend" / "console" / "console.js").read_text()
-        self.assertIn("requires_locked", console)
-
 
 class TestPhaseIsRecomputed(unittest.TestCase):
     """Phase is derived from prerequisite depth, so an edge edit changes it."""
@@ -263,25 +250,6 @@ class TestPhaseIsRecomputed(unittest.TestCase):
         """Removing a prerequisite can move a use case to an earlier phase; skipping the
         recompute on delete would leave it stuck in the later one."""
         self.assertEqual(SOURCE.count("await recompute_and_store()"), 2)
-
-
-class TestConsoleView(unittest.TestCase):
-    @classmethod
-    def setUpClass(cls):
-        cls.console = (ROOT / "frontend" / "console" / "console.js").read_text()
-
-    def test_view_is_registered_in_the_router(self):
-        self.assertIn("dependencies: viewDependencies,", self.console)
-
-    def test_view_is_reachable_from_the_nav(self):
-        """A view with no nav entry is only reachable by typing the hash."""
-        self.assertIn('["dependencies", "Dependencies"]', self.console)
-
-    def test_edits_the_direction_being_viewed(self):
-        """Downstream ("this unlocks") is read-only here on purpose: editing an edge from
-        the far end means the direction on screen is not the direction being changed,
-        which is how people invert a dependency by accident."""
-        self.assertIn("from the other use case's own page", self.console)
 
 
 if __name__ == "__main__":

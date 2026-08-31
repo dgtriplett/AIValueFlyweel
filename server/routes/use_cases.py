@@ -1,14 +1,15 @@
 """Use Cases CRUD (the portfolio core)."""
 import json
 
-from fastapi import APIRouter, HTTPException, Request
+from fastapi import APIRouter, Depends, HTTPException, Request
 from pydantic import BaseModel
 
 from .. import accounts
 from ..common import current_user, row_to_dict, rows_to_list, write_audit
 from ..db import db
+from ..limits import limiter
 from .. import portfolio
-from ..readiness import readiness_map, readiness_for
+from ..readiness import readiness_map, readiness_for, domain_satisfaction_for, asset_status_map, BUILT_SQL_LIST
 from ..value_engine import (
     compute_realized,
     compute_value_range,
@@ -42,6 +43,9 @@ class UseCaseIn(BaseModel):
     realized_override_enabled: bool = False
     realized_override_amount: float | None = None
     realized_override_note: str | None = None
+    hypothesized_override_enabled: bool = False
+    hypothesized_override_amount: float | None = None
+    hypothesized_override_note: str | None = None
     status_source: str = "manual"
 
 
@@ -161,6 +165,215 @@ async def list_use_cases(
 async def all_readiness():
     """Map of use_case_id -> readiness info (used for graph coloring/filters)."""
     return await readiness_map()
+
+
+@router.get("/at-risk")
+async def at_risk_use_cases():
+    """The at-risk rollup: use cases in the caller's portfolio that are slipping.
+
+    A use case is AT RISK when either
+      * its progression `at_risk` flag would be true — target_go_live_date is in the
+        past AND status is not {live, value_realized}, OR
+      * it has slipped at least once (a `date_change` event that moved the target
+        LATER), which is the executive's "why is this still not done" signal even
+        when the current target has not yet lapsed.
+
+    SCOPING — this is the whole point of the feature, and the failure mode is a
+    cross-tenant leak. There is NO `use_cases.account_id` column; ownership of a
+    non-catalog use case is membership in `account_portfolio_use_cases`. So the
+    working set is `portfolio.use_case_visibility` (catalog OR in-this-account's
+    portfolio), exactly like the list route. The progression tables are themselves
+    account-scoped (`account_use_case_progress`, `use_case_status_events` both carry
+    account_id), so we bind the current account into their joins too — a use case is
+    only at risk relative to THIS account's target dates and slippage history.
+
+    Fail closed: with no resolvable account we cannot scope, so we return an empty
+    rollup rather than every tenant's slipping work.
+    """
+    account_id = await accounts.current()
+    if account_id is None:
+        # No account resolved: refuse to answer rather than span tenants.
+        return {"items": [], "total": 0}
+
+    # $1 = account_id (portfolio membership + progression scope). The visibility
+    # predicate binds it again; both reference $1 so the account travels once.
+    visibility, _params = await portfolio.use_case_visibility(
+        "use_cases", param_index=1)
+
+    # Per-account slippage aggregation: a `date_change` event whose target moved
+    # LATER (to_value > from_value on ISO YYYY-MM-DD, which sorts lexically) is a
+    # slip. We count them and keep the most recent one's reason.
+    sql = f"""
+        WITH slips AS (
+            SELECT use_case_id,
+                   count(*) AS times_slipped,
+                   (array_agg(note ORDER BY created_at DESC))[1] AS latest_reason
+              FROM use_case_status_events
+             WHERE account_id = $1
+               AND event_type = 'date_change'
+               AND from_value IS NOT NULL
+               AND to_value IS NOT NULL
+               AND to_value > from_value
+             GROUP BY use_case_id
+        )
+        SELECT use_cases.id,
+               use_cases.title,
+               use_cases.status,
+               p.target_go_live_date AS target_go_live_date,
+               COALESCE(s.times_slipped, 0) AS times_slipped,
+               s.latest_reason AS latest_slippage_reason
+          FROM use_cases
+          JOIN account_use_case_progress p
+            ON p.use_case_id = use_cases.id AND p.account_id = $1
+          LEFT JOIN slips s
+            ON s.use_case_id = use_cases.id
+         WHERE {visibility}
+           AND use_cases.status NOT IN ({BUILT_SQL_LIST})
+           AND (
+                 (p.target_go_live_date IS NOT NULL AND p.target_go_live_date < CURRENT_DATE)
+                 OR COALESCE(s.times_slipped, 0) > 0
+               )
+         ORDER BY p.target_go_live_date NULLS LAST, use_cases.id
+    """
+    rows = await db.fetch(sql, account_id)
+
+    from datetime import date as _date
+    today = _date.today()
+    items = []
+    for r in rows:
+        target = r["target_go_live_date"]
+        days_overdue = 0
+        if target is not None and target < today:
+            days_overdue = (today - target).days
+        items.append({
+            "id": r["id"],
+            "title": r["title"],
+            "status": r["status"],
+            "target_go_live_date": target.isoformat() if target else None,
+            "days_overdue": days_overdue,
+            "times_slipped": int(r["times_slipped"] or 0),
+            "latest_slippage_reason": r["latest_slippage_reason"],
+        })
+    return {"items": items, "total": len(items)}
+
+
+def _quarter_of(target) -> str:
+    """Render a date as its calendar quarter label, e.g. '2026-Q1'.
+
+    The bucket key is the quarter the target go-live falls in, so a use case
+    landing on 2026-02-14 lands the whole portfolio in 2026-Q1's column. Kept as a
+    tiny pure helper so the bucketing has one definition and the test can pin it.
+    """
+    quarter = (target.month - 1) // 3 + 1
+    return f"{target.year}-Q{quarter}"
+
+
+@router.get("/portfolio/value-timeline")
+async def value_timeline():
+    """The value-realization timeline: WHEN projected value is expected to land.
+
+    For the caller's portfolio, bucket each use case by the QUARTER of its target
+    go-live date (`account_use_case_progress.target_go_live_date`) and sum the
+    projected annual value landing in each quarter. The series is ordered by
+    quarter and carries a running cumulative so the Executive can read "how much
+    value is live/expected by end of Q3" straight off the curve. Value is REALIZED
+    where present, else HYPOTHESIZED - the same "actuals win" rule the rest of the
+    app uses - computed through the parameterized value engine so it reacts to the
+    account's calibrated assumptions.
+
+    SCOPING - this is the whole point, and the failure mode is a cross-tenant leak.
+    There is NO `use_cases.account_id` column; ownership of a non-catalog use case
+    is membership in `account_portfolio_use_cases`. So the working set is
+    `portfolio.use_case_visibility` (catalog OR in this account's portfolio),
+    exactly like the at-risk and detail routes. The progression tables are
+    account-scoped (`account_use_case_progress.account_id`), so we LEFT JOIN them
+    bound to the current account - a use case's target date is only THIS account's.
+    A use case with no target date for this account lands in the 'unscheduled'
+    bucket, reported separately rather than plotted on the curve.
+
+    Fail closed: with no resolvable account we cannot scope, so we return an empty
+    series rather than spanning every tenant's roadmap.
+    """
+    account_id = await accounts.current()
+    if account_id is None:
+        # No account resolved: refuse to answer rather than span tenants.
+        return {"series": [], "unscheduled": {"use_case_count": 0, "value_landing": 0.0}}
+
+    assumptions = await load_assumptions()
+
+    # $1 = account_id (portfolio membership + progression scope). The visibility
+    # predicate binds it again; both reference $1 so the account travels once.
+    visibility, _params = await portfolio.use_case_visibility(
+        "use_cases", param_index=1)
+
+    # LEFT JOIN progression so use cases with no target date for THIS account still
+    # come back - they belong in the unscheduled bucket, not dropped. Every visible
+    # use case counts toward the curve (or the unscheduled bucket); the value
+    # engine decides realized-vs-hypothesized per row.
+    sql = f"""
+        SELECT use_cases.id,
+               use_cases.status,
+               use_cases.hypothesized_value_json,
+               use_cases.realized_value_json,
+               use_cases.realized_override_enabled,
+               use_cases.realized_override_amount,
+               use_cases.realized_override_note,
+               p.target_go_live_date AS target_go_live_date
+          FROM use_cases
+          LEFT JOIN account_use_case_progress p
+            ON p.use_case_id = use_cases.id AND p.account_id = $1
+         WHERE {visibility}
+         ORDER BY use_cases.id
+    """
+    rows = await db.fetch(sql, account_id)
+
+    buckets: dict[str, dict] = {}
+    unscheduled_count = 0
+    unscheduled_value = 0.0
+
+    for r in rows:
+        uc = dict(r)
+        # Realized where present, else hypothesized - actuals win, same as the
+        # dashboards. compute_realized returns {"value": None} when there is none.
+        realized = compute_realized(uc, assumptions) or {}
+        value = realized.get("value")
+        if value is None:
+            rng = compute_value_range(uc.get("hypothesized_value_json"), assumptions)
+            value = rng["mid"] if rng else 0.0
+        value = float(value or 0.0)
+
+        target = uc.get("target_go_live_date")
+        if target is None:
+            unscheduled_count += 1
+            unscheduled_value += value
+            continue
+
+        quarter = _quarter_of(target)
+        bucket = buckets.setdefault(
+            quarter, {"quarter": quarter, "use_case_count": 0, "value_landing": 0.0})
+        bucket["use_case_count"] += 1
+        bucket["value_landing"] += value
+
+    # Order the curve chronologically and thread the running cumulative through it.
+    series = []
+    cumulative = 0.0
+    for quarter in sorted(buckets):
+        bucket = buckets[quarter]
+        cumulative += bucket["value_landing"]
+        series.append({
+            "quarter": quarter,
+            "use_case_count": bucket["use_case_count"],
+            "value_landing": round(bucket["value_landing"], 2),
+            "cumulative_value": round(cumulative, 2),
+        })
+
+    return {
+        "series": series,
+        "unscheduled": {
+            "use_case_count": unscheduled_count,
+            "value_landing": round(unscheduled_value, 2),
+        },
+    }
 
 
 @router.get("/{uc_id}")
@@ -353,8 +566,33 @@ async def get_use_case_detail(uc_id: int):
     uc["computed_value"] = rng["mid"] if rng else None
     uc["realized"] = compute_realized(uc, assumptions)
 
+    account_id = await accounts.current()
+    # BUG A FIX: resolve per-asset ingestion_status through the SAME shared
+    # per-account map that readiness/domain-satisfaction uses (asset_status_map ->
+    # asset_status_by_account view; missing row = 'not_started', NO COALESCE fallback
+    # to the shared da.ingestion_status column). Previously each query COALESCE'd to
+    # the shared column, so a governed catalog value leaked into a per-account
+    # 'Governed' badge while the domain calc correctly saw 'not_started' — the two
+    # badges contradicted each other. Resolving both from one map makes that
+    # impossible. asset_status_map preserves the pre-migration fallback internally,
+    # so an un-upgraded install still works.
+    status_map = await asset_status_map()
+
+    def _overlay_status(asset: dict) -> dict:
+        """Replace ingestion_status with the per-account resolution. A missing
+        entry means the account has said nothing -> 'not_started', matching the
+        view/readiness rule exactly (never inheriting the shared column)."""
+        asset_id = asset.get("id")
+        if asset_id in status_map:
+            asset["ingestion_status"] = status_map[asset_id]
+        else:
+            asset["ingestion_status"] = "not_started"
+        return asset
+
     required = await db.fetch(
-        """SELECT da.*, ura.criticality
+        """SELECT da.*,
+                  ura.criticality,
+                  ura.rationale
            FROM uc_requires_asset ura
            JOIN data_assets da ON da.id = ura.data_asset_id
            WHERE ura.use_case_id = $1
@@ -373,7 +611,126 @@ async def get_use_case_detail(uc_id: int):
            WHERE e.to_use_case_id = $1 ORDER BY uc.title""",
         uc_id,
     )
-    account_id = await accounts.current()
+    # FIX PART A.2: Split required vs helpful assets server-side so the count reflects
+    # only truly required ones.
+    required_list = [_overlay_status(a) for a in rows_to_list(required)]
+    required_assets = [a for a in required_list if a.get("criticality") == "required"]
+    helpful_assets = [a for a in required_list if a.get("criticality") == "helpful"]
+
+    # BUG 2 FIX: Include domain-path requirements (uc_requires_domain) so the detail
+    # pane matches the readiness badge. A required domain is satisfied when ANY serving
+    # asset is curated/governed, mirroring readiness.py's logic. For domains with no
+    # serving assets, surface the domain itself as a required item.
+    domain_reqs = await db.fetch(
+        """SELECT urd.domain_id, urd.necessity, dd.name AS domain_name, dd.label AS domain_label,
+                  urd.rationale
+           FROM uc_requires_domain urd
+           JOIN data_domains dd ON dd.id = urd.domain_id
+           WHERE urd.use_case_id = $1
+             AND COALESCE(dd.is_active, true) = true
+           ORDER BY urd.necessity, dd.label""",
+        uc_id,
+    )
+
+    # BUG 1 FIX: Per-domain satisfaction, computed by the SAME rule the readiness
+    # badge uses (readiness.domain_satisfaction_for -> bool_or any serving asset
+    # curated/governed). We do NOT re-derive the rule here; importing the shared
+    # helper keeps the badge count and this list telling one consistent story.
+    domain_satisfied_map = await domain_satisfaction_for(uc_id)
+
+    # required_domains groups the serving assets under their domain, with a
+    # per-domain satisfied flag. The drawer renders this grouped view for
+    # domain-path use cases so that an unlanded serving asset reads as "this domain
+    # is already covered by a sibling asset" rather than a broken N/N badge.
+    required_domains: list[dict] = []
+
+    # For each domain requirement, resolve its serving assets
+    for domain_req in domain_reqs:
+        domain_id = domain_req["domain_id"]
+        necessity = domain_req["necessity"]
+        domain_name = domain_req["domain_name"]
+        domain_label = domain_req["domain_label"]
+        rationale = domain_req["rationale"] or f"Required domain: {domain_label}"
+        # Satisfaction is only meaningful for REQUIRED domains (the ones the badge
+        # counts); default False for helpful so the flag is always present.
+        satisfied = bool(domain_satisfied_map.get(domain_id, False)) if necessity == "required" else False
+
+        # Find all assets that serve this domain. Per-account status is overlaid
+        # from the shared status_map below (same resolution as the domain 'satisfied'
+        # badge), NOT COALESCE'd to the shared da.ingestion_status column.
+        serving_assets = await db.fetch(
+            """SELECT da.*
+               FROM asset_serves_domain asd
+               JOIN data_assets da ON da.id = asd.data_asset_id
+               WHERE asd.domain_id = $1
+               ORDER BY da.source_system, da.module""",
+            domain_id,
+        )
+
+        grouped_assets: list[dict] = []
+
+        if serving_assets:
+            # Add each serving asset to the appropriate list (required/helpful)
+            for asset_row in serving_assets:
+                asset_dict = _overlay_status(dict(asset_row))
+                asset_dict["criticality"] = necessity
+                asset_dict["rationale"] = rationale
+                asset_dict["via_domain"] = True  # Mark as coming from domain path
+                asset_dict["domain_id"] = domain_id
+                asset_dict["domain_name"] = domain_name
+                asset_dict["domain_label"] = domain_label
+                # domain_covered: this asset's DOMAIN is already satisfied (by this
+                # or a sibling serving asset), so an unlanded status here is NOT a
+                # blocker. Drives the "domain covered" marker in the flat list.
+                asset_dict["domain_satisfied"] = satisfied
+
+                grouped_assets.append(asset_dict)
+
+                # Check if this asset is already in the list (from module path)
+                asset_id = asset_dict["id"]
+                already_present = any(a.get("id") == asset_id for a in (required_list if necessity == "required" else []))
+                already_present = already_present or any(a.get("id") == asset_id for a in (helpful_assets if necessity == "helpful" else []))
+
+                if not already_present:
+                    if necessity == "required":
+                        required_assets.append(asset_dict)
+                    else:
+                        helpful_assets.append(asset_dict)
+        else:
+            # No serving assets for this domain — surface the DOMAIN itself as a requirement
+            # so the user sees WHAT is required rather than an empty list
+            domain_item = {
+                "id": None,  # No asset id
+                "domain_id": domain_id,
+                "domain_name": domain_name,
+                "domain_label": domain_label,
+                "source_system": None,
+                "module": f"[Domain] {domain_label}",
+                "description": "Required data domain with no serving assets yet",
+                "criticality": necessity,
+                "rationale": rationale,
+                "ingestion_status": "not_started",
+                "is_domain_placeholder": True,  # Flag to help frontend render differently
+                "via_domain": True,
+                "domain_satisfied": satisfied,
+            }
+            grouped_assets.append(domain_item)
+            if necessity == "required":
+                required_assets.append(domain_item)
+            else:
+                helpful_assets.append(domain_item)
+
+        required_domains.append({
+            "domain_id": domain_id,
+            "domain_name": domain_name,
+            "domain_label": domain_label,
+            "necessity": necessity,
+            "satisfied": satisfied,
+            "rationale": rationale,
+            "assets": grouped_assets,
+        })
+
+
     if account_id is not None:
         values = await db.fetch(
             "SELECT * FROM value_records WHERE account_id=$1 AND use_case_id = $2 ORDER BY id",
@@ -383,6 +740,34 @@ async def get_use_case_detail(uc_id: int):
                WHERE account_id=$1 AND entity_type='use_case' AND entity_id=$2
                ORDER BY created_at""",
             account_id, uc_id)
+        # Fetch progression data (target go-live date + owner + event history)
+        progress_row = await db.fetchrow(
+            """SELECT target_go_live_date, owner, updated_at, updated_by
+               FROM account_use_case_progress
+               WHERE account_id=$1 AND use_case_id=$2""",
+            account_id, uc_id)
+        events = await db.fetch(
+            """SELECT id, event_type, from_value, to_value, note, created_by, created_at
+               FROM use_case_status_events
+               WHERE account_id=$1 AND use_case_id=$2
+               ORDER BY created_at DESC""",
+            account_id, uc_id)
+        # Compute at_risk flag: target in past and status not live/value_realized
+        at_risk = False
+        if progress_row and progress_row["target_go_live_date"]:
+            from datetime import date
+            target = progress_row["target_go_live_date"]
+            status = uc.get("status")
+            if target < date.today() and status not in {"live", "value_realized"}:
+                at_risk = True
+        progression = {
+            "target_go_live_date": progress_row["target_go_live_date"].isoformat() if progress_row and progress_row["target_go_live_date"] else None,
+            "owner": progress_row["owner"] if progress_row else None,
+            "updated_at": progress_row["updated_at"].isoformat() if progress_row and progress_row["updated_at"] else None,
+            "updated_by": progress_row["updated_by"] if progress_row else None,
+            "at_risk": at_risk,
+            "events": rows_to_list(events),
+        }
     else:
         values = await db.fetch(
             "SELECT * FROM value_records WHERE use_case_id = $1 ORDER BY id", uc_id,
@@ -391,14 +776,78 @@ async def get_use_case_detail(uc_id: int):
             "SELECT * FROM comments WHERE entity_type='use_case' AND entity_id=$1 ORDER BY created_at",
             uc_id,
         )
+        progression = {"target_go_live_date": None, "owner": None, "updated_at": None, "updated_by": None, "at_risk": False, "events": []}
     return {
         **uc,
-        "required_assets": rows_to_list(required),
+        "required_assets": required_assets,
+        "helpful_assets": helpful_assets,
+        "required_domains": required_domains,
         "enables": rows_to_list(enables),
         "enabled_by": rows_to_list(enabled_by),
         "value_records": rows_to_list(values),
         "comments": rows_to_list(comments),
+        "progression": progression,
     }
+
+
+@router.post("/{uc_id}/estimate-value", dependencies=[Depends(limiter("research"))])
+async def estimate_and_persist_value(uc_id: int, request: Request):
+    """
+    BUG 2 FIX: Generate and persist a value model for a use case.
+
+    Calls build_value_model (the same LLM-based logic used during generation)
+    and writes the result to hypothesized_value_json. This gives the drawer
+    an affordance to (re)generate a value model for use cases that have none
+    (or have an empty one), so the Calculate section is never blank.
+
+    Account-scoped via portfolio membership: the caller may only estimate/persist
+    for a use case VISIBLE to their account. There is NO `use_cases.account_id`
+    column; ownership of a non-catalog use case is membership in
+    `account_portfolio_use_cases`. So we scope with `portfolio.use_case_visibility`
+    (catalog OR in-this-account's portfolio) -- exactly like every other use-case
+    route -- and bind the current account into it. A use case that is not visible
+    (or does not exist) returns 404, never a bogus 403.
+
+    Rate-limited via the shared `research` limiter dependency on the route,
+    exactly like the sibling `/api/agents/estimate-value` endpoint.
+    """
+    from .agents import build_value_model
+
+    account_id = await accounts.current()
+    if account_id is None:
+        raise HTTPException(403, "No account selected")
+
+    # Fail closed via the visibility predicate: only fetch the use case if it is
+    # catalog OR in THIS account's portfolio. $1 = uc_id; the visibility predicate
+    # binds account_id as $2.
+    visibility, params = await portfolio.use_case_visibility("uc", param_index=2)
+    uc = await db.fetchrow(
+        f"""SELECT uc.id, uc.title, uc.description
+           FROM use_cases uc
+           WHERE uc.id = $1 AND {visibility}""",
+        uc_id, *params
+    )
+    if uc is None:
+        raise HTTPException(404, "Use case not found")
+
+    # Same LLM-based value model builder estimate_value uses. Rate-limiting is
+    # handled by the `research` limiter dependency on the route above.
+    value_model = await build_value_model(uc["title"], uc["description"])
+
+    # Persist the value model. hypothesized_value_json lives on the shared
+    # use_cases row (no account_id column); scoping was already enforced above.
+    await db.execute(
+        """UPDATE use_cases
+           SET hypothesized_value_json = $1::jsonb
+           WHERE id = $2""",
+        json.dumps(value_model), uc_id
+    )
+
+    await write_audit("use_case", uc_id, "estimate_value_persist", current_user(request), {
+        "component_count": len(value_model.get("components", [])),
+    })
+
+    return value_model
 
 
 @router.post("")
@@ -414,13 +863,15 @@ async def create_use_case(body: UseCaseIn, request: Request):
             effort_tshirt, priority_score, risk_tags, compliance_tags,
             hypothesized_value_json, realized_value_amount, realized_value_json,
             realized_override_enabled, realized_override_amount, realized_override_note,
+            hypothesized_override_enabled, hypothesized_override_amount, hypothesized_override_note,
             status_source, created_by, origin, in_portfolio)
            VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13::jsonb,$14,$15::jsonb,
-                   $16,$17,$18,$19,$20,'custom',true) RETURNING *""",
+                   $16,$17,$18,$19,$20,$21,$22,$23,'custom',true) RETURNING *""",
         body.title, body.description, body.lob_id, body.sub_vertical, body.stage,
         1, body.status, body.category, body.effort_tshirt, body.priority_score,  # phase derived (no prereqs yet)
         body.risk_tags, body.compliance_tags, hv, body.realized_value_amount, rvj,
         body.realized_override_enabled, body.realized_override_amount, body.realized_override_note,
+        body.hypothesized_override_enabled, body.hypothesized_override_amount, body.hypothesized_override_note,
         body.status_source, actor,
     )
     if row is None:
@@ -451,15 +902,33 @@ async def update_use_case(uc_id: int, body: UseCaseIn, request: Request):
            realized_value_amount=$13,
            realized_value_json=COALESCE($14::jsonb, realized_value_json),
            realized_override_enabled=$15, realized_override_amount=$16,
-           realized_override_note=$17, status_source=$18, updated_at=now()
-           WHERE id=$19 RETURNING *""",  # phase is DERIVED (not client-settable)
+           realized_override_note=$17,
+           hypothesized_override_enabled=$18, hypothesized_override_amount=$19,
+           hypothesized_override_note=$20, status_source=$21, updated_at=now()
+           WHERE id=$22 RETURNING *""",  # phase is DERIVED (not client-settable)
         body.title, body.description, body.lob_id, body.sub_vertical, body.stage,
         body.status, body.category, body.effort_tshirt, body.priority_score,
         body.risk_tags, body.compliance_tags, hv, body.realized_value_amount, rvj,
         body.realized_override_enabled, body.realized_override_amount, body.realized_override_note,
+        body.hypothesized_override_enabled, body.hypothesized_override_amount, body.hypothesized_override_note,
         body.status_source, uc_id,
     )
+    if row is None:
+        raise HTTPException(503, "Database unavailable")
     await write_audit("use_case", uc_id, "update", actor, {"title": body.title, "status": body.status})
+
+    # A value OVERRIDE (manual hypothesized/realized figure) supersedes the computed
+    # value, so it is a sensitive edit that must be attributable on its own — record
+    # a dedicated audit row whenever an override is toggled on / set on this update.
+    if body.hypothesized_override_enabled or body.realized_override_enabled:
+        await write_audit("use_case", uc_id, "value_override", actor, {
+            "hypothesized_override_enabled": body.hypothesized_override_enabled,
+            "hypothesized_override_amount": body.hypothesized_override_amount,
+            "hypothesized_override_note": body.hypothesized_override_note,
+            "realized_override_enabled": body.realized_override_enabled,
+            "realized_override_amount": body.realized_override_amount,
+            "realized_override_note": body.realized_override_note,
+        })
 
     # Addition A: delivering a use case implies its required data has landed.
     delivered = {"live", "value_realized"}
@@ -505,6 +974,8 @@ async def change_status(uc_id: int, body: StatusChange, request: Request):
         "UPDATE use_cases SET status=$1, updated_at=now() WHERE id=$2 RETURNING *",
         target, uc_id,
     )
+    if row is None:
+        raise HTTPException(503, "Database unavailable")
     await write_audit("use_case", uc_id, "status_change", actor,
                       {"from": prev_status, "to": target,
                        "via": "advance" if body.advance else "inline"})
@@ -586,6 +1057,209 @@ async def _capture_delivered_assets(uc_id: int, uc_title: str) -> None:
             )
             await write_audit("data_asset", r["id"], "auto_landed", "system",
                               {"reason": note, "from": "not_started", "to": "landed"})
+
+
+class ProgressionTargetDate(BaseModel):
+    target_go_live_date: str | None  # ISO date string or null to clear
+    reason: str | None = None  # Required when moving date later (slippage)
+
+
+class ProgressionNote(BaseModel):
+    note: str
+
+
+class ProgressionOwner(BaseModel):
+    # The per-account owner/assignee (email or display name). Null/empty clears it.
+    owner: str | None = None
+
+
+@router.get("/{uc_id}/progression")
+async def get_progression(uc_id: int):
+    """Get the progression data for a use case (target date + event history)."""
+    exists = await db.fetchrow("SELECT 1 FROM use_cases WHERE id=$1", uc_id)
+    if exists is None:
+        raise HTTPException(404, "Use case not found")
+
+    account_id = await accounts.current()
+    if account_id is None:
+        return {"target_go_live_date": None, "owner": None, "updated_at": None, "updated_by": None, "at_risk": False, "events": []}
+
+    progress_row = await db.fetchrow(
+        """SELECT target_go_live_date, owner, updated_at, updated_by
+           FROM account_use_case_progress
+           WHERE account_id=$1 AND use_case_id=$2""",
+        account_id, uc_id)
+    events = await db.fetch(
+        """SELECT id, event_type, from_value, to_value, note, created_by, created_at
+           FROM use_case_status_events
+           WHERE account_id=$1 AND use_case_id=$2
+           ORDER BY created_at DESC""",
+        account_id, uc_id)
+
+    # Compute at_risk flag
+    at_risk = False
+    if progress_row and progress_row["target_go_live_date"]:
+        from datetime import date
+        target = progress_row["target_go_live_date"]
+        uc_row = await db.fetchrow("SELECT status FROM use_cases WHERE id=$1", uc_id)
+        status = uc_row["status"] if uc_row else None
+        if target < date.today() and status not in {"live", "value_realized"}:
+            at_risk = True
+
+    return {
+        "target_go_live_date": progress_row["target_go_live_date"].isoformat() if progress_row and progress_row["target_go_live_date"] else None,
+        "owner": progress_row["owner"] if progress_row else None,
+        "updated_at": progress_row["updated_at"].isoformat() if progress_row and progress_row["updated_at"] else None,
+        "updated_by": progress_row["updated_by"] if progress_row else None,
+        "at_risk": at_risk,
+        "events": rows_to_list(events),
+    }
+
+
+@router.put("/{uc_id}/progression/target-date")
+async def set_target_date(uc_id: int, body: ProgressionTargetDate, request: Request):
+    """Set or update the target go-live date for a use case. Records slippage events when date moves later."""
+    exists = await db.fetchrow("SELECT 1 FROM use_cases WHERE id=$1", uc_id)
+    if exists is None:
+        raise HTTPException(404, "Use case not found")
+
+    account_id = await accounts.current()
+    if account_id is None:
+        raise HTTPException(403, "Account required for progression tracking")
+
+    actor = current_user(request)
+
+    # Parse the new target date
+    from datetime import date as date_type
+    new_date: date_type | None = None
+    if body.target_go_live_date:
+        try:
+            new_date = date_type.fromisoformat(body.target_go_live_date)
+        except ValueError:
+            raise HTTPException(422, "Invalid date format; use ISO YYYY-MM-DD")
+
+    # Fetch current progress
+    prev_row = await db.fetchrow(
+        "SELECT target_go_live_date FROM account_use_case_progress WHERE account_id=$1 AND use_case_id=$2",
+        account_id, uc_id)
+    prev_date = prev_row["target_go_live_date"] if prev_row else None
+
+    # Determine event type and validate
+    if prev_date is None and new_date is not None:
+        event_type = "date_set"
+        from_value = None
+        to_value = new_date.isoformat()
+    elif prev_date is not None and new_date is None:
+        event_type = "date_cleared"
+        from_value = prev_date.isoformat()
+        to_value = None
+    elif prev_date is not None and new_date is not None and prev_date != new_date:
+        event_type = "date_change"
+        from_value = prev_date.isoformat()
+        to_value = new_date.isoformat()
+        # SLIPPAGE: when date moves LATER, require a reason
+        if new_date > prev_date and not body.reason:
+            raise HTTPException(422, "Reason required when target date moves later (slippage)")
+    else:
+        # No change
+        return await get_progression(uc_id)
+
+    # Upsert progress row
+    await db.execute(
+        """INSERT INTO account_use_case_progress (account_id, use_case_id, target_go_live_date, updated_at, updated_by)
+           VALUES ($1, $2, $3, now(), $4)
+           ON CONFLICT (account_id, use_case_id)
+           DO UPDATE SET target_go_live_date=$3, updated_at=now(), updated_by=$4""",
+        account_id, uc_id, new_date, actor)
+
+    # Record the event
+    await db.execute(
+        """INSERT INTO use_case_status_events
+           (account_id, use_case_id, event_type, from_value, to_value, note, created_by, created_at)
+           VALUES ($1, $2, $3, $4, $5, $6, $7, now())""",
+        account_id, uc_id, event_type, from_value, to_value, body.reason, actor)
+
+    await write_audit("use_case", uc_id, "progression_date", actor,
+                      {"event_type": event_type, "from": from_value, "to": to_value, "reason": body.reason})
+
+    return await get_progression(uc_id)
+
+
+@router.post("/{uc_id}/progression/note")
+async def add_progression_note(uc_id: int, body: ProgressionNote, request: Request):
+    """Add a free-text note to the progression history."""
+    exists = await db.fetchrow("SELECT 1 FROM use_cases WHERE id=$1", uc_id)
+    if exists is None:
+        raise HTTPException(404, "Use case not found")
+
+    account_id = await accounts.current()
+    if account_id is None:
+        raise HTTPException(403, "Account required for progression tracking")
+
+    actor = current_user(request)
+
+    if not body.note or not body.note.strip():
+        raise HTTPException(422, "Note cannot be empty")
+
+    await db.execute(
+        """INSERT INTO use_case_status_events
+           (account_id, use_case_id, event_type, from_value, to_value, note, created_by, created_at)
+           VALUES ($1, $2, 'note', NULL, NULL, $3, $4, now())""",
+        account_id, uc_id, body.note.strip(), actor)
+
+    await write_audit("use_case", uc_id, "progression_note", actor, {"note": body.note.strip()})
+
+    return await get_progression(uc_id)
+
+
+@router.put("/{uc_id}/owner")
+async def set_owner(uc_id: int, body: ProgressionOwner, request: Request):
+    """Set (or clear) the per-account owner/assignee for a use case.
+
+    Ownership is ACCOUNT-SCOPED: it upserts into `account_use_case_progress`
+    (keyed by (account_id, use_case_id)), so the same catalog use case can carry a
+    different owner in each account's portfolio. Scoped through
+    `portfolio.use_case_visibility` and FAILS CLOSED: a use case that is neither a
+    shared catalog entry nor in THIS account's portfolio 404s, exactly as if it did
+    not exist — never leak another tenant's use case by letting the caller assign it.
+    """
+    account_id = await accounts.current()
+    if account_id is None:
+        raise HTTPException(403, "Account required to assign an owner")
+
+    # Portfolio-scoped existence check: catalog OR in this account's portfolio.
+    # $1 = uc_id, $2 = account_id (bound by the visibility predicate at param_index=2).
+    visibility, params = await portfolio.use_case_visibility("uc", param_index=2)
+    exists = await db.fetchrow(
+        f"SELECT 1 FROM use_cases uc WHERE uc.id=$1 AND {visibility}",
+        uc_id, *params)
+    if exists is None:
+        # Fail closed: out-of-portfolio (or missing) use case is indistinguishable.
+        raise HTTPException(404, "Use case not found")
+
+    actor = current_user(request)
+
+    # Normalise: blank/whitespace-only clears the owner.
+    new_owner = (body.owner or "").strip() or None
+
+    prev_row = await db.fetchrow(
+        "SELECT owner FROM account_use_case_progress WHERE account_id=$1 AND use_case_id=$2",
+        account_id, uc_id)
+    prev_owner = prev_row["owner"] if prev_row else None
+
+    # Upsert the owner without disturbing the target date on an existing row.
+    await db.execute(
+        """INSERT INTO account_use_case_progress (account_id, use_case_id, owner, updated_at, updated_by)
+           VALUES ($1, $2, $3, now(), $4)
+           ON CONFLICT (account_id, use_case_id)
+           DO UPDATE SET owner=$3, updated_at=now(), updated_by=$4""",
+        account_id, uc_id, new_owner, actor)
+
+    if prev_owner != new_owner:
+        await write_audit("use_case", uc_id, "owner_change", actor,
+                          {"from": prev_owner, "to": new_owner})
+
+    return await get_progression(uc_id)
 
 
 @router.delete("/{uc_id}")
